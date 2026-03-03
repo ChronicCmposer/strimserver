@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+aws ec2 describe-instances | jq -r .Reservations.[$1].Instances.[0].NetworkInterfaces.[0].Association.PublicIp
+

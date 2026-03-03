@@ -1,0 +1,361 @@
+# vim: set ft=yaml :
+
+###############################################
+# Global settings
+
+# Settings in this section are applied anywhere.
+
+###############################################
+# Global settings -> General
+
+# Verbosity of the program; available values are "error", "warn", "info", "debug".
+logLevel: debug 
+# Destinations of log messages; available values are "stdout", "file" and "syslog".
+logDestinations: [stdout]
+# When destination is "stdout" or "file", emit logs in structured format (JSONL).
+logStructured: no
+# When "file" is in logDestinations, this is the file which will receive logs.
+# logFile: mediamtx.log
+# When "syslog" is in logDestinations, use prefix for logs.
+# sysLogPrefix: mediamtx
+# Size of the queue of outgoing packets.
+# A higher value allows to increase throughput, a lower value allows to save RAM.
+writeQueueSize: 2048
+
+###############################################
+# Global settings -> SRT server
+
+# Enable publishing and reading streams with the SRT protocol.
+srt: yes
+# Address of the SRT listener.
+srtAddress: :9000
+
+###############################################
+# Global settings -> RTSP server
+
+# Enable publishing and reading streams with the RTSP protocol.
+rtsp: no 
+# Enabled RTSP transport protocols. The handshake is always performed with TCP.
+# rtspTransports: [tcp]
+# Use secure protocol variants (RTSPS, SRTP, SRTCP).
+# Available values are "no", "strict", "optional".
+# rtspEncryption: "no"
+# Address of the TCP/RTSP listener. This is needed only when encryption is "no" or "optional".
+# rtspAddress: :8554
+
+###############################################
+# Global settings -> RTMP server
+
+# Enable publishing and reading streams with the RTMP protocol.
+rtmp: true
+# Use the secure protocol variant (RTMP).
+# Available values are "no", "strict", "optional".
+rtmpEncryption: "no"
+# Address of the RTMP listener. This is needed only when encryption is "no" or "optional".
+rtmpAddress: :1935
+# Address of the RTMPS listener. This is needed only when encryption is "strict" or "optional".
+# rtmpsAddress: :1936
+# Path to the server key. This is needed only when encryption is "strict" or "optional".
+# This can be generated with:
+# openssl genrsa -out server.key 2048
+# openssl req -new -x509 -sha256 -key server.key -out server.crt -days 3650
+# rtmpServerKey: server.key
+# Path to the server certificate. This is needed only when encryption is "strict" or "optional".
+# rtmpServerCert: server.crt
+
+###############################################
+# Global settings -> HLS server
+
+# Enable reading streams with the HLS protocol.
+hls: no
+
+###############################################
+# Global settings -> WebRTC server
+
+# Enable publishing and reading streams with the WebRTC protocol.
+webrtc: no
+
+###############################################
+# Default path settings
+
+# Settings in "pathDefaults" are applied anywhere,
+# unless they are overridden in "paths".
+pathDefaults:
+
+  ###############################################
+  # Default path settings -> General
+
+  # Source of the stream. This can be:
+  # * publisher -> the stream is provided by a RTSP, RTMP, WebRTC or SRT client
+  # * rtsp://existing-url -> the stream is pulled from another RTSP server / camera
+  # * rtsps://existing-url -> the stream is pulled from another RTSP server / camera with RTSPS
+  # * rtsp+http://existing-url -> the stream is pulled from another RTSP server / camera, with HTTP tunneling
+  # * rtsps+http://existing-url -> the stream is pulled from another RTSP server / camera, with HTTPS tunneling
+  # * rtsp+ws://existing-url -> the stream is pulled from another RTSP server / camera, with WebSocket tunneling
+  # * rtsps+ws://existing-url -> the stream is pulled from another RTSP server / camera, with secure WebSocket tunneling
+  # * rtmp://existing-url -> the stream is pulled from another RTMP server / camera
+  # * rtmps://existing-url -> the stream is pulled from another RTMP server / camera with RTMPS
+  # * http://existing-url/stream.m3u8 -> the stream is pulled from another HLS server / camera
+  # * https://existing-url/stream.m3u8 -> the stream is pulled from another HLS server / camera with HTTPS
+  # * udp+mpegts://ip:port -> the stream is pulled from MPEG-TS over UDP, by listening on the specified address
+  # * unix+mpegts://socket -> the stream is pulled from MPEG-TS over Unix socket, by using the socket
+  # * udp+rtp://ip:port -> the stream is pulled from RTP over UDP, by listening on the specified address
+  # * unix+rtp://socket -> the stream is pulled from RTP over Unix socket, by using the socket
+  # * srt://existing-url -> the stream is pulled from another SRT server / camera
+  # * whep://existing-url -> the stream is pulled from another WebRTC server / camera
+  # * wheps://existing-url -> the stream is pulled from another WebRTC server / camera with HTTPS
+  # * redirect -> the stream is provided by another path or server
+  # * rpiCamera -> the stream is provided by a Raspberry Pi Camera
+  # The following variables can be used in the source string:
+  # * $MTX_QUERY: query parameters (passed by first reader)
+  # * $G1, $G2, ...: regular expression groups, if path name is
+  #   a regular expression.
+  source: publisher
+  # If the source is a URL, and the source TLS certificate is self-signed
+  # or invalid, you can provide the fingerprint of the certificate in order to
+  # validate it anyway. It can be obtained by running:
+  # openssl s_client -connect source_ip:source_port </dev/null 2>/dev/null | sed -n '/BEGIN/,/END/p' > server.crt
+  # openssl x509 -in server.crt -noout -fingerprint -sha256 | cut -d "=" -f2 | tr -d ':'
+  sourceFingerprint:
+  # If the source is a URL, it will be pulled only when at least
+  # one reader is connected, saving bandwidth.
+  sourceOnDemand: no
+  # If sourceOnDemand is "yes", readers will be put on hold until the source is
+  # ready or until this amount of time has passed.
+  sourceOnDemandStartTimeout: 10s
+  # If sourceOnDemand is "yes", the source will be closed when there are no
+  # readers connected and this amount of time has passed.
+  sourceOnDemandCloseAfter: 10s
+  # Maximum number of readers. Zero means no limit.
+  maxReaders: 0
+  # SRT encryption passphrase required to read from this path.
+  srtReadPassphrase:
+  # Use absolute timestamp of frames, instead of replacing them with the current time.
+  useAbsoluteTimestamp: false
+
+  ###############################################
+  # Default path settings -> Always available
+
+  # Enable always-available mode, in which a offline segment is played on repeat when the stream is not available.
+  alwaysAvailable: false
+  # An MP4 file can be used instead of the default offline segment.
+  alwaysAvailableFile: ''
+  # Tracks of the default offline segment.
+  alwaysAvailableTracks:
+    # Available values are: AV1, VP9, H265, H264, Opus, MPEG4Audio, G711, LPCM
+    - codec: H264
+      # in case of MPEG4Audio, G711, LPCM, sampleRate and ChannelCount must be provided too.
+      #  sampleRate: 48000
+      #  channelCount: 2
+      #  in case of G711, muLaw must be provided too.
+      #  muLaw: false
+
+  ###############################################
+  # Default path settings -> Record
+
+  # Record streams to disk.
+  record: yes
+  # Path of recording segments.
+  # Extension is added automatically.
+  # Available variables are %path (path name), %Y %m %d (year, month, day),
+  # %H %M %S (hours, minutes, seconds), %f (microseconds), %z (time zone), %s (unix epoch).
+  recordPath: ./opt/video-files/%Y-%m-%d_%H-%M-%S-%f
+  # Format of recorded segments.
+  # Available formats are "fmp4" (fragmented MP4) and "mpegts" (MPEG-TS).
+  recordFormat: mpegts
+  # fMP4 segments are concatenation of small MP4 files (parts), each with this duration.
+  # MPEG-TS segments are concatenation of 188-bytes packets, flushed to disk with this period.
+  # When a system failure occurs, the last part gets lost.
+  # Therefore, the part duration is equal to the RPO (recovery point objective).
+  recordPartDuration: 10s
+  # This prevents RAM exhaustion.
+  recordMaxPartSize: 50M
+  # Minimum duration of each segment.
+  recordSegmentDuration: 1h
+  # Delete segments after this timespan.
+  # Set to 0s to disable automatic deletion.
+  recordDeleteAfter: 0s
+
+  ###############################################
+  # Default path settings -> Publisher source (when source is "publisher")
+
+  # Allow another client to disconnect the current publisher and publish in its place.
+  overridePublisher: yes
+  # SRT encryption passphrase required to publish to this path.
+  srtPublishPassphrase:
+
+  ###############################################
+  # Default path settings -> RTSP source (when source is a RTSP or a RTSPS URL)
+
+  # Transport protocol used to pull the stream. available values are "automatic", "udp", "multicast", "tcp".
+  rtspTransport: automatic
+  # Support sources that don't provide server ports or use random server ports. This is a security issue
+  # and must be used only when interacting with sources that require it.
+  rtspAnyPort: no
+  # Range header to send to the source, in order to start streaming from the specified offset.
+  # available values:
+  # * clock: Absolute time
+  # * npt: Normal Play Time
+  # * smpte: SMPTE timestamps relative to the start of the recording
+  rtspRangeType:
+  # Available values:
+  # * clock: UTC ISO 8601 combined date and time string, e.g. 20230812T120000Z
+  # * npt: duration such as "300ms", "1.5m" or "2h45m", valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h"
+  # * smpte: duration such as "300ms", "1.5m" or "2h45m", valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h"
+  rtspRangeStart:
+  # Range of ports used as source port in outgoing UDP packets.
+  rtspUDPSourcePortRange: [10000, 65535]
+
+  ###############################################
+  # Default path settings -> RTP source (when source is RTP)
+
+  # session description protocol (SDP) of the RTP stream.
+  rtpSDP:
+
+  ###############################################
+  # Default path settings -> Redirect source (when source is "redirect")
+
+  # path which clients will be redirected to.
+  # It can be can be a relative path (i.e. /otherstream) or an absolute RTSP URL.
+  sourceRedirect:
+
+  ###############################################
+  # Default path settings -> Hooks
+
+  # Command to run when this path is initialized.
+  # This can be used to publish a stream when the server is launched.
+  # This is terminated with SIGINT when the program closes.
+  # The following environment variables are available:
+  # * MTX_PATH: path name
+  # * RTSP_PORT: RTSP server port
+  # * G1, G2, ...: regular expression groups, if path name is
+  #   a regular expression.
+  runOnInit:
+  # Restart the command if it exits.
+  runOnInitRestart: no
+
+  # Command to run when this path is requested by a reader
+  # and no one is publishing to this path yet.
+  # This can be used to publish a stream on demand.
+  # This is terminated with SIGINT when there are no readers anymore.
+  # The following environment variables are available:
+  # * MTX_PATH: path name
+  # * MTX_QUERY: query parameters (passed by first reader)
+  # * RTSP_PORT: RTSP server port
+  # * G1, G2, ...: regular expression groups, if path name is
+  #   a regular expression.
+  runOnDemand:
+  # Restart the command if it exits.
+  runOnDemandRestart: no
+  # Readers will be put on hold until the runOnDemand command starts publishing
+  # or until this amount of time has passed.
+  runOnDemandStartTimeout: 10s
+  # The command will be closed when there are no
+  # readers connected and this amount of time has passed.
+  runOnDemandCloseAfter: 10s
+  # Command to run when there are no readers anymore.
+  # Environment variables are the same of runOnDemand.
+  runOnUnDemand:
+
+  # Command to run when the stream is ready to be read, whenever it is
+  # published by a client or pulled from a server / camera.
+  # This is terminated with SIGINT when the stream is not ready anymore.
+  # The following environment variables are available:
+  # * MTX_PATH: path name
+  # * MTX_QUERY: query parameters (passed by publisher)
+  # * MTX_SOURCE_TYPE: source type
+  # * MTX_SOURCE_ID: source ID
+  # * RTSP_PORT: RTSP server port
+  # * G1, G2, ...: regular expression groups, if path name is
+  #   a regular expression.
+  runOnReady:
+  # Restart the command if it exits.
+  runOnReadyRestart: no
+  # Command to run when the stream is not available anymore.
+  # Environment variables are the same of runOnReady.
+  runOnNotReady:
+
+  # Command to run when a client starts reading.
+  # This is terminated with SIGINT when a client stops reading.
+  # The following environment variables are available:
+  # * MTX_PATH: path name
+  # * MTX_QUERY: query parameters (passed by reader)
+  # * MTX_READER_TYPE: reader type
+  # * MTX_READER_ID: reader ID
+  # * RTSP_PORT: RTSP server port
+  # * G1, G2, ...: regular expression groups, if path name is
+  #   a regular expression.
+  runOnRead:
+  # Restart the command if it exits.
+  runOnReadRestart: no
+  # Command to run when a client stops reading.
+  # Environment variables are the same of runOnRead.
+  runOnUnread:
+
+  # Command to run when a recording segment is created.
+  # The following environment variables are available:
+  # * MTX_PATH: path name
+  # * MTX_SEGMENT_PATH: segment file path
+  # * RTSP_PORT: RTSP server port
+  # * G1, G2, ...: regular expression groups, if path name is
+  #   a regular expression.
+  runOnRecordSegmentCreate:
+
+  # Command to run when a recording segment is complete.
+  # The following environment variables are available:
+  # * MTX_PATH: path name
+  # * MTX_SEGMENT_PATH: segment file path
+  # * MTX_SEGMENT_DURATION: segment duration
+  # * RTSP_PORT: RTSP server port
+  # * G1, G2, ...: regular expression groups, if path name is
+  #   a regular expression.
+  runOnRecordSegmentComplete:
+
+###############################################
+# Path settings
+
+# Settings in "paths" are applied to specific paths, and the map key
+# is the name of the path.
+# Any setting in "pathDefaults" can be overridden here.
+# It's possible to use regular expressions by using a tilde as prefix,
+# for example "~^(test1|test2)$" will match both "test1" and "test2",
+# for example "~^prefix" will match all paths that start with "prefix".
+paths:
+  # example:
+  # my_camera:
+  #   source: rtsp://my_camera
+  
+  macbook_encoder:
+    source: publisher 
+    maxReaders: 1 
+    srtPublishPassphrase: ${SRT_READ_PASSPHRASE}
+    runOnReady: "/opt/egress-ffmpeg.sh"
+    record: yes
+    # Path of recording segments.
+    # Extension is added automatically.
+    # Available variables are %path (path name), %Y %m %d (year, month, day),
+    # %H %M %S (hours, minutes, seconds), %f (microseconds), %z (time zone), %s (unix epoch).
+    recordPath: ./opt/video-files/%Y-%m-%d_%H-%M-%S-%f
+    # Format of recorded segments.
+    # Available formats are "fmp4" (fragmented MP4) and "mpegts" (MPEG-TS).
+    recordFormat: mpegts
+    # fMP4 segments are concatenation of small MP4 files (parts), each with this duration.
+    # MPEG-TS segments are concatenation of 188-bytes packets, flushed to disk with this period.
+    # When a system failure occurs, the last part gets lost.
+    # Therefore, the part duration is equal to the RPO (recovery point objective).
+    recordPartDuration: 10s
+    # This prevents RAM exhaustion.
+    recordMaxPartSize: 50M
+    # Minimum duration of each segment.
+    recordSegmentDuration: 1h
+    # Delete segments after this timespan.
+    # Set to 0s to disable automatic deletion.
+    recordDeleteAfter: 0s
+    # Settings under path "all_others" are applied to all paths that
+    # do not match another entry.
+  all_others:
+
+
+
+
+

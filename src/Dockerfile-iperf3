@@ -1,0 +1,18 @@
+# vim: set ft=dockerfile :
+
+FROM alpine:3.23.3
+
+
+ARG IPERF3_VERSION="3.19.1-r1"
+
+RUN apk add \
+   iperf3="$IPERF3_VERSION" \
+   fish
+
+COPY iperf3-entrypoint.sh /opt/iperf3-entrypoint.sh
+COPY iperf3.env /opt/iperf3.env
+
+
+RUN chmod +x /opt/iperf3-entrypoint.sh
+
+ENTRYPOINT [ "/opt/iperf3-entrypoint.sh" ] 

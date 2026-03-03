@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+
+# def run_ssh_commands(hostname, username, commands):
+def ssh_run(hostname, username, cmd, capture=False):
+    ssh_cmd = os.environ.get("SSH_CMD", "ssh")
+    # for cmd in commands:
+    full_cmd = (
+        ssh_cmd.split() + [
+            "-t",  # allocate a TTY so sudo can run without prompting
+            f"{username}@{hostname}",
+            cmd
+        ]
+    )
+    print(f"\n>>> Running: {cmd}")
+    try:
+        result = subprocess.run(
+            full_cmd,
+            text=True,
+            check=True,
+            capture_output=capture
+        )
+    except FileNotFoundError:
+        print("Error: ssh client not found. Make sure OpenSSH is installed.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[exit status: {result.returncode}]")
+    # if result.stdout:
+    #     print("--- STDOUT ---")
+    #     print(result.stdout.strip())
+    # if result.stderr:
+    #     print("--- STDERR ---")
+    #     print(result.stderr.strip())
+
+    return result
+
+def run_ssh_commands(hostname, username, commands):
+    for cmd in commands:
+        ssh_run(hostname, username, cmd, capture=False)
+
+if __name__ == "__main__":
+    HOST = os.environ.get("SSH_HOST", default="strimserver")
+    USER = os.environ.get("SSH_USER", default="ec2-user")
+    S3_BUCKET = os.environ.get("S3_BUCKET", default="s3://<bucket-name>")
+    DEPLOYMENT = os.environ.get("DEPLOYMENT", default="strimserver-deployment.tar")
+
+    # select nvme drive
+    r = ssh_run(HOST, USER, "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT", capture=True)
+    print("\nRemote disks:\n")
+    print(r.stdout)
+    dev = input("Enter the device to format [/dev/nvme1n1]: ").strip()
+    dev = dev or "/dev/nvme1n1" # default value
+    if not dev.startswith("/dev/"):
+         dev = "/dev/" + dev
+
+
+    CMDS = [
+
+        # nvme ephemeral storage
+        f"sudo mkfs.ext4 -F {dev}",
+        "sudo mkdir -p /mnt/nvme",
+        f"sudo mount {dev} /mnt/nvme",
+        "sudo chown ec2-user:ec2-user /mnt/nvme",
+        
+        # A1111 insecure extensions var
+        # f"printf \"A1111_INSECURE_EXTENSIONS={A1111_INSECURE_EXTENSIONS}\n\n\"| sudo tee /mnt/nvme/A1111-env",
+        f"aws s3 cp {S3_BUCKET}/{DEPLOYMENT} /mnt/nvme/",
+        f"cd /mnt/nvme && tar -xvf {DEPLOYMENT}",
+        f"cd /mnt/nvme && rm -rf {DEPLOYMENT}",
+        "cd /mnt/nvme && chmod +x deploy.sh",
+        "cd /mnt/nvme && ./deploy.sh",
+
+    ]
+
+    run_ssh_commands(HOST, USER, CMDS)

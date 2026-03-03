@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+import subprocess
+import json
+import sys
+
+LAUNCH_TEMPLATE_NAMES = [
+    "sd-exp-deployment",
+    "sd-experiment-no-spot",
+]
+
+def get_running_instances():
+
+    # Get LT ID's from LT's
+    lt_ids_text = subprocess.check_output(
+        [
+            "aws", "ec2", "describe-launch-templates",
+            "--launch-template-names", *LAUNCH_TEMPLATE_NAMES,
+            "--query", "LaunchTemplates[].LaunchTemplateId",
+            "--output", "text",
+        ],
+        text=True,
+    ).strip()
+
+    if not lt_ids_text or lt_ids_text == "None":
+        print("No launch templates found for: " + ", ".join(LAUNCH_TEMPLATE_NAMES), file=sys.stderr)
+        sys.exit(1)
+
+    lt_ids_csv = ",".join(lt_ids_text.split())
+
+    # Get running instance ID's from LT ID's
+    instance_ids_text = subprocess.check_output(
+        [
+            "aws", "ec2", "describe-instances",
+            "--filters",
+            "Name=instance-state-name,Values=running",
+            f"Name=tag:aws:ec2launchtemplate:id,Values={lt_ids_csv}",
+            "--query", "Reservations[].Instances[].InstanceId",
+            "--output", "text",
+        ],
+        text=True,
+    ).strip()
+
+    if not instance_ids_text or instance_ids_text == "None":
+        print("No running instances found for: " + ", ".join(LAUNCH_TEMPLATE_NAMES))
+        sys.exit(0)
+
+    return instance_ids_text.split()
+
+def terminate_instances(instance_ids):
+    cmd = ["aws", "ec2", "terminate-instances", "--instance-ids"] + instance_ids
+    subprocess.run(cmd, check=True)
+
+def main():
+    instance_ids = get_running_instances()
+    if not instance_ids:
+        print("No running instances found.")
+        sys.exit(0)
+
+    print(f"Terminating instances: {', '.join(instance_ids)}")
+    terminate_instances(instance_ids)
+    subprocess.run(["date"], check=True)
+    print("Termination initiated.")
+
+if __name__ == "__main__":
+    main()

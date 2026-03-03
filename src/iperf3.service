@@ -1,0 +1,24 @@
+[Unit]
+Description=iperf3 Container
+After=network.target containerd.service
+Wants=containerd.service
+
+[Service]
+Type=simple
+User=root
+
+# before starting, kill & delete any leftover container/task
+ExecStartPre=-/usr/bin/ctr tasks kill --signal SIGKILL iperf3
+ExecStartPre=-/usr/bin/ctr containers delete iperf3
+ExecStart=/usr/bin/ctr run --net-host \
+  --mount type=bind,src=/mnt/nvme/iperf3.env,dst=/opt/iperf3.env,options=rbind:rw \
+  docker.io/library/iperf3:latest iperf3
+
+# on stop, terminate task, then delete container
+ExecStop=/usr/bin/ctr tasks kill --signal SIGTERM iperf3
+ExecStopPost=-/usr/bin/ctr containers delete iperf3
+
+
+[Install]
+WantedBy=multi-user.target
+

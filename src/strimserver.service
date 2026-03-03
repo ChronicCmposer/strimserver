@@ -1,0 +1,26 @@
+[Unit]
+Description=Strimserver Container
+After=network.target containerd.service
+Wants=containerd.service
+
+[Service]
+Type=simple
+User=root
+
+# before starting, kill & delete any leftover container/task
+ExecStartPre=-/usr/bin/ctr tasks kill --signal SIGKILL strimserver
+ExecStartPre=-/usr/bin/ctr containers delete strimserver
+ExecStart=/usr/bin/ctr run --net-host --gpus 0 \
+  --mount type=bind,src=/mnt/nvme/strimserver.env,dst=/opt/strimserver.env,options=rbind:rw \
+  --mount type=bind,src=/mnt/nvme/srt-passphrase,dst=/run/secrets/srt-passphrase,options=rbind:rw \
+  --mount type=bind,src=/mnt/nvme/video-files,dst=/opt/video-files,options=rbind:rw \
+  docker.io/library/strimserver:latest strimserver
+
+# on stop, terminate task, then delete container
+ExecStop=/usr/bin/ctr tasks kill --signal SIGTERM strimserver
+ExecStopPost=-/usr/bin/ctr containers delete strimserver
+
+
+[Install]
+WantedBy=multi-user.target
+

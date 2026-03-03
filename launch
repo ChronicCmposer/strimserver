@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+import subprocess
+import argparse
+
+def launch_instance(instance_type=None, no_spot=False):
+
+    if no_spot:
+        launch_template_name = "sd-experiment-no-spot"
+    else:
+        launch_template_name = "sd-exp-deployment"
+
+    command = [
+        "aws", "ec2", "run-instances",
+        "--launch-template", f"LaunchTemplateName={launch_template_name}"
+    ]
+
+    if instance_type:
+        command.extend(["--instance-type", instance_type])
+
+    try:        # start the aws process, capturing its stdout
+        aws_proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        # pipe that stdout into jq
+        jq_proc = subprocess.Popen(
+            ["jq", "."],
+            stdin=aws_proc.stdout,
+            text=True
+        )
+
+        # close aws_proc stdout in parent so jq gets EOF
+        aws_proc.stdout.close() 
+
+        # wait for jq to finish (and aws if it hasn’t already)
+        jq_proc.communicate()
+        rc = aws_proc.wait()
+        if rc != 0:
+            err = aws_proc.stderr.read().strip()
+            print(f"An error occurred: {err}")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred: {e.stderr}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--type', default='g4dn.xlarge', help='Specify EC2 instance type')
+    parser.add_argument('--no-spot', action='store_true', help='Specify EC2 instance type')
+    args = parser.parse_args()
+
+    launch_instance(instance_type=args.type, no_spot=args.no_spot)
