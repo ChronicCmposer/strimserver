@@ -63,7 +63,8 @@ $(STRIMSERVER_DEPLOYMENT_TAR): \
    prompt_login.fish \
    strimserver.service \
    strimserver.env
-	tar -cvf $@ --warning=no-file-changed \
+	tar -cvf $@ \
+		--ignore-failed-read --warning=all --show-transformed-names \
 		deploy.sh \
 		fish-deploy.sh \
 		imdslib.sh \

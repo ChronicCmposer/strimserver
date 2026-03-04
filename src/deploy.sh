@@ -87,8 +87,10 @@ sudo systemctl start \
 set +x
 printf "services started!\n"
 
-printf "\nsrt passphrase: %s\n\n" "$SRT_READ_PASSPHRASE"
+printf "srt passphrase: %s\n\n" "$SRT_READ_PASSPHRASE"
 
-printf "\nServices running on %s: %s \n\n" "$INSTANCE_TYPE" "$PUBLIC_IP"
+printf "Services running on %s: %s \n\n" "$INSTANCE_TYPE" "$PUBLIC_IP"
+
+printf "configure-local-encoder.zsh --strimserver-host %s --passphrase %s\n\n" "$PUBLIC_IP" "$SRT_READ_PASSPHRASE"
 
 
