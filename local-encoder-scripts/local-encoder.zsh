@@ -23,7 +23,7 @@ set +a
 : "${VIDEO_BITRATE:?VIDEO_BITRATE is not set}"
 : "${AUDIO_BITRATE:?AUDIO_BITRATE is not set}"
 
-STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?streamid=publish:%s&pkt_size=%d&latency=%d&maxbw=%d&inputbw=%d&oheadbw=%d&passphrase=%s&pbkeylen=%d' \
+STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&transtype=live&pkt_size=%d&latency=%d&tlpktdrop=1&maxbw=%d&inputbw=%d&oheadbw=%d&passphrase=%s&pbkeylen=%d' \
 	"$STRIMSERVER_HOST" \
 	"$STRIMSERVER_SRT_INGEST_PORT" \
 	"$SRT_PUBLISH_PATH" \
