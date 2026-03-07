@@ -23,7 +23,7 @@ $(STRIMSERVER_CONTAINER_OUTPUT): \
 	mediamtx.yaml.template \
 	mediamtx-entrypoint.sh \
 	egress-ffmpeg.sh
-	sudo buildctl build \
+	sudo buildctl --addr tcp://127.0.0.1:1234 build \
 		--frontend=dockerfile.v0 \
 		--opt platform=linux/amd64 \
 		--local context=. \

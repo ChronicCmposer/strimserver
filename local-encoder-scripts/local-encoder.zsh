@@ -23,7 +23,7 @@ set +a
 : "${VIDEO_BITRATE:?VIDEO_BITRATE is not set}"
 : "${AUDIO_BITRATE:?AUDIO_BITRATE is not set}"
 
-STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&transtype=live&pkt_size=%d&latency=%d&tlpktdrop=1&maxbw=%d&inputbw=%d&oheadbw=%d&passphrase=%s&pbkeylen=%d' \
+STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_size=%d&latency=%d&tlpktdrop=1&maxbw=%d&inputbw=%d&oheadbw=%d&passphrase=%s&pbkeylen=%d' \
 	"$STRIMSERVER_HOST" \
 	"$STRIMSERVER_SRT_INGEST_PORT" \
 	"$SRT_PUBLISH_PATH" \
@@ -51,14 +51,18 @@ STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&trans
   # -loglevel verbose \
 
 exec "$FFMPEG_CMD" \
-  -init_hw_device videotoolbox=vt -filter_hw_device vt \
+  -fflags nobuffer \
+  -avioflags direct \
+  -probesize 32768 \
+  -analyzeduration 0 \
+  -max_delay 0 \
   -color_range pc \
   -colorspace bt709 \
   -color_primaries bt709 \
   -color_trc bt709 \
   -i "$INPUT_FIFO" \
-  -vf "format=nv12,hwupload,scale_vt=w=1920:h=-2,hwdownload,format=nv12" \
   -c:v hevc_videotoolbox \
+  -realtime 1 \
   -b:v "9M" \
   -profile:v 1 \
   -g 120 \
@@ -74,6 +78,10 @@ exec "$FFMPEG_CMD" \
   -aac_at_mode 0 \
   -ar 48000 \
   -ac 2 \
+  -flush_packets 1 \
+  -max_interleave_delta 0 \
+  -muxdelay 0 \
+  -muxpreload 0 \
   -f mpegts \
   "$STRIMSERVER_SRT_URL" 
 

@@ -20,7 +20,7 @@ logStructured: no
 # sysLogPrefix: mediamtx
 # Size of the queue of outgoing packets.
 # A higher value allows to increase throughput, a lower value allows to save RAM.
-writeQueueSize: 2048
+writeQueueSize: 512 
 
 ###############################################
 # Global settings -> SRT server

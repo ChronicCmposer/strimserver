@@ -1,9 +1,11 @@
-FROM nvidia/cuda:13.1.0-devel-ubuntu24.04 AS ffmpeg_build
+FROM nvidia/cuda:13.0.2-devel-ubuntu24.04 AS ffmpeg_build
 
 ARG FFMPEG_REPO="https://github.com/FFmpeg/FFmpeg.git"
-ARG FFMPEG_VERSION="2f547c4022786ef985992e6d534f761909afefd5"
-ARG NPROC=6
+ARG FFMPEG_VERSION="release/8.0"
+ARG NPROC=4
 
+ARG FFMPEG_NV_CODEC_HEADERS_REPO="https://github.com/FFmpeg/nv-codec-headers.git"
+ARG FFMPEG_NV_CODEC_HEADERS_VERSION="n13.0.19.0"
 
 
 RUN apt-get update \
@@ -21,23 +23,37 @@ RUN apt-get update \
       libfdk-aac-dev \
    && rm -rf /var/lib/apt/lists/*
 
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=/usr/local/cuda/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
-RUN git clone --depth 1 --no-checkout $FFMPEG_REPO /opt/ffmpeg-src \
+RUN git clone --depth 1 --branch "$FFMPEG_NV_CODEC_HEADERS_VERSION" \
+      "$FFMPEG_NV_CODEC_HEADERS_REPO" /opt/nv-codec-headers \
+   && make -C /opt/nv-codec-headers install PREFIX=/usr \
+   && git clone --depth 1 --branch "$FFMPEG_VERSION" "$FFMPEG_REPO" /opt/ffmpeg-src \
    && cd /opt/ffmpeg-src \
-   && git fetch --depth 1 origin $FFMPEG_VERSION \
-   && git checkout $FFMPEG_VERSION \
    && set -xeuo \
+   && which nvcc && nvcc --version && gcc --version && echo $PATH \
+   && echo "$(pwd)" && ls -la . \
    && ./configure \
       --prefix="/usr" \
       --disable-shared --enable-static \
       --pkg-config-flags="--static" \
+      --extra-cflags="-I/usr/local/cuda/include" \
+      --extra-ldflags="-L/usr/local/cuda/lib64" \
+      --nvccflags="-gencode arch=compute_75,code=sm_75 -O2" \
       --extra-libs="-lpthread -lm" \
       --disable-doc --disable-debug \
       \
+      --enable-nonfree \
       --enable-openssl \
       --enable-libsrt \
-      --enable-nvenc \
       --enable-libfdk_aac \
+      \
+      --enable-ffnvcodec \
+      --enable-nvenc \
+      --enable-cuda-nvcc \
+      --enable-filter=scale_cuda \
       \
       --enable-protocol=rtmp \
       \
@@ -50,8 +66,7 @@ RUN git clone --depth 1 --no-checkout $FFMPEG_REPO /opt/ffmpeg-src \
       --enable-encoder=pcm_s24le \
       --enable-decoder=aac \
       --enable-decoder=pcm_s24le || true \
-   && grep -n -A20 -B20 'srt' ffbuild/config.log \
-   && make -j$NPROC
+   && make -C /opt/ffmpeg-src -j$NPROC
 
 
 RUN cd /opt/ffmpeg-src \
@@ -68,7 +83,8 @@ ARG FFMPEG_VERSION="8.0.1-r1"
 ARG FISH_SHELL_VERSION="4.0.2-r0"
 ARG ENVSUBST_VERSION="0.24.1-r1"
 ARG MEDIAMTX_BIN_URL="https://github.com/bluenviron/mediamtx/releases/download/v1.16.1/mediamtx_v1.16.1_linux_amd64.tar.gz"
-ENV NVIDIA_DRIVER_CAPABILITIES="video"
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
 COPY --from=ffmpeg_build /opt/ffmpeg.tar /opt/
 
