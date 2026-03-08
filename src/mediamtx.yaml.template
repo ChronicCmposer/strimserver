@@ -9,7 +9,7 @@
 # Global settings -> General
 
 # Verbosity of the program; available values are "error", "warn", "info", "debug".
-logLevel: debug 
+logLevel: info 
 # Destinations of log messages; available values are "stdout", "file" and "syslog".
 logDestinations: [stdout]
 # When destination is "stdout" or "file", emit logs in structured format (JSONL).
@@ -47,7 +47,7 @@ rtsp: no
 # Global settings -> RTMP server
 
 # Enable publishing and reading streams with the RTMP protocol.
-rtmp: true
+rtmp: false
 # Use the secure protocol variant (RTMP).
 # Available values are "no", "strict", "optional".
 rtmpEncryption: "no"

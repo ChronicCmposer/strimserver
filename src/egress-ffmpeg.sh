@@ -62,6 +62,8 @@ INPUT_SRT_URL="$(printf 'srt://localhost:%d?streamid=read:%s&pkt_size=%d&latency
   # -max_delay 0 \
 
 exec "$FFMPEG" \
+  -fflags +discardcorrupt \
+  -err_detect ignore_err \
   -hwaccel cuda \
   -hwaccel_output_format cuda \
   -color_range tv \
@@ -70,7 +72,7 @@ exec "$FFMPEG" \
   -color_trc bt709 \
   -f mpegts \
   -i "$INPUT_SRT_URL" \
-  -vf "scale_cuda=1920:1080:format=nv12" \
+  -vf "scale_cuda=1920:1080:format=nv12:interp_algo=lanczos" \
   -c:v h264_nvenc \
   -b:v "$VIDEO_BITRATE" \
   -maxrate "$VIDEO_BITRATE" \
