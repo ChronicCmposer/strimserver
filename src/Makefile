@@ -9,6 +9,8 @@ IPERF3_IMAGE_FILE_NAME 				?= iperf3-container.tar
 STRIMSERVER_DEPLOYMENT_FILE_NAME ?= strimserver-deployment.tar
 IPERF3_DEPLOYMENT_FILE_NAME 		?= iperf3-deployment.tar
 STRIMSERVER_CONTAINER_OUTPUT 		:= $(OUTPUT_PATH)/$(STRIMSERVER_IMAGE_FILE_NAME)
+OFFLINE_SEGMENT_FILE_NAME			:= strimserver-offline.mp4
+OFFLINE_SEGMENT_OUTPUT				:= $(OUTPUT_PATH)/$(OFFLINE_SEGMENT_FILE_NAME)
 LIBSRT_CONTAINER_OUTPUT 			:= $(OUTPUT_PATH)/$(LIBSRT_IMAGE_FILE_NAME)
 IPERF3_CONTAINER_OUTPUT 			:= $(OUTPUT_PATH)/$(IPERF3_IMAGE_FILE_NAME)
 STRIMSERVER_DEPLOYMENT_TAR			:= $(OUTPUT_PATH)/$(STRIMSERVER_DEPLOYMENT_FILE_NAME)
@@ -22,7 +24,7 @@ $(STRIMSERVER_CONTAINER_OUTPUT): \
 	Dockerfile \
 	mediamtx.yaml.template \
 	mediamtx-entrypoint.sh \
-	egress-ffmpeg.sh
+	transcodelib.sh
 	sudo buildctl --addr tcp://127.0.0.1:1234 build \
 		--frontend=dockerfile.v0 \
 		--opt platform=linux/amd64 \
@@ -31,7 +33,6 @@ $(STRIMSERVER_CONTAINER_OUTPUT): \
 		--opt filename=./Dockerfile \
 		--progress=plain \
 		--output type=oci,name=$(STRIMSERVER_IMAGE_NAME),dest=$@
-
 
 $(LIBSRT_CONTAINER_OUTPUT): \
 	Dockerfile-libsrt
@@ -57,6 +58,7 @@ $(IPERF3_CONTAINER_OUTPUT): \
 
 $(STRIMSERVER_DEPLOYMENT_TAR): \
    $(STRIMSERVER_CONTAINER_OUTPUT) \
+   $(OFFLINE_SEGMENT_OUTPUT) \
    deploy.sh \
    fish-deploy.sh \
    imdslib.sh \
@@ -71,7 +73,7 @@ $(STRIMSERVER_DEPLOYMENT_TAR): \
 		prompt_login.fish \
 		strimserver.service \
 		strimserver.env \
-		-C $(OUTPUT_PATH) $(STRIMSERVER_IMAGE_FILE_NAME)
+		-C $(OUTPUT_PATH) $(STRIMSERVER_IMAGE_FILE_NAME) $(OFFLINE_SEGMENT_FILE_NAME)
 
 $(IPERF3_DEPLOYMENT_TAR): $(IPERF3_CONTAINER_OUTPUT) iperf-deploy.sh fish-deploy.sh imdslib.sh prompt_login.fish iperf3.service iperf3.env
 	tar --ignore-failed-read --warning=all --show-transformed-names -cvf $@ --transform='s#iperf-deploy\.sh$$#deploy.sh#' iperf-deploy.sh fish-deploy.sh imdslib.sh prompt_login.fish iperf3.service iperf3.env -C $(OUTPUT_PATH) $(IPERF3_IMAGE_FILE_NAME)

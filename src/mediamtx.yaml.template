@@ -139,11 +139,11 @@ pathDefaults:
   # Enable always-available mode, in which a offline segment is played on repeat when the stream is not available.
   alwaysAvailable: false
   # An MP4 file can be used instead of the default offline segment.
-  alwaysAvailableFile: ''
+  # alwaysAvailableFile: ''
   # Tracks of the default offline segment.
-  alwaysAvailableTracks:
+  # alwaysAvailableTracks:
     # Available values are: AV1, VP9, H265, H264, Opus, MPEG4Audio, G711, LPCM
-    - codec: H264
+    # - codec: H264
       # in case of MPEG4Audio, G711, LPCM, sampleRate and ChannelCount must be provided too.
       #  sampleRate: 48000
       #  channelCount: 2
@@ -304,12 +304,19 @@ paths:
   # example:
   # my_camera:
   #   source: rtsp://my_camera
-  
-  macbook_encoder:
-    source: publisher 
-    maxReaders: 1 
-    srtPublishPassphrase: ${SRT_READ_PASSPHRASE}
-    runOnReady: "/opt/egress-ffmpeg.sh"
+
+  ingress0:
+    source: publisher
+    runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && normalize 2>&1 | log_prefix normalize"'
+    srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
+    alwaysAvailable: true
+    alwaysAvailableFile: "/opt/video-files/strimserver-offline.mp4"
+
+  normalized:
+    source: publisher
+    # runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && scale 2>&1 | log_prefix scle"'
+    runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && scale_and_egress 2>&1 | log_prefix scale-and-egress"'
+    srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     record: yes
     # Path of recording segments.
     # Extension is added automatically.
@@ -333,9 +340,11 @@ paths:
     recordDeleteAfter: 0s
     # Settings under path "all_others" are applied to all paths that
     # do not match another entry.
+
+  # scaled:
+  #   source: publisher
+  #   runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && egress 2>&1 | log_prefix egrs"'
+  #   srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
+
   all_others:
-
-
-
-
 

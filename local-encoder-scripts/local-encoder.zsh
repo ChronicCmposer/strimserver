@@ -49,6 +49,10 @@ STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_s
 # It's clear that we need to control for bitrate overshoot with h264_videotoolbox
   # -vf "scale=iw/2:ih/2:flags=lanczos" \
   # -loglevel verbose \
+  # -color_range tv \
+  # -colorspace bt709 \
+  # -color_primaries bt709 \
+  # -color_trc bt709 \
 
 exec "$FFMPEG_CMD" \
   -fflags nobuffer \
@@ -56,23 +60,17 @@ exec "$FFMPEG_CMD" \
   -probesize 32768 \
   -analyzeduration 0 \
   -max_delay 0 \
-  -color_range pc \
-  -colorspace bt709 \
-  -color_primaries bt709 \
-  -color_trc bt709 \
   -i "$INPUT_FIFO" \
   -c:v hevc_videotoolbox \
   -realtime 1 \
-  -b:v "9M" \
+  -allow_sw 0 \
+  -b:v 9M \
   -profile:v 1 \
-  -g 120 \
-  -keyint_min 120 \
+  -g 60 \
+  -keyint_min 60 \
   -bf 0 \
+  -forced-idr 1 \
   -constant_bit_rate true \
-  -color_range tv \
-  -colorspace bt709 \
-  -color_primaries bt709 \
-  -color_trc bt709 \
   -c:a aac_at \
   -b:a "$AUDIO_BITRATE" \
   -aac_at_mode 0 \
@@ -83,6 +81,5 @@ exec "$FFMPEG_CMD" \
   -muxdelay 0 \
   -muxpreload 0 \
   -f mpegts \
-  "$STRIMSERVER_SRT_URL" 
-
+  "$STRIMSERVER_SRT_URL"
 

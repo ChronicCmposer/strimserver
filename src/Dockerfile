@@ -38,7 +38,6 @@ RUN git clone --depth 1 --branch "$FFMPEG_NV_CODEC_HEADERS_VERSION" \
    && ./configure \
       --prefix="/usr" \
       --disable-shared --enable-static \
-      --pkg-config-flags="--static" \
       --extra-cflags="-I/usr/local/cuda/include" \
       --extra-ldflags="-L/usr/local/cuda/lib64" \
       --nvccflags="-gencode arch=compute_75,code=sm_75 -O2" \
@@ -68,6 +67,7 @@ RUN git clone --depth 1 --branch "$FFMPEG_NV_CODEC_HEADERS_VERSION" \
       --enable-decoder=pcm_s24le || true \
    && make -C /opt/ffmpeg-src -j$NPROC
 
+   # && cat /opt/ffmpeg-src/ffbuild/config.log \
 
 RUN cd /opt/ffmpeg-src \
    && ls -la \
@@ -82,7 +82,7 @@ FROM debian:trixie-20260202-slim AS runtime
 ARG FFMPEG_VERSION="8.0.1-r1"
 ARG FISH_SHELL_VERSION="4.0.2-r0"
 ARG ENVSUBST_VERSION="0.24.1-r1"
-ARG MEDIAMTX_BIN_URL="https://github.com/bluenviron/mediamtx/releases/download/v1.16.1/mediamtx_v1.16.1_linux_amd64.tar.gz"
+ARG MEDIAMTX_BIN_URL="https://github.com/bluenviron/mediamtx/releases/download/v1.17.0/mediamtx_v1.17.0_linux_amd64.tar.gz"
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
@@ -105,7 +105,7 @@ RUN cat /etc/apt/sources.list.d/debian.sources \
 
 COPY mediamtx.yaml.template /opt/mediamtx.yaml.template
 COPY mediamtx-entrypoint.sh /opt/mediamtx-entrypoint.sh
-COPY egress-ffmpeg.sh /opt/egress-ffmpeg.sh
+COPY transcodelib.sh /opt/transcodelib.sh
 
 RUN mkdir -p /opt/mediamtx \
    && wget $MEDIAMTX_BIN_URL -O /opt/mediamtx/mediamtx.tar.gz \
@@ -118,9 +118,10 @@ RUN mkdir -p /opt/mediamtx \
    && install /opt/mediamtx/mediamtx /usr/local/bin/ \
    && rm -rf /opt/mediamtx \
    && ffmpeg -version \
-   && ffmpeg -h encoder=libfdk_aac \
+   && ffmpeg -h encoder=h264_nvenc \
+   && ffmpeg -h encoder=hevc_nvenc \
    && chmod +x /opt/mediamtx-entrypoint.sh \
-   && chmod +x /opt/egress-ffmpeg.sh
+   && chmod +x /opt/transcodelib.sh
 
 ENTRYPOINT [ "/opt/mediamtx-entrypoint.sh" ]
 

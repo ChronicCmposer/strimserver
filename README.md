@@ -1041,6 +1041,383 @@ experience.
 [3]: https://streamlabs.com/content-hub/post/twitch-multiple-encodes-streamlabs-desktop?srsltid=AfmBOopgYrV-n9gzfUAp7nJppEHClWmiAgT2cQ3GLr0owyRP5hhsA82j&utm_source=chatgpt.com "How to Enable Multiple Encodes for Twitch in ..."
 
 
+---
+
+
+2026-03-27 
+
+* Okay, so after having used this streaming configuration
+  for several piano streams in a row, it's clearer now that
+      we need to modify mediamtx configuration and local
+      encoder configuration to handle dropouts
+
+* Sometimes when macbook is running too many programs and
+  doing VideoToolbox encoding, the memory pressure causes
+  local encoder speed to drop below 1x (like to 0.95x or
+  0.9x)
+
+* This means that - even before video is packetized and
+  transferred over the internet to the transcode server via
+  SRT protocol - the local encoder is not keeping up with
+  the 60fps fifo being populated by OBS.
+
+* On the server side, this looks like packet dropout - or
+  increased transmission latency - so as long as there is
+  enough buffer to counteract the temporary loss of
+  transmitted frames, life is good and everything peachy EZ
+  Clap.
+
+* On the other hand... the server has to make a decision
+  about "when is the stream done?" so it can terminate the
+  egress ffmpeg process that is sending frames to twitch.
+
+* The line between "when is the stream done?" vs. "when is
+  the local encoder not keeping up?" is not well-defined.
+  And so what happens is that twitch tells us we have
+  "bitrate issues" or that our stream is "unstable." omgBruh
+
+* In the worst case, stream goes down completely and we lose
+  our viewers and stream metadata. Sadge :/
+
+* In an effort to mitigate these issues, we aim to add
+  mediamtx "alwaysAvailable" configuration. That's our aim
+  for today.
+
+Modifications to be made:
+* [ ] create simple loopable video with same bitrate and
+  encoding format as the ingest stream
+* [ ] add alwaysAvailable configuration to
+  mediamtx.yml.template
+* [ ] modify alwaysAvailable configuration to read video
+  contents and inject into the stream when we encounter a
+  dropout
+* [ ] test and tweak configuration iteratively as needed
+
+
+Concept for loopable video:
+* Single 7tv emote centered (choose animated one)
+* Purple -> black gradient background
+
+Things we don't know:
+
+* What options do we have for mediamtx alwaysAvailable
+  configuration?
+
+* Is it more efficient/flexible to generate the video loop
+  on the fly within the stream server? or create the looping
+  video of arbitrary length (2s? 2x num frames in
+  animation?)
+
+* How do we expect our needs for alwaysAvailable stream to
+  change in the future ? 
+
+* How best to end stream - given added alwaysAvailable
+  configuration ?
+
+---
+
+* What options do we have for mediamtx alwaysAvailable
+  configuration?
+
+    * alwaysAvailableFile
+        * what are the constraints on format of data
+          included within the video file?
+
+    * alwaysAvailableTracks
+        video-only placeholder:        
+            alwaysAvailableTracks:
+              - codec: H265
+
+alwaysAvailableTracks:
+  - codec: H265
+
+
+---
+
+2026-03-28
+
+* Last time we investigated the mediamtx alwaysAvailable
+  configuration parameters
+
+
+Design for standby stream switching:
+
+2 Independent ingest streams:
+1. standby
+2. macbook_encoder
+
+1 egress stream:
+* goes to twitch
+
+
+---
+
+```bash
+ffmpeg \
+  -thread_queue_size 8192 \
+  -i "srt://MEDIAMTX_HOST:8890?streamid=read:macbook_encoder&mode=caller&latency=120" \
+  -stream_loop -1 -re -i "/path/to/standby.mp4" \
+  -filter_complex "\
+    [0:v]setpts=PTS-STARTPTS[v0]; \
+    [1:v]setpts=PTS-STARTPTS[v1]; \
+    [0:a]asetpts=PTS-STARTPTS[a0]; \
+    [1:a]asetpts=PTS-STARTPTS[a1]; \
+    [v0][v1]streamselect@vsel=inputs=2:map=1,zmq=b=tcp\\://127.0.0.1\\:5555[vout]; \
+    [a0][a1]astreamselect@asel=inputs=2:map=1[aout]" \
+  -map "[vout]" \
+  -map "[aout]" \
+  -c:v libx264 \
+  -preset veryfast \
+  -tune zerolatency \
+  -pix_fmt yuv420p \
+  -g 120 \
+  -keyint_min 120 \
+  -sc_threshold 0 \
+  -b:v 12M \
+  -maxrate 12M \
+  -bufsize 24M \
+  -c:a aac \
+  -b:a 160k \
+  -ar 48000 \
+  -ac 2 \
+  -f flv "rtmp://live.twitch.tv/app/TWITCH_STREAM_KEY"
+```
+
+We're mostly interested in this part:
+
+  -filter_complex "\
+    [0:v]setpts=PTS-STARTPTS[v0]; \
+    [1:v]setpts=PTS-STARTPTS[v1]; \
+    [0:a]asetpts=PTS-STARTPTS[a0]; \
+    [1:a]asetpts=PTS-STARTPTS[a1]; \
+    [v0][v1]streamselect@vsel=inputs=2:map=1,zmq=b=tcp\\://127.0.0.1\\:5555[vout]; \
+    [a0][a1]astreamselect@asel=inputs=2:map=1[aout]" \
+
+* [x] NOTE: FFmpeg must be built with --enable-libzmq for
+  these filters to exist.
+    * DON'T TRY TO STATICALLY LINK YOUR LIBS!! (use .so, not
+      .a)
+
+1. Best practical design: separate “normalizer” from
+   “egress”
+
+A separate process does one of these at any given moment:
+
+* if macbook_encoder is live: read it, transcode to fixed
+    output, publish to macbook_normalized 
+
+* if macbook_encoder is absent: generate slate/silence with
+  the same output settings, publish to macbook_normalized
+
+This process can be restarted independently if needed. That
+is a big operational advantage over having one monolithic
+egress process trying to survive everything
+
+
+Relevant zmq commands:
+
+echo "streamselect@vsel map 0" | tools/zmqsend
+echo "astreamselect@asel map 0" | tools/zmqsend
+
+echo "streamselect@vsel map 1" | tools/zmqsend
+echo "astreamselect@asel map 1" | tools/zmqsend
+
+---
+
+2026-03-29 
+
+What we discovered last time
+
+* mediamtx + ffmpeg may not be sufficient to handle stream
+  standby (i.e. remote srt stream disconnect) when combined
+  with NVIDIA CUDA decode, CUDA scale, and NVENC
+
+* we didn't thoroughly test a software-only filter graph -
+  this may still be a viable option
+
+* basically, when our stream disconnects from mediamtx with
+  alwaysAvailable true, mediamtx pipes alwaysAvailable file
+  contents into egress ffmpeg stream
+
+* this transition triggers ffmpeg to rebuild the filter
+  graph to handle the transition (even if it may not
+  strictly be necessary to rebuild) - and the NVIDIA CUDA
+  scale filter part of the pipeline is sensitive to this
+  rebuild/reinit
+
+* rather than spend more time trying to solve this problem
+  with ffmpeg and mediamtx alone - we elect to research a
+  new component: gstreamer
+
+* our hope is that gstreamer will help us to manage stream
+  disconnection transition gracefully - such that gstreamer
+  outputs constant video stream to egress ffmpeg even if
+  remote srt stream is disconnected
+
+
+What do we need to know?
+
+* what options does gstreamer provide for handling stream
+  multiplexing and fallback?
+
+* how to launch and manage gstreamer process within
+  strimserver container ?
+
+* do we need to build gstreamer from scratch? does gstreamer
+  support NVIDIA hardware acceleration?
+
+* how to connect gstreamer -> mediamtx -> egress ffmpeg?
+
+
+---
+
+On second thought, maybe let's just try to add extra
+normalization step with ffmpeg - no rescale
+
+Gstreamer too complicated for rn - it might be the right
+solution, but if we have to write an entireley new app in
+python or in C, then we ought to try software ffmpeg
+normalization first
+
+---
+
+2026-03-30
+
+Another day another tech stream! POGSLIDE
+
+What have we learned from trying to implement
+standby-stream?
+    
+* Standby stream can be tricky to set up with nvidia HW
+  acceleration
+
+* sometimes challenging for ffmpeg process to survive the
+  always-available transition when ingest goes offline
+
+* this is especially true if we intend to use only one
+  ffmpeg process on the stream server - in retrospect this
+  is a case of doing too much at the same time
+
+* so: new concept - let's split the ffmpeg responsibilities
+  into multiple processes and tie them together with
+  mediamtx
+
+* as strimserver project becomes more complex over time,
+  it's likely that we'll want to add more stages to the
+  transcode pipeline - so splitting ffmpeg responsibilities
+  while the pipeline is still small/manageable is a good
+      idea
+
+What stages will we want our pipeline to have?
+
+1. primary_ingress 
+    * receives remote contribution stream over srt
+    * dimensions: 3840x2160
+    * frame rate: 59.98 / 60 fps
+    * hardware acceleration:
+        * hevc_videotoolbox (macbook)
+        * aac_at (macbook)
+    * codec: hevc_videotoolbox
+    * expected video bitrate: 9000kbps
+    * audio processing? pcm_s24le 24bit @ 48000Hz -> aac @
+      320kbps
+    * protocol: srt
+    * reliable? no
+    * record to disk? no
+    * secure? yes - publish passphrase (generated at deploy
+      time)
+    * components:
+        * local encoder (macbook)
+        * mediamtx (server)
+
+2. normalize (happ)
+    * inserts offline slate into stream when ingest is down
+    * dimensions: 3840x2160
+    * frame rate: 59.98 / 60 fps
+    * hardware acceleration:
+        * CUDA hevc decode
+        * hevc_nvenc
+    * codec: hevc_nvenc
+    * expected video bitrate: 9000kbps
+    * audio processing? libfdk_aac 320kbps
+    * protocol: srt
+    * reliable? yes
+    * record to disk? yes - sync to s3 object storage ? 
+    * secure? localhost only 
+    * components:
+        * normalizer ffmpeg (server)
+        * mediamtx (server)
+
+3. scale
+    * uses HW accelerated CUDA scaling to rescale stream
+      dimensions for egress
+    * dimensions: 3840x2160 -> 1920x1080p
+    * frame rate: 59.98 / 60 fps
+    * hardware acceleration:
+        * CUDA hevc decode
+        * scale_cuda video filter
+        * hevc_nvenc
+    * codec: hevc_nvenc
+    * expected video bitrate: 9000kbps
+    * audio processing? passthrough 
+    * protocol: srt
+    * reliable? yes
+    * record to disk? no 
+    * secure? localhost only 
+    * components:
+        * scaler ffmpeg (server)
+        * mediamtx (server)
+
+4. egress
+    * encode for twitch ingest and send to twitch ingest
+    * dimensions: 1920x1080p
+    * frame rate: 59.98 / 60 fps
+    * hardware acceleration:
+        * CUDA hevc decode
+        * h264_nvenc
+    * codec: hevc  -> h264_nvenc
+    * expected video video bitrate: 9000kbps -> 1000kbps (or maybe 2k)
+    * audio processing? libfdk_aac 320kbps -> 160kbps
+    * protocol: srt -> rtmp
+    * reliable? yes
+    * record to disk? no 
+    * secure? twitch stream key 
+    * components:
+        * egress ffmpeg (server)
+        * twitch (amazon interactive video service)
+
+---
+
+* Okay, so we have an idea of what each stage needs to do
+  and also which components use each stage.
+
+* The next idea is to encode this information into a
+  domain-specific language (built in python) which will
+  generate the following files prior to strimserver build:
+    * strimserver.env
+    * transcodelib.sh
+    * mediamtx.yml.template
+
+* transcodelib.sh will be a source-able bash script which
+  defines ffmpeg entrypoint functions for: normalize, scale,
+  egress
+
+* Then - at runtime, mediamtx will invoke these ffmpeg
+  entrypoint functions via:
+    * ``` source transcodelib.sh && (funcname) ```
+
+---
+
+```
+$(OFFLINE_SEGMENT_OUTPUT):
+	ffmpeg \
+	  -f lavfi -i "color=c=0x1a21ff:s=3840x2160:r=60,format=gbrp,geq=r='r(X,Y)*(1-Y/H)':g='g(X,Y)*(1-Y/H)':b='b(X,Y)*(1-Y/H)',format=nv12" \
+	  -f lavfi -i anullsrc=r=48000:cl=stereo \
+	  -c:v hevc_videotoolbox -pix_fmt nv12 -r 60 \
+	  -c:a aac -ar 48000 -ac 2 \
+	  -shortest -t 5 $@
+```
+
 
 
 

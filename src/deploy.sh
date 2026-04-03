@@ -79,6 +79,19 @@ sudo mkdir -p $VIDEO_FILES_DIRECTORY
 set +x
 printf "video-files directory created: %s\n" "$VIDEO_FILES_DIRECTORY"
 
+printf "configuring offline segment...\n"
+set -x
+OFFLINE_SEGMENT_FILE_NAME=strimserver-offline.mp4
+sudo cp "$OFFLINE_SEGMENT_FILE_NAME" "$VIDEO_FILES_DIRECTORY"
+set +x
+printf "offline segment configured: %s\n" "$OFFLINE_SEGMENT_FILE_NAME"
+
+printf "creating logs directory...\n"
+set -x
+LOGS_DIRECTORY=/mnt/nvme/logs
+sudo mkdir -p $LOGS_DIRECTORY
+set +x
+printf "logs directory created: %s\n" "$LOGS_DIRECTORY"
 
 printf "starting services...\n"
 set -x
