@@ -308,6 +308,7 @@ paths:
   ingress0:
     source: publisher
     runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && normalize 2>&1 | log_prefix normalize"'
+    # runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && normalize_scale_and_egress 2>&1 | log_prefix normalize-scale-and-egress"'
     srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     alwaysAvailable: true
     alwaysAvailableFile: "/opt/video-files/strimserver-offline.mp4"

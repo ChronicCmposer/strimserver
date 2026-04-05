@@ -165,7 +165,7 @@ egress() {
    : "${EGRESS_VIDEO_BITRATE:?EGRESS_VIDEO_BITRATE is not set}"
    : "${EGRESS_AUDIO_BITRATE:?EGRESS_AUDIO_BITRATE is not set}"
    : "${BANDWIDTH_TEST:?BANDWIDTH_TEST is not set}"
-   
+
    case "${BANDWIDTH_TEST,,}" in
      1|true|yes|y|on)   BW_PARAM="?bandwidthtest=true" ;;
      0|false|no|n|off|"") BW_PARAM="" ;;
@@ -229,6 +229,69 @@ scale_and_egress() {
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -hwaccel cuda \
      -hwaccel_output_format cuda \
+     -f mpegts \
+     -i "$INPUT_SRT_URL" \
+     -vf "scale_cuda=1920:1080:interp_algo=lanczos" \
+     -c:v h264_nvenc \
+     -b:v "$EGRESS_VIDEO_BITRATE" \
+     -maxrate "$EGRESS_VIDEO_BITRATE" \
+     -minrate "$EGRESS_VIDEO_BITRATE" \
+     -bufsize "$EGRESS_VIDEO_BITRATE" \
+     -preset p1 \
+     -tune ll \
+     -rc cbr \
+     -zerolatency 1 \
+     -rc-lookahead 0 \
+     -delay 0 \
+     -profile:v high \
+     -level 4.2 \
+     -g 120 \
+     -keyint_min 120 \
+     -bf 0 \
+     -c:a libfdk_aac -b:a "$EGRESS_AUDIO_BITRATE" \
+     -ar 48000 \
+     -ac 2 \
+     -flvflags no_duration_filesize \
+     -flush_packets 1 \
+     -f flv \
+     "$TWITCH_RTMP_URL"
+
+}
+
+
+normalize_scale_and_egress() {
+
+   : "${SRT_LATENCY_US:?SRT_LATENCY_US is not set}"
+   : "${SRT_MAX_BW_BYTES_PER_SEC:?SRT_MAX_BW_BYTES_PER_SEC is not set}"
+   : "${SRT_INPUT_BW_BYTES_PER_SEC:?SRT_INPUT_BW_BYTES_PER_SEC is not set}"
+   : "${SRT_OVERHEAD_BW_PERCENT:?SRT_OVERHEAD_BW_PERCENT is not set}"
+
+   : "${TWITCH_INGEST_SERVER:?TWITCH_INGEST_SERVER is not set (e.g. ingest.global-contribute.live-video.net)}"
+   : "${TWITCH_STREAM_KEY:?TWITCH_STREAM_KEY is not set - you should get this from twitch...}"
+   : "${EGRESS_VIDEO_BITRATE:?EGRESS_VIDEO_BITRATE is not set}"
+   : "${EGRESS_AUDIO_BITRATE:?EGRESS_AUDIO_BITRATE is not set}"
+   : "${BANDWIDTH_TEST:?BANDWIDTH_TEST is not set}"
+
+   case "${BANDWIDTH_TEST,,}" in
+     1|true|yes|y|on)   BW_PARAM="?bandwidthtest=true" ;;
+     0|false|no|n|off|"") BW_PARAM="" ;;
+     *) echo "Invalid BANDWIDTH_TEST: '$BANDWIDTH_TEST' (use true/false)"; exit 2 ;;
+   esac
+
+
+   INPUT_SRT_URL="$(printf "$INGRESS0_READ_URL&latency=%d&tlpktdrop=1&maxbw=%d&inputbw=%d&oheadbw=%d" \
+      "$SRT_LATENCY_US" \
+      "$SRT_MAX_BW_BYTES_PER_SEC" \
+      "$SRT_INPUT_BW_BYTES_PER_SEC" \
+      "$SRT_OVERHEAD_BW_PERCENT")"
+
+   TWITCH_RTMP_URL="rtmp://${TWITCH_INGEST_SERVER}/app/${TWITCH_STREAM_KEY}${BW_PARAM}"
+
+   exec "$FFMPEG" \
+     -loglevel "$FFMPEG_LOG_LEVEL" \
+     -fflags +discardcorrupt+genpts \
+     -err_detect ignore_err \
+     -drop_changed:v 1 \
      -f mpegts \
      -i "$INPUT_SRT_URL" \
      -vf "scale_cuda=1920:1080:interp_algo=lanczos" \
