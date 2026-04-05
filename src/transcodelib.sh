@@ -83,7 +83,7 @@ normalize() {
 
    exec "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
-     -fflags +discardcorrupt \
+     -fflags +discardcorrupt+genpts \
      -err_detect ignore_err \
      -drop_changed:v 1 \
      -f mpegts \
@@ -202,9 +202,6 @@ egress() {
      -ac 2 \
      -flvflags no_duration_filesize \
      -flush_packets 1 \
-     -max_interleave_delta 100000 \
-     -muxdelay 0 \
-     -muxpreload 0 \
      -f flv \
      "$TWITCH_RTMP_URL"
 
@@ -256,9 +253,6 @@ scale_and_egress() {
      -ac 2 \
      -flvflags no_duration_filesize \
      -flush_packets 1 \
-     -max_interleave_delta 100000 \
-     -muxdelay 0 \
-     -muxpreload 0 \
      -f flv \
      "$TWITCH_RTMP_URL"
 
