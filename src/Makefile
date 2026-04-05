@@ -64,7 +64,9 @@ $(STRIMSERVER_DEPLOYMENT_TAR): \
    imdslib.sh \
    prompt_login.fish \
    strimserver.service \
-   strimserver.env
+   strimserver.env \
+	mediamtx.yaml.template \
+	transcodelib.sh
 	tar -cvf $@ \
 		--ignore-failed-read --warning=all --show-transformed-names \
 		deploy.sh \
@@ -73,6 +75,8 @@ $(STRIMSERVER_DEPLOYMENT_TAR): \
 		prompt_login.fish \
 		strimserver.service \
 		strimserver.env \
+		mediamtx.yaml.template \
+		transcodelib.sh \
 		-C $(OUTPUT_PATH) $(STRIMSERVER_IMAGE_FILE_NAME) $(OFFLINE_SEGMENT_FILE_NAME)
 
 $(IPERF3_DEPLOYMENT_TAR): $(IPERF3_CONTAINER_OUTPUT) iperf-deploy.sh fish-deploy.sh imdslib.sh prompt_login.fish iperf3.service iperf3.env

@@ -2,7 +2,8 @@ FROM nvidia/cuda:13.0.2-devel-ubuntu24.04 AS ffmpeg_build
 
 ARG FFMPEG_REPO="https://github.com/FFmpeg/FFmpeg.git"
 ARG FFMPEG_VERSION="release/8.0"
-ARG NPROC=4
+# build aimed for g4dn.2xlarge
+ARG NPROC=8
 
 ARG FFMPEG_NV_CODEC_HEADERS_REPO="https://github.com/FFmpeg/nv-codec-headers.git"
 ARG FFMPEG_NV_CODEC_HEADERS_VERSION="n13.0.19.0"
@@ -103,9 +104,9 @@ RUN cat /etc/apt/sources.list.d/debian.sources \
    && rm -rf /opt/ffmpeg.tar \
    && echo "Hello from strimserver"
 
-COPY mediamtx.yaml.template /opt/mediamtx.yaml.template
+# COPY mediamtx.yaml.template /opt/mediamtx.yaml.template
 COPY mediamtx-entrypoint.sh /opt/mediamtx-entrypoint.sh
-COPY transcodelib.sh /opt/transcodelib.sh
+# COPY transcodelib.sh /opt/transcodelib.sh
 
 RUN mkdir -p /opt/mediamtx \
    && wget $MEDIAMTX_BIN_URL -O /opt/mediamtx/mediamtx.tar.gz \
@@ -120,8 +121,8 @@ RUN mkdir -p /opt/mediamtx \
    && ffmpeg -version \
    && ffmpeg -h encoder=h264_nvenc \
    && ffmpeg -h encoder=hevc_nvenc \
-   && chmod +x /opt/mediamtx-entrypoint.sh \
-   && chmod +x /opt/transcodelib.sh
+   && chmod +x /opt/mediamtx-entrypoint.sh
+   # && chmod +x /opt/transcodelib.sh
 
 ENTRYPOINT [ "/opt/mediamtx-entrypoint.sh" ]
 
