@@ -1417,8 +1417,24 @@ $(OFFLINE_SEGMENT_OUTPUT):
 	  -c:a aac -ar 48000 -ac 2 \
 	  -shortest -t 5 $@
 ```
+---
 
+Okay, we've deployed this thing enough to know it wise to
+inject mediamtx.yml.template and transcodelib.sh at deploy
+time. This means:
 
+* systemd service: container mount /opt/config ->
+  /mnt/nvme/config
+* deploy.sh: mkdir -p /mnt/nvme/config and move
+  mediamtx.yml.template and transcodelib.sh in there
+* mediamtx entrypoint.sh : /opt -> config ->
+  mediamtx.yml.template
+* mediamtx.yml.template : transcodelib.sh ->
+  /opt/config/transcodelib.sh
+* dockerfile: remove mediamtx.yml.template copy and
+  transcodelib copy
+* Makefile add mediamtx.yml.template and transcodelib.sh to
+  deployment tar
 
 
 
