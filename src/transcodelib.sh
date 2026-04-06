@@ -79,6 +79,9 @@ normalize() {
    OUTPUT_SRT_URL="$NORMALIZED_PUBLISH_URL"
 
    : "${NORMALIZED_VIDEO_BITRATE:?NORMALIZED_VIDEO_BITRATE is not set}"
+   : "${NORMALIZED_VIDEO_MAXRATE:?NORMALIZED_VIDEO_MAXRATE is not set}"
+   : "${NORMALIZED_VIDEO_MINRATE:?NORMALIZED_VIDEO_MINRATE is not set}"
+   : "${NORMALIZED_VIDEO_BUFSIZE:?NORMALIZED_VIDEO_BUFSIZE is not set}"
    : "${NORMALIZED_AUDIO_BITRATE:?NORMALIZED_AUDIO_BITRATE is not set}"
 
    exec "$FFMPEG" \
@@ -90,29 +93,29 @@ normalize() {
      -i "$INPUT_SRT_URL" \
      -c:v hevc_nvenc \
      -b:v "$NORMALIZED_VIDEO_BITRATE" \
-     -maxrate "$NORMALIZED_VIDEO_BITRATE" \
-     -minrate "$NORMALIZED_VIDEO_BITRATE" \
-     -bufsize "$NORMALIZED_VIDEO_BITRATE" \
-     -preset p1 \
+     -maxrate "$NORMALIZED_VIDEO_MAXRATE" \
+     -minrate "$NORMALIZED_VIDEO_MINRATE" \
+     -bufsize "$NORMALIZED_VIDEO_BUFSIZE" \
+     -preset p3 \
      -tune ll \
      -rc cbr \
      -zerolatency 1 \
      -rc-lookahead 0 \
      -delay 0 \
      -profile:v main \
-     -level 5.1 \
      -g 120 \
      -keyint_min 120 \
      -bf 0 \
      -c:a libfdk_aac -b:a "$NORMALIZED_AUDIO_BITRATE" \
      -ar 48000 \
      -ac 2 \
-     -flush_packets 1 \
-     -max_interleave_delta 100000 \
-     -muxdelay 0 \
-     -muxpreload 0 \
      -f mpegts \
      "$OUTPUT_SRT_URL"
+
+     # -flush_packets 1 \
+     # -max_interleave_delta 100000 \
+     # -muxdelay 0 \
+     # -muxpreload 0 \
 
 }
 
@@ -123,6 +126,9 @@ scale() {
    OUTPUT_SRT_URL="$SCALED_PUBLISH_URL"
 
    : "${SCALED_VIDEO_BITRATE:?SCALED_VIDEO_BITRATE is not set}"
+   : "${SCALED_VIDEO_MAXRATE:?SCALED_VIDEO_MAXRATE is not set}"
+   : "${SCALED_VIDEO_MINRATE:?SCALED_VIDEO_MINRATE is not set}"
+   : "${SCALED_VIDEO_BUFSIZE:?SCALED_VIDEO_BUFSIZE is not set}"
 
    exec "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
@@ -133,10 +139,10 @@ scale() {
      -vf "scale_cuda=1920:1080:interp_algo=lanczos" \
      -c:v hevc_nvenc \
      -b:v "$SCALED_VIDEO_BITRATE" \
-     -maxrate "$SCALED_VIDEO_BITRATE" \
-     -minrate "$SCALED_VIDEO_BITRATE" \
-     -bufsize "$SCALED_VIDEO_BITRATE" \
-     -preset p1 \
+     -maxrate "$SCALED_VIDEO_MAXRATE" \
+     -minrate "$SCALED_VIDEO_MINRATE" \
+     -bufsize "$SCALED_VIDEO_BUFSIZE" \
+     -preset p3 \
      -tune ll \
      -rc cbr \
      -zerolatency 1 \
@@ -148,12 +154,13 @@ scale() {
      -keyint_min 120 \
      -bf 0 \
      -c:a copy \
-     -flush_packets 1 \
-     -max_interleave_delta 100000 \
-     -muxdelay 0 \
-     -muxpreload 0 \
      -f mpegts \
      "$OUTPUT_SRT_URL"
+
+     # -flush_packets 1 \
+     # -max_interleave_delta 100000 \
+     # -muxdelay 0 \
+     # -muxpreload 0 \
 
 }
 
@@ -162,8 +169,6 @@ egress() {
 
    : "${TWITCH_INGEST_SERVER:?TWITCH_INGEST_SERVER is not set (e.g. ingest.global-contribute.live-video.net)}"
    : "${TWITCH_STREAM_KEY:?TWITCH_STREAM_KEY is not set - you should get this from twitch...}"
-   : "${EGRESS_VIDEO_BITRATE:?EGRESS_VIDEO_BITRATE is not set}"
-   : "${EGRESS_AUDIO_BITRATE:?EGRESS_AUDIO_BITRATE is not set}"
    : "${BANDWIDTH_TEST:?BANDWIDTH_TEST is not set}"
 
    case "${BANDWIDTH_TEST,,}" in
@@ -175,6 +180,12 @@ egress() {
    INPUT_SRT_URL="$SCALED_READ_URL"
    TWITCH_RTMP_URL="rtmp://${TWITCH_INGEST_SERVER}/app/${TWITCH_STREAM_KEY}${BW_PARAM}"
 
+   : "${EGRESS_VIDEO_BITRATE:?EGRESS_VIDEO_BITRATE is not set}"
+   : "${EGRESS_VIDEO_MAXRATE:?EGRESS_VIDEO_MAXRATE is not set}"
+   : "${EGRESS_VIDEO_MINRATE:?EGRESS_VIDEO_MINRATE is not set}"
+   : "${EGRESS_VIDEO_BUFSIZE:?EGRESS_VIDEO_BUFSIZE is not set}"
+   : "${EGRESS_AUDIO_BITRATE:?EGRESS_AUDIO_BITRATE is not set}"
+
    exec "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -hwaccel cuda \
@@ -183,10 +194,10 @@ egress() {
      -i "$INPUT_SRT_URL" \
      -c:v h264_nvenc \
      -b:v "$EGRESS_VIDEO_BITRATE" \
-     -maxrate "$EGRESS_VIDEO_BITRATE" \
-     -minrate "$EGRESS_VIDEO_BITRATE" \
-     -bufsize "$EGRESS_VIDEO_BITRATE" \
-     -preset p1 \
+     -maxrate "$EGRESS_VIDEO_MAXRATE" \
+     -minrate "$EGRESS_VIDEO_MINRATE" \
+     -bufsize "$EGRESS_VIDEO_BUFSIZE" \
+     -preset p3 \
      -tune ll \
      -rc cbr \
      -zerolatency 1 \
@@ -201,9 +212,10 @@ egress() {
      -ar 48000 \
      -ac 2 \
      -flvflags no_duration_filesize \
-     -flush_packets 1 \
      -f flv \
      "$TWITCH_RTMP_URL"
+
+     # -flush_packets 1 \
 
 }
 
@@ -212,8 +224,6 @@ scale_and_egress() {
 
    : "${TWITCH_INGEST_SERVER:?TWITCH_INGEST_SERVER is not set (e.g. ingest.global-contribute.live-video.net)}"
    : "${TWITCH_STREAM_KEY:?TWITCH_STREAM_KEY is not set - you should get this from twitch...}"
-   : "${EGRESS_VIDEO_BITRATE:?EGRESS_VIDEO_BITRATE is not set}"
-   : "${EGRESS_AUDIO_BITRATE:?EGRESS_AUDIO_BITRATE is not set}"
    : "${BANDWIDTH_TEST:?BANDWIDTH_TEST is not set}"
    
    case "${BANDWIDTH_TEST,,}" in
@@ -225,6 +235,12 @@ scale_and_egress() {
    INPUT_SRT_URL="$NORMALIZED_READ_URL"
    TWITCH_RTMP_URL="rtmp://${TWITCH_INGEST_SERVER}/app/${TWITCH_STREAM_KEY}${BW_PARAM}"
 
+   : "${EGRESS_VIDEO_BITRATE:?EGRESS_VIDEO_BITRATE is not set}"
+   : "${EGRESS_VIDEO_MAXRATE:?EGRESS_VIDEO_MAXRATE is not set}"
+   : "${EGRESS_VIDEO_MINRATE:?EGRESS_VIDEO_MINRATE is not set}"
+   : "${EGRESS_VIDEO_BUFSIZE:?EGRESS_VIDEO_BUFSIZE is not set}"
+   : "${EGRESS_AUDIO_BITRATE:?EGRESS_AUDIO_BITRATE is not set}"
+
    exec "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -hwaccel cuda \
@@ -234,10 +250,10 @@ scale_and_egress() {
      -vf "scale_cuda=1920:1080:interp_algo=lanczos" \
      -c:v h264_nvenc \
      -b:v "$EGRESS_VIDEO_BITRATE" \
-     -maxrate "$EGRESS_VIDEO_BITRATE" \
-     -minrate "$EGRESS_VIDEO_BITRATE" \
-     -bufsize "$EGRESS_VIDEO_BITRATE" \
-     -preset p1 \
+     -maxrate "$EGRESS_VIDEO_MAXRATE" \
+     -minrate "$EGRESS_VIDEO_MINRATE" \
+     -bufsize "$EGRESS_VIDEO_BUFSIZE" \
+     -preset p3 \
      -tune ll \
      -rc cbr \
      -zerolatency 1 \
@@ -252,9 +268,10 @@ scale_and_egress() {
      -ar 48000 \
      -ac 2 \
      -flvflags no_duration_filesize \
-     -flush_packets 1 \
      -f flv \
      "$TWITCH_RTMP_URL"
+
+     # -flush_packets 1 \
 
 }
 
@@ -268,8 +285,6 @@ normalize_scale_and_egress() {
 
    : "${TWITCH_INGEST_SERVER:?TWITCH_INGEST_SERVER is not set (e.g. ingest.global-contribute.live-video.net)}"
    : "${TWITCH_STREAM_KEY:?TWITCH_STREAM_KEY is not set - you should get this from twitch...}"
-   : "${EGRESS_VIDEO_BITRATE:?EGRESS_VIDEO_BITRATE is not set}"
-   : "${EGRESS_AUDIO_BITRATE:?EGRESS_AUDIO_BITRATE is not set}"
    : "${BANDWIDTH_TEST:?BANDWIDTH_TEST is not set}"
 
    case "${BANDWIDTH_TEST,,}" in
@@ -287,6 +302,12 @@ normalize_scale_and_egress() {
 
    TWITCH_RTMP_URL="rtmp://${TWITCH_INGEST_SERVER}/app/${TWITCH_STREAM_KEY}${BW_PARAM}"
 
+   : "${EGRESS_VIDEO_BITRATE:?EGRESS_VIDEO_BITRATE is not set}"
+   : "${EGRESS_VIDEO_MAXRATE:?EGRESS_VIDEO_MAXRATE is not set}"
+   : "${EGRESS_VIDEO_MINRATE:?EGRESS_VIDEO_MINRATE is not set}"
+   : "${EGRESS_VIDEO_BUFSIZE:?EGRESS_VIDEO_BUFSIZE is not set}"
+   : "${EGRESS_AUDIO_BITRATE:?EGRESS_AUDIO_BITRATE is not set}"
+
    exec "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -fflags +discardcorrupt+genpts \
@@ -297,10 +318,10 @@ normalize_scale_and_egress() {
      -vf "scale_cuda=1920:1080:interp_algo=lanczos" \
      -c:v h264_nvenc \
      -b:v "$EGRESS_VIDEO_BITRATE" \
-     -maxrate "$EGRESS_VIDEO_BITRATE" \
-     -minrate "$EGRESS_VIDEO_BITRATE" \
-     -bufsize "$EGRESS_VIDEO_BITRATE" \
-     -preset p1 \
+     -maxrate "$EGRESS_VIDEO_MAXRATE" \
+     -minrate "$EGRESS_VIDEO_MINRATE" \
+     -bufsize "$EGRESS_VIDEO_BUFSIZE" \
+     -preset p3 \
      -tune ll \
      -rc cbr \
      -zerolatency 1 \
@@ -315,10 +336,10 @@ normalize_scale_and_egress() {
      -ar 48000 \
      -ac 2 \
      -flvflags no_duration_filesize \
-     -flush_packets 1 \
      -f flv \
      "$TWITCH_RTMP_URL"
 
+     # -flush_packets 1 \
 }
 
 

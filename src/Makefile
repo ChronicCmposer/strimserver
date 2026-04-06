@@ -22,9 +22,7 @@ IPERF3_DEPLOYMENT_TAR				:= $(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
 
 $(STRIMSERVER_CONTAINER_OUTPUT): \
 	Dockerfile \
-	mediamtx.yaml.template \
-	mediamtx-entrypoint.sh \
-	transcodelib.sh
+	mediamtx-entrypoint.sh
 	sudo buildctl --addr tcp://127.0.0.1:1234 build \
 		--frontend=dockerfile.v0 \
 		--opt platform=linux/amd64 \
