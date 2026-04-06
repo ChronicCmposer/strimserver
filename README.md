@@ -1436,6 +1436,35 @@ time. This means:
 * Makefile add mediamtx.yml.template and transcodelib.sh to
   deployment tar
 
+---
+
+2026-04-05
+
+Happy Easter!
+
+i think this thing is pretty good. I thought maybe I would
+want a domain-specific language for writing the
+mediamtx.yaml.template and transcodelib.sh
+
+but now I think this configuration is flexible enough to
+handle a huge number of configurations without needing
+recompilation of ffmpeg.
+
+iteration from now on can be much faster ... maybe...
+
+at least we know we don't have to recompile ffmpeg <3
+
+...
+
+it would be nice to know where the quality bottleneck in the
+pipeline is - I think it's probably VideoToolbox, but I'll
+need to download this vod to see what's going on for sure.
+
+we might even to be able to do a VMAF comparison between our
+vod and twitch vod :D
+
+but can't do that until this stream ends anyway - so that's
+the end of our programming segment for today.
 
 
 

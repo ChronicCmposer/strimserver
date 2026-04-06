@@ -53,21 +53,25 @@ STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_s
   # -colorspace bt709 \
   # -color_primaries bt709 \
   # -color_trc bt709 \
+  # -analyzeduration 0 \
+  # -max_delay 0 \
+  # -flush_packets 1 \
+  # -muxdelay 0 \
+  # -muxpreload 0 \
+  # -max_interleave_delta 0 \
 
 exec "$FFMPEG_CMD" \
   -fflags nobuffer \
   -avioflags direct \
   -probesize 32768 \
-  -analyzeduration 0 \
-  -max_delay 0 \
   -i "$INPUT_FIFO" \
   -c:v hevc_videotoolbox \
   -realtime 1 \
   -allow_sw 0 \
-  -b:v 9M \
+  -b:v "$VIDEO_BITRATE" \
   -profile:v 1 \
-  -g 60 \
-  -keyint_min 60 \
+  -g 120 \
+  -keyint_min 120 \
   -bf 0 \
   -forced-idr 1 \
   -constant_bit_rate true \
@@ -76,10 +80,6 @@ exec "$FFMPEG_CMD" \
   -aac_at_mode 0 \
   -ar 48000 \
   -ac 2 \
-  -flush_packets 1 \
-  -max_interleave_delta 0 \
-  -muxdelay 0 \
-  -muxpreload 0 \
   -f mpegts \
   "$STRIMSERVER_SRT_URL"
 

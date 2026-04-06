@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+set -xeuo pipefail
+
+: "${SSH_CMD:?SSH_CMD is not set}"
+: "${SSH_HOST:?SSH_HOST is not set}"
+: "${SSH_USER:?SSH_USER is not set}"
+
+cmd="$SSH_CMD $SSH_USER@$SSH_HOST sudo systemctl stop strimserver.service"
+
+read -r -a argv <<< "$cmd"
+exec "${argv[@]}"
+

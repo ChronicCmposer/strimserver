@@ -93,16 +93,17 @@ sudo mkdir -p $LOGS_DIRECTORY
 set +x
 printf "logs directory created: %s\n" "$LOGS_DIRECTORY"
 
-printf "starting services...\n"
-set -x
-sudo systemctl start \
-	strimserver.service
-set +x
-printf "services started!\n"
+# printf "starting services...\n"
+# set -x
+# sudo systemctl start \
+# 	strimserver.service
+# set +x
+# printf "services started!\n"
 
 printf "srt passphrase: %s\n\n" "$SRT_READ_PASSPHRASE"
 
-printf "Services running on %s: %s \n\n" "$INSTANCE_TYPE" "$PUBLIC_IP"
+# printf "Services running on %s: %s \n\n" "$INSTANCE_TYPE" "$PUBLIC_IP"
+printf "ssh strimserver \"sudo systemctl start strimserver.service\"\n\n"
 
 printf "configure-local-encoder.zsh --strimserver-host %s --passphrase %s\n\n" "$PUBLIC_IP" "$SRT_READ_PASSPHRASE"
 
