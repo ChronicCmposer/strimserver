@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 set -xeuo pipefail
-FFMPEG="/usr/bin/ffmpeg"
+FFMPEG="/usr/local/bin/ffmpeg"
 
 set -a
 . /opt/strimserver.env
@@ -86,36 +86,34 @@ normalize() {
 
    exec "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
-     -fflags +discardcorrupt+genpts \
      -err_detect ignore_err \
-     -drop_changed:v 1 \
-     -f mpegts \
+     -flags +output_corrupt \
+     -flags2 +showall \
      -i "$INPUT_SRT_URL" \
      -c:v hevc_nvenc \
      -b:v "$NORMALIZED_VIDEO_BITRATE" \
      -maxrate "$NORMALIZED_VIDEO_MAXRATE" \
      -minrate "$NORMALIZED_VIDEO_MINRATE" \
      -bufsize "$NORMALIZED_VIDEO_BUFSIZE" \
-     -preset p3 \
-     -tune ll \
+     -preset p1 \
+     -tune hq \
      -rc cbr \
      -zerolatency 1 \
      -rc-lookahead 0 \
      -delay 0 \
      -profile:v main \
-     -g 120 \
-     -keyint_min 120 \
+     -g 20 \
      -bf 0 \
      -c:a libfdk_aac -b:a "$NORMALIZED_AUDIO_BITRATE" \
      -ar 48000 \
      -ac 2 \
      -f mpegts \
      "$OUTPUT_SRT_URL"
-
      # -flush_packets 1 \
      # -max_interleave_delta 100000 \
      # -muxdelay 0 \
      # -muxpreload 0 \
+     # -keyint_min 5 \
 
 }
 
@@ -151,7 +149,6 @@ scale() {
      -profile:v main \
      -level 4.1 \
      -g 120 \
-     -keyint_min 120 \
      -bf 0 \
      -c:a copy \
      -f mpegts \
@@ -206,7 +203,6 @@ egress() {
      -profile:v high \
      -level 4.2 \
      -g 120 \
-     -keyint_min 120 \
      -bf 0 \
      -c:a libfdk_aac -b:a "$EGRESS_AUDIO_BITRATE" \
      -ar 48000 \
@@ -243,9 +239,12 @@ scale_and_egress() {
 
    exec "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
+     -err_detect ignore_err \
+     -flags +output_corrupt \
+     -flags2 +showall \
      -hwaccel cuda \
      -hwaccel_output_format cuda \
-     -f mpegts \
+     -ss 4 \
      -i "$INPUT_SRT_URL" \
      -vf "scale_cuda=1920:1080:interp_algo=lanczos" \
      -c:v h264_nvenc \
@@ -253,16 +252,14 @@ scale_and_egress() {
      -maxrate "$EGRESS_VIDEO_MAXRATE" \
      -minrate "$EGRESS_VIDEO_MINRATE" \
      -bufsize "$EGRESS_VIDEO_BUFSIZE" \
-     -preset p3 \
-     -tune ll \
+     -preset p7 \
+     -tune hq \
      -rc cbr \
      -zerolatency 1 \
      -rc-lookahead 0 \
      -delay 0 \
      -profile:v high \
-     -level 4.2 \
      -g 120 \
-     -keyint_min 120 \
      -bf 0 \
      -c:a libfdk_aac -b:a "$EGRESS_AUDIO_BITRATE" \
      -ar 48000 \
@@ -321,7 +318,7 @@ normalize_scale_and_egress() {
      -maxrate "$EGRESS_VIDEO_MAXRATE" \
      -minrate "$EGRESS_VIDEO_MINRATE" \
      -bufsize "$EGRESS_VIDEO_BUFSIZE" \
-     -preset p3 \
+     -preset p4 \
      -tune ll \
      -rc cbr \
      -zerolatency 1 \
@@ -330,7 +327,6 @@ normalize_scale_and_egress() {
      -profile:v high \
      -level 4.2 \
      -g 120 \
-     -keyint_min 120 \
      -bf 0 \
      -c:a libfdk_aac -b:a "$EGRESS_AUDIO_BITRATE" \
      -ar 48000 \

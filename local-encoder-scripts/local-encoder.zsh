@@ -13,22 +13,25 @@ set +a
 : "${SRT_PUBLISH_PATH:?SRT_PUBLISH_PATH is not set}"
 : "${SRT_PACKET_SIZE:?SRT_PACKET_SIZE is not set}"
 : "${SRT_LATENCY_US:?SRT_LATENCY_US is not set}"
+: "${SRT_TIMEOUT_US:?SRT_TIMEOUT_US is not set}"
 : "${SRT_MAX_BW_BYTES_PER_SEC:?SRT_MAX_BW_BYTES_PER_SEC is not set}"
 : "${SRT_INPUT_BW_BYTES_PER_SEC:?SRT_INPUT_BW_BYTES_PER_SEC is not set}"
 : "${SRT_OVERHEAD_BW_PERCENT:?SRT_OVERHEAD_BW_PERCENT is not set}"
 : "${SRT_PASSPHRASE:?SRT_PASSPHRASE is not set}"
 : "${SRT_PB_KEY_LEN:?SRT_PB_KEY_LEN is not set}"
 : "${FFMPEG_CMD:?FFMPEG_CMD is not set}"
+: "${FFMPEG_NICE:?FFMPEG_NICE is not set}"
 : "${INPUT_FIFO:?INPUT_FIFO is not set}"
 : "${VIDEO_BITRATE:?VIDEO_BITRATE is not set}"
 : "${AUDIO_BITRATE:?AUDIO_BITRATE is not set}"
 
-STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_size=%d&latency=%d&tlpktdrop=1&maxbw=%d&inputbw=%d&oheadbw=%d&passphrase=%s&pbkeylen=%d' \
+STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_size=%d&latency=%d&timeout=%d&tlpktdrop=1&maxbw=%d&inputbw=%d&oheadbw=%d&passphrase=%s&pbkeylen=%d' \
 	"$STRIMSERVER_HOST" \
 	"$STRIMSERVER_SRT_INGEST_PORT" \
 	"$SRT_PUBLISH_PATH" \
 	"$SRT_PACKET_SIZE" \
 	"$SRT_LATENCY_US" \
+	"$SRT_TIMEOUT_US" \
 	"$SRT_MAX_BW_BYTES_PER_SEC" \
 	"$SRT_INPUT_BW_BYTES_PER_SEC" \
 	"$SRT_OVERHEAD_BW_PERCENT" \
@@ -46,7 +49,7 @@ STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_s
   # -realtime true \
   # -flags +low_delay \
   # -maxrate "$VIDEO_BITRATE" \
-# It's clear that we need to control for bitrate overshoot with h264_videotoolbox
+  # It's clear that we need to control for bitrate overshoot with h264_videotoolbox
   # -vf "scale=iw/2:ih/2:flags=lanczos" \
   # -loglevel verbose \
   # -color_range tv \
@@ -59,21 +62,22 @@ STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_s
   # -muxdelay 0 \
   # -muxpreload 0 \
   # -max_interleave_delta 0 \
+  # -forced-idr 1 \
+  # -fflags nobuffer \
+  # -avioflags direct \
+  # -probesize 32768 \
+  # -keyint_min 120 \
+  # -force_key_frames "expr:gte(t,n_forced*4)" \
 
 exec "$FFMPEG_CMD" \
-  -fflags nobuffer \
-  -avioflags direct \
-  -probesize 32768 \
   -i "$INPUT_FIFO" \
   -c:v hevc_videotoolbox \
   -realtime 1 \
   -allow_sw 0 \
   -b:v "$VIDEO_BITRATE" \
   -profile:v 1 \
-  -g 120 \
-  -keyint_min 120 \
+  -g 40 \
   -bf 0 \
-  -forced-idr 1 \
   -constant_bit_rate true \
   -c:a aac_at \
   -b:a "$AUDIO_BITRATE" \

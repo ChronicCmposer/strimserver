@@ -1466,6 +1466,149 @@ vod and twitch vod :D
 but can't do that until this stream ends anyway - so that's
 the end of our programming segment for today.
 
+---
+
+ffmpeg \
+   -f lavfi -i "color=c=0x1a21ff:s=3840x2160:r=60,format=gbrp,geq=r='r(X,Y)*(1-Y/H)':g='g(X,Y)*(1-Y/H)':b='b(X,Y)*(1-Y/H)',format=nv12" \
+   -f lavfi -i anullsrc=r=48000:cl=stereo \
+   -c:v hevc_videotoolbox -b:v 40000k -realtime 1 \
+   -allow_sw 0 -profile:v 1 \
+   -g 120 \
+   -keyint_min 120 \
+   -bf 0 -forced-idr 1 \
+   -constant_bit_rate true -pix_fmt nv12 -r 60 \
+   -c:a aac_at -ar 48000 -ac 2 -b:a 320k \
+   -shortest -t 5 ~/Downloads/test.mp4
+
+---
+
+ffmpeg \
+  -f lavfi -i "nullsrc=s=3840x2160:r=60,format=gbrp,geq=r='(26+5*(1-cos(2*PI*T/30)))*(1-Y/H)':g='(33+109*(1-cos(2*PI*T/30)))*(1-Y/H)':b='255*(1-Y/H)',format=nv12" \
+  -f lavfi -i anullsrc=r=48000:cl=stereo \
+  -c:v hevc_videotoolbox -b:v 40000k -realtime 1 \
+  -allow_sw 0 -profile:v 1 \
+  -g 120 \
+  -keyint_min 120 \
+  -bf 0 -forced-idr 1 \
+  -constant_bit_rate true -pix_fmt nv12 -r 60 \
+  -c:a aac_at -ar 48000 -ac 2 -b:a 320k \
+  -shortest -t 30 ~/Downloads/test.mp4
+
+---
+
+2026-05-06 investigating headless OBS Streaming server setup
+
+* OBS Studio
+* Xvfb / Xvnc / VNC / lightweight desktop
+* obs-websocket
+
+* OBS forum discussions and newer guides commonly describe
+  using Xvnc/Xvfb-style virtual displays for this, because
+  OBS still expects a display environment. Performance can
+  degrade *without proper GPU acceleration*, especially if it
+  falls back to software rendering
+
+* Xvnc/Xvfb-style virtual displays - with HW acceleration
+* obs-websocket - consider local experiments ?
+* Media sources in OBS
+    * how to pull SRT stream from MediaMTX
+        * OBS's built-in Media Source
+    * how to send composite A/V stream back to MediaMTX
+
+From /bin/blog :
+
+* Run a pseudo X11 display server and session. - using Xvfb
+* Run a VNC frontend to the X11 session.
+    * this thing reads the virtual framebuffer
+
+* Xvfb => virtual framebuffer
+    * it's like a different version of the regular x11
+      server
+
+* in addition to headless mode, I want to be able to
+  reattach the head and view the remote OBS with vnc or
+  another solution
+
+Questions:
+
+* how does the Xvfb work? what are my HW acceleration
+  options for this on NVIDIA Tesla T4 ?
+    * it provides a fake screen - and can act as a
+      substitute for regular x11 server
+    * HW acceleration - probably not required, BUT could use:
+        * Real Xorg with dummy display driver + GPU
+        * Xorg using NVIDIA/AMD/Intel driver without a monitor
+
+* do I need to connect vnc client in order for OBS to run?
+    * NO - Xvfb + OBS can run independently from vnc client
+
+* what is the real purpose of x11vnc - aside from providing
+  ability to access and manipulate UI directly ?
+    * none - it consumes the virtual framebuffer
+
+* can I create a minimal version of x11 server + OBS
+  *without* x11vnc ?
+    * yes - just use Xvfb instead of x11 server
+
+* do I need a window manager ? can I just use i3 ?
+    * window manager not needed - I think not, anyway
+
+* Does OBS need additional HW acceleration ? how to enable
+  that ? (maybe only for media source config)
+
+---
+
+Minimal test:
+
+* install xvfb in container
+* install obs-studio in container
+* get it to run (verify with logs that OBS is able to
+  launch)
+
+Optimizations:
+* vfb size - resolution and bit depth (bit depth >= 24bpp)
+
+---
+
+```
+Xvfb :99 -screen 0 800x600x24 &
+export DISPLAY=:99
+python test_gui.py
+```
+
+```
+sudo apt-get install x11vnc xvfb fvwm3 menu menu-xdg \
+    python3-xdg xbase-clients xterm xauth xinit
+```
+
+---
+
+
+Macbook OBS
+     |
+     v
+local ffmpeg encoder
+         |
+         v
+      mediamtx
+         |
+         v
+ffmpeg-normalize
+        |
+        v
+     mediamtx
+        |
+        v
+ffmpeg-scale-and-egress
+            |
+            v
+      Twitch Ingest
+
+---
+
+Okay so - we gotta rebuild ffmpeg without statically linking
+libavcodec.so - then we ought be able to obs --version with
+no problems Shirley
 
 
 
