@@ -4,13 +4,15 @@ import subprocess
 import sys
 
 # def run_ssh_commands(hostname, username, commands):
-def ssh_run(hostname, username, cmd, capture=False):
+def ssh_run(hostname, username, port, cmd, capture=False):
     ssh_cmd = os.environ.get("SSH_CMD", "ssh")
     # for cmd in commands:
     full_cmd = (
         ssh_cmd.split() + [
             "-t",  # allocate a TTY so sudo can run without prompting
             f"{username}@{hostname}",
+            "-p",
+            f"{port}",
             cmd
         ]
     )
@@ -36,18 +38,19 @@ def ssh_run(hostname, username, cmd, capture=False):
 
     return result
 
-def run_ssh_commands(hostname, username, commands):
+def run_ssh_commands(hostname, username, port, commands):
     for cmd in commands:
-        ssh_run(hostname, username, cmd, capture=False)
+        ssh_run(hostname, username, port, cmd, capture=False)
 
 if __name__ == "__main__":
     HOST = os.environ.get("SSH_HOST", default="strimserver")
     USER = os.environ.get("SSH_USER", default="ec2-user")
+    PORT = 22
     S3_BUCKET = os.environ.get("S3_BUCKET", default="s3://<bucket-name>")
     DEPLOYMENT = os.environ.get("DEPLOYMENT", default="strimserver-deployment.tar")
 
     # select nvme drive
-    r = ssh_run(HOST, USER, "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT", capture=True)
+    r = ssh_run(HOST, USER, PORT, "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT", capture=True)
     print("\nRemote disks:\n")
     print(r.stdout)
     dev = input("Enter the device to format [/dev/nvme1n1]: ").strip()
@@ -74,4 +77,4 @@ if __name__ == "__main__":
 
     ]
 
-    run_ssh_commands(HOST, USER, CMDS)
+    run_ssh_commands(HOST, USER, PORT, CMDS)

@@ -6,6 +6,8 @@ Wants=containerd.service
 [Service]
 Type=simple
 User=root
+Nice=-10
+CPUWeight=150
 
 # before starting, kill & delete any leftover container/task
 ExecStartPre=-/usr/bin/ctr tasks kill --signal SIGKILL strimserver

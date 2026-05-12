@@ -63,6 +63,13 @@ source fish-deploy.sh
 
 printf "installing remaining tools...\n"
 sudo dnf install -y htop
+
+aws s3 cp s3://<bucket-name>/openssh-connor-10.3p1-1.amzn2023.x86_64.rpm /mnt/nvme/openssh.rpm
+
+sudo dnf install -y /mnt/nvme/openssh.rpm
+sudo /usr/local/bin/ssh-keygen -A
+sudo /usr/local/sbin/sshd
+
 # put other package installations here
 printf "tool installation complete!\n"
 

@@ -18,6 +18,14 @@ logStructured: no
 # logFile: mediamtx.log
 # When "syslog" is in logDestinations, use prefix for logs.
 # sysLogPrefix: mediamtx
+
+# Timeout of read operations.
+# readTimeout >= SRT_LATENCY + scheduling jitter + application read gap
+readTimeout: ${MEDIAMTX_READ_TIMEOUT_DURATION} 
+
+# Timeout of write operations.
+writeTimeout: 10s
+
 # Size of the queue of outgoing packets.
 # A higher value allows to increase throughput, a lower value allows to save RAM.
 writeQueueSize: 512 
@@ -307,7 +315,7 @@ paths:
 
   ingress0:
     source: publisher
-    runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && normalize 2>&1 | log_prefix normalize"'
+    runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && nice -n -5 normalize 2>&1 | log_prefix normalize"'
     # runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && normalize_scale_and_egress 2>&1 | log_prefix normalize-scale-and-egress"'
     srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     alwaysAvailable: true
@@ -316,7 +324,7 @@ paths:
   normalized:
     source: publisher
     # runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && scale 2>&1 | log_prefix scle"'
-    runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && scale_and_egress 2>&1 | log_prefix scale-and-egress"'
+    runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && nice -n -5 scale_and_egress 2>&1 | log_prefix scale-and-egress"'
     srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     record: yes
     # Path of recording segments.
