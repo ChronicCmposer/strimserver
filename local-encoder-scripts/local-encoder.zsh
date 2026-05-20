@@ -71,12 +71,15 @@ STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_s
 
 exec "$FFMPEG_CMD" \
   -i "$INPUT_FIFO" \
+  -vf "fps=60" \
+  -fps_mode cfr \
+  -frame_drop_threshold 1.0 \
   -c:v hevc_videotoolbox \
   -realtime 1 \
   -allow_sw 0 \
   -b:v "$VIDEO_BITRATE" \
   -profile:v 1 \
-  -g 40 \
+  -g 20 \
   -bf 0 \
   -constant_bit_rate true \
   -c:a aac_at \

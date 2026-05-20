@@ -24,11 +24,11 @@ logStructured: no
 readTimeout: ${MEDIAMTX_READ_TIMEOUT_DURATION} 
 
 # Timeout of write operations.
-writeTimeout: 10s
+writeTimeout: ${MEDIAMTX_READ_TIMEOUT_DURATION}
 
 # Size of the queue of outgoing packets.
 # A higher value allows to increase throughput, a lower value allows to save RAM.
-writeQueueSize: 512 
+writeQueueSize: 8192 
 
 ###############################################
 # Global settings -> SRT server
@@ -36,20 +36,20 @@ writeQueueSize: 512
 # Enable publishing and reading streams with the SRT protocol.
 srt: yes
 # Address of the SRT listener.
-srtAddress: :9000
+srtAddress: :${STRIMSERVER_SRT_PORT}
 
 ###############################################
 # Global settings -> RTSP server
 
 # Enable publishing and reading streams with the RTSP protocol.
-rtsp: no 
+rtsp: yes
 # Enabled RTSP transport protocols. The handshake is always performed with TCP.
-# rtspTransports: [tcp]
+rtspTransports: [tcp]
 # Use secure protocol variants (RTSPS, SRTP, SRTCP).
 # Available values are "no", "strict", "optional".
 # rtspEncryption: "no"
 # Address of the TCP/RTSP listener. This is needed only when encryption is "no" or "optional".
-# rtspAddress: :8554
+rtspAddress: :${STRIMSERVER_RTSP_PORT}
 
 ###############################################
 # Global settings -> RTMP server
@@ -309,23 +309,17 @@ pathDefaults:
 # for example "~^(test1|test2)$" will match both "test1" and "test2",
 # for example "~^prefix" will match all paths that start with "prefix".
 paths:
-  # example:
-  # my_camera:
-  #   source: rtsp://my_camera
 
   ingress0:
     source: publisher
-    runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && nice -n -5 normalize 2>&1 | log_prefix normalize"'
-    # runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && normalize_scale_and_egress 2>&1 | log_prefix normalize-scale-and-egress"'
+    runOnReady: '/usr/bin/nice -n 5 /bin/bash -lc ". /opt/transcodelib.sh && sleep ${NORMALIZE_STARTUP_DELAY_SECONDS} && normalize 2>&1 | log_prefix normalize"'
     srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     alwaysAvailable: true
     alwaysAvailableFile: "/opt/video-files/strimserver-offline.mp4"
 
   normalized:
-    source: publisher
-    # runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && scale 2>&1 | log_prefix scle"'
-    runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && nice -n -5 scale_and_egress 2>&1 | log_prefix scale-and-egress"'
-    srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
+    source: 'unix+mpegts://${NORMALIZED_MPEGTS_SOCKET}'
+    runOnReady: '/usr/bin/nice -n 5 /bin/bash -lc ". /opt/transcodelib.sh && sleep ${SCALE_STARTUP_DELAY_SECONDS} && scale_and_egress 2>&1 | log_prefix scale-and-egress"'
     record: yes
     # Path of recording segments.
     # Extension is added automatically.
