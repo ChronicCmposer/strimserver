@@ -13,6 +13,7 @@ CPUWeight=150
 ExecStartPre=-/usr/bin/ctr tasks kill --signal SIGKILL strimserver
 ExecStartPre=-/usr/bin/ctr containers delete strimserver
 ExecStart=/usr/bin/ctr run --net-host --gpus 0 \
+  --cap-add CAP_SYS_NICE \
   --mount type=bind,src=/mnt/nvme/strimserver.env,dst=/opt/strimserver.env,options=rbind:rw \
   --mount type=bind,src=/mnt/nvme/mediamtx.yaml.template,dst=/opt/mediamtx.yaml.template,options=rbind:rw \
   --mount type=bind,src=/mnt/nvme/transcodelib.sh,dst=/opt/transcodelib.sh,options=rbind:rw \

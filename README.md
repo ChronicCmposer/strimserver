@@ -1482,6 +1482,8 @@ ffmpeg \
 
 ---
 
+Oscillation between blue and vivid electric cyan
+
 ffmpeg \
   -f lavfi -i "nullsrc=s=3840x2160:r=60,format=gbrp,geq=r='(26+5*(1-cos(2*PI*T/30)))*(1-Y/H)':g='(33+109*(1-cos(2*PI*T/30)))*(1-Y/H)':b='255*(1-Y/H)',format=nv12" \
   -f lavfi -i anullsrc=r=48000:cl=stereo \

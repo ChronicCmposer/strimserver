@@ -13,14 +13,14 @@ if [ -z "${SRT_PUBLISH_PASSPHRASE:-}" ] && [ -f /run/secrets/srt-passphrase ]; t
 fi
 
 # Fail fast if missing
-: "${SRT_PUBLISH_PASSPHRASE:?SRT_PUBLISH_PASSPHRASE is required}"
+: "${NORMALIZED_MPEGTS_SOCKET:?NORMALIZED_MPEGTS_SOCKET is required}"
+
 
 # Render final config
-envsubst '${SRT_PUBLISH_PASSPHRASE}' \
-   < /opt/mediamtx.yaml.template \
-   > /opt/mediamtx.yaml
+envsubst < /opt/mediamtx.yaml.template > /opt/mediamtx.yaml
 
 
-exec /usr/local/bin/mediamtx \
-   /opt/mediamtx.yaml
+rm -f "$NORMALIZED_MPEGTS_SOCKET"
+
+exec /usr/bin/nice -n -10 /usr/local/bin/mediamtx /opt/mediamtx.yaml
 
