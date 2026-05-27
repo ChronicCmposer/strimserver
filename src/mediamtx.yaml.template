@@ -315,7 +315,7 @@ paths:
     runOnReady: '/usr/bin/nice -n 5 /bin/bash -lc ". /opt/transcodelib.sh && sleep ${NORMALIZE_STARTUP_DELAY_SECONDS} && normalize 2>&1 | log_prefix normalize"'
     srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     alwaysAvailable: true
-    alwaysAvailableFile: "/opt/video-files/strimserver-offline.mp4"
+    alwaysAvailableFile: "/opt/video-files/strimserver-offline-2160p60.mp4"
 
   normalized:
     source: 'unix+mpegts://${NORMALIZED_MPEGTS_SOCKET}'

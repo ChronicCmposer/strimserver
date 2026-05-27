@@ -70,23 +70,17 @@ STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_s
   # -force_key_frames "expr:gte(t,n_forced*4)" \
 
 exec "$FFMPEG_CMD" \
+  -fflags +nobuffer \
+  -flags low_delay \
+  -analyzeduration 0 \
+  -probesize 32 \
+  -thread_queue_size 16 \
   -i "$INPUT_FIFO" \
-  -vf "fps=60" \
-  -fps_mode cfr \
-  -frame_drop_threshold 1.0 \
-  -c:v hevc_videotoolbox \
-  -realtime 1 \
-  -allow_sw 0 \
-  -b:v "$VIDEO_BITRATE" \
-  -profile:v 1 \
-  -g 20 \
-  -bf 0 \
-  -constant_bit_rate true \
-  -c:a aac_at \
-  -b:a "$AUDIO_BITRATE" \
-  -aac_at_mode 0 \
-  -ar 48000 \
-  -ac 2 \
+  -c:v copy \
+  -c:a copy \
+  -max_interleave_delta 0 \
+  -flush_packets 1 \
+  -avioflags direct \
   -f mpegts \
   "$STRIMSERVER_SRT_URL"
 

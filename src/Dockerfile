@@ -53,6 +53,15 @@ RUN git clone --depth 1 --branch "$FFMPEG_NV_CODEC_HEADERS_VERSION" \
       --enable-nvenc \
       --enable-cuda-nvcc \
       --enable-filter=scale_cuda \
+      --enable-filter=overlay_cuda \
+      --enable-filter=pad_cuda \
+      --enable-filter=thumbnail_cuda \
+      --enable-filter=transpose_cuda \
+      --enable-filter=yadif_cuda \
+      --enable-filter=bwdif_cuda \
+      --enable-filter=bilateral_cuda \
+      --enable-filter=chromakey_cuda \
+      --enable-filter=colorspace_cuda \
       \
       --enable-protocol=rtmp \
       \
