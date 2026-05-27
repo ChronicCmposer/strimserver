@@ -88,7 +88,7 @@ printf "video-files directory created: %s\n" "$VIDEO_FILES_DIRECTORY"
 
 printf "configuring offline segment...\n"
 set -x
-OFFLINE_SEGMENT_FILE_NAME=strimserver-offline.mp4
+OFFLINE_SEGMENT_FILE_NAME=strimserver-offline-2160p60.mp4
 sudo cp "$OFFLINE_SEGMENT_FILE_NAME" "$VIDEO_FILES_DIRECTORY"
 set +x
 printf "offline segment configured: %s\n" "$OFFLINE_SEGMENT_FILE_NAME"

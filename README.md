@@ -1482,7 +1482,7 @@ ffmpeg \
 
 ---
 
-Oscillation between blue and vivid electric cyan
+Oscillation between blue and vivid electric cyan - 2160p60
 
 ffmpeg \
   -f lavfi -i "nullsrc=s=3840x2160:r=60,format=gbrp,geq=r='(26+5*(1-cos(2*PI*T/30)))*(1-Y/H)':g='(33+109*(1-cos(2*PI*T/30)))*(1-Y/H)':b='255*(1-Y/H)',format=nv12" \
@@ -1495,6 +1495,28 @@ ffmpeg \
   -constant_bit_rate true -pix_fmt nv12 -r 60 \
   -c:a aac_at -ar 48000 -ac 2 -b:a 320k \
   -shortest -t 30 ~/Downloads/test.mp4
+
+---
+
+Oscillation between blue and vivid electric cyan 1440p60
+
+ffmpeg \
+  -f lavfi -i "nullsrc=s=2560x1440:r=60,format=gbrp,geq=r='(26+5*(1-cos(2*PI*T/30)))*(1-Y/H)':g='(33+109*(1-cos(2*PI*T/30)))*(1-Y/H)':b='255*(1-Y/H)',format=nv12" \
+  -f lavfi -i anullsrc=r=48000:cl=stereo \
+  -c:v hevc_videotoolbox \
+  -b:v 40000k \
+  -realtime 1 \
+  -allow_sw 0 \
+  -profile:v main \
+  -g 20 \
+  -bf 0 \
+  -constant_bit_rate true \
+  -spatial_aq 1 \
+  -pix_fmt nv12 \
+  -c:a aac_at -ar 48000 -ac 2 -b:a 320k \
+  -shortest -t 30 \
+  -movflags +faststart \
+  ~/Downloads/strimserver-offline-1440p60.mp4
 
 ---
 
@@ -1611,7 +1633,6 @@ ffmpeg-scale-and-egress
 Okay so - we gotta rebuild ffmpeg without statically linking
 libavcodec.so - then we ought be able to obs --version with
 no problems Shirley
-
 
 
 
