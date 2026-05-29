@@ -9,7 +9,7 @@ RUN apk add \
    iperf3="$IPERF3_VERSION" \
    fish
 
-COPY iperf3-entrypoint.sh /opt/iperf3-entrypoint.sh
+COPY entrypoint.sh /opt/iperf3-entrypoint.sh
 COPY iperf3.env /opt/iperf3.env
 
 

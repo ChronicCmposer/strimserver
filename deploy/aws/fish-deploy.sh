@@ -21,6 +21,7 @@ sudo mkdir -p $(dirname $FISH_SYSTEM_CONFIG_FILE)
 } | sudo tee "$FISH_SYSTEM_CONFIG_FILE"
 
 cat "$FISH_SYSTEM_CONFIG_FILE" prompt_login.fish | sudo tee "$FISH_SYSTEM_CONFIG_FILE"
+rm -f /mnt/nvme/prompt_login.fish
 
 sudo mkdir -p "$FISH_VENDOR_COMPLETIONS_DIR"
 

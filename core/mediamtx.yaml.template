@@ -312,14 +312,14 @@ paths:
 
   ingress0:
     source: publisher
-    runOnReady: '/usr/bin/nice -n 5 /bin/bash -lc ". /opt/transcodelib.sh && sleep ${NORMALIZE_STARTUP_DELAY_SECONDS} && normalize 2>&1 | log_prefix normalize"'
+    runOnReady: '/usr/bin/nice -n 5 /bin/bash -lc ". /opt/strimserver/bin/transcode.sh && sleep ${NORMALIZE_STARTUP_DELAY_SECONDS} && normalize 2>&1 | log_prefix normalize"'
     srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     alwaysAvailable: true
-    alwaysAvailableFile: "/opt/video-files/strimserver-offline-2160p60.mp4"
+    alwaysAvailableFile: "/opt/strimserver/video-files/strimserver-offline-2160p60.mp4"
 
   normalized:
     source: 'unix+mpegts://${NORMALIZED_MPEGTS_SOCKET}'
-    runOnReady: '/usr/bin/nice -n 5 /bin/bash -lc ". /opt/transcodelib.sh && sleep ${SCALE_STARTUP_DELAY_SECONDS} && scale_and_egress 2>&1 | log_prefix scale-and-egress"'
+    runOnReady: '/usr/bin/nice -n 5 /bin/bash -lc ". /opt/strimserver/bin/transcode.sh && sleep ${SCALE_STARTUP_DELAY_SECONDS} && scale_and_egress 2>&1 | log_prefix scale-and-egress"'
     record: yes
     # Path of recording segments.
     # Extension is added automatically.
@@ -343,11 +343,6 @@ paths:
     recordDeleteAfter: 0s
     # Settings under path "all_others" are applied to all paths that
     # do not match another entry.
-
-  # scaled:
-  #   source: publisher
-  #   runOnReady: '/bin/bash -lc ". /opt/transcodelib.sh && egress 2>&1 | log_prefix egrs"'
-  #   srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
 
   all_others:
 

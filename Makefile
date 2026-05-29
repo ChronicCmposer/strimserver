@@ -1,3 +1,10 @@
+CORE_DIR := core
+AWS_DEPLOY_DIR := deploy/aws
+LOCAL_ENCODER_DIR := tools/local-encoder
+BANDWIDTH_TEST_DIR := tools/bandwidth-test
+SRT_TEST_DIR := tools/srt-test
+
+
 S3_BUCKET 								?= s3://<bucket-name>
 OUTPUT_PATH								?= $(HOME)/local-dev/strimserver
 STRIMSERVER_IMAGE_NAME 				?= docker.io/library/strimserver:latest
@@ -21,64 +28,84 @@ IPERF3_DEPLOYMENT_TAR				:= $(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
 
 
 $(STRIMSERVER_CONTAINER_OUTPUT): \
-	Dockerfile \
-	mediamtx-entrypoint.sh
+	$(CORE_DIR)/Dockerfile \
+	$(CORE_DIR)/entrypoint.sh
 	sudo buildctl --addr tcp://127.0.0.1:1234 build \
 		--frontend=dockerfile.v0 \
 		--opt platform=linux/amd64 \
-		--local context=. \
-		--local dockerfile=. \
+		--local context=$(CORE_DIR) \
+		--local dockerfile=$(CORE_DIR) \
 		--opt filename=./Dockerfile \
 		--progress=plain \
 		--output type=oci,name=$(STRIMSERVER_IMAGE_NAME),dest=$@
 
 $(LIBSRT_CONTAINER_OUTPUT): \
-	Dockerfile-libsrt
+	$(SRT_TEST_DIR)/Dockerfile
 	sudo buildctl build \
 		--frontend=dockerfile.v0 \
 		--opt platform=linux/amd64 \
-		--local context=. \
-		--local dockerfile=. \
-		--opt filename=./Dockerfile-libsrt \
+		--local context=$(SRT_TEST_DIR) \
+		--local dockerfile=$(SRT_TEST_DIR) \
+		--opt filename=./Dockerfile \
 		--progress=plain \
 		--output type=oci,name=$(LIBSRT_IMAGE_NAME),dest=$@
 
 $(IPERF3_CONTAINER_OUTPUT): \
-	Dockerfile-iperf3
+	$(BANDWIDTH_TEST_DIR)/Dockerfile
 	sudo buildctl build \
 		--frontend=dockerfile.v0 \
 		--opt platform=linux/amd64 \
-		--local context=. \
-		--local dockerfile=. \
-		--opt filename=./Dockerfile-iperf3 \
+		--local context=$(BANDWIDTH_TEST_DIR) \
+		--local dockerfile=$(BANDWIDTH_TEST_DIR) \
+		--opt filename=./Dockerfile \
 		--progress=plain \
 		--output type=oci,name=$(IPERF3_IMAGE_NAME),dest=$@
+
+core/strimserver.env:
+	$(error Missing core/strimserver.env. Copy core/strimserver.env.example and fill in secrets)
 
 $(STRIMSERVER_DEPLOYMENT_TAR): \
    $(STRIMSERVER_CONTAINER_OUTPUT) \
    $(OFFLINE_SEGMENT_OUTPUT) \
-   deploy.sh \
-   fish-deploy.sh \
-   imdslib.sh \
-   prompt_login.fish \
-   strimserver.service \
-   strimserver.env \
-	mediamtx.yaml.template \
-	transcodelib.sh
+	deploy/aws/deploy.sh \
+	deploy/aws/fish-deploy.sh \
+	deploy/aws/imdslib.sh \
+	deploy/aws/prompt_login.fish \
+	deploy/aws/strimserver.service \
+	core/strimserver.env \
+	core/mediamtx.yaml.template \
+	core/transcode.sh
 	tar -cvf $@ \
 		--ignore-failed-read --warning=all --show-transformed-names \
-		deploy.sh \
-		fish-deploy.sh \
-		imdslib.sh \
-		prompt_login.fish \
-		strimserver.service \
-		strimserver.env \
-		mediamtx.yaml.template \
-		transcodelib.sh \
+		--transform='s#deploy/aws/##' \
+		--transform='s#core/##' \
+		deploy/aws/deploy.sh \
+		deploy/aws/fish-deploy.sh \
+		deploy/aws/imdslib.sh \
+		deploy/aws/prompt_login.fish \
+		deploy/aws/strimserver.service \
+		core/strimserver.env \
+		core/mediamtx.yaml.template \
+		core/transcode.sh \
 		-C $(OUTPUT_PATH) $(STRIMSERVER_IMAGE_FILE_NAME) $(OFFLINE_SEGMENT_FILE_NAME)
 
-$(IPERF3_DEPLOYMENT_TAR): $(IPERF3_CONTAINER_OUTPUT) iperf-deploy.sh fish-deploy.sh imdslib.sh prompt_login.fish iperf3.service iperf3.env
-	tar --ignore-failed-read --warning=all --show-transformed-names -cvf $@ --transform='s#iperf-deploy\.sh$$#deploy.sh#' iperf-deploy.sh fish-deploy.sh imdslib.sh prompt_login.fish iperf3.service iperf3.env -C $(OUTPUT_PATH) $(IPERF3_IMAGE_FILE_NAME)
+$(IPERF3_DEPLOYMENT_TAR): \
+   $(IPERF3_CONTAINER_OUTPUT) \
+   $(BANDWIDTH_TEST_DIR)/iperf-deploy.sh \
+   $(BANDWIDTH_TEST_DIR)/fish-deploy.sh \
+   $(BANDWIDTH_TEST_DIR)/imdslib.sh \
+   $(BANDWIDTH_TEST_DIR)/prompt_login.fish \
+   $(BANDWIDTH_TEST_DIR)/iperf3.service \
+   $(BANDWIDTH_TEST_DIR)/iperf3.env
+	tar --ignore-failed-read --warning=all --show-transformed-names -cvf $@ \
+      --transform='s#iperf-deploy\.sh$$#deploy.sh#' \
+		$(BANDWIDTH_TEST_DIR)/iperf-deploy.sh \
+		$(BANDWIDTH_TEST_DIR)/fish-deploy.sh \
+		$(BANDWIDTH_TEST_DIR)/imdslib.sh \
+		$(BANDWIDTH_TEST_DIR)/prompt_login.fish \
+		$(BANDWIDTH_TEST_DIR)/iperf3.service \
+		$(BANDWIDTH_TEST_DIR)/iperf3.env \
+      -C $(OUTPUT_PATH) $(IPERF3_IMAGE_FILE_NAME)
 
 build-libsrt: $(LIBSRT_CONTAINER_OUTPUT)
 	@echo "We built $(LIBSRT_CONTAINER_OUTPUT) EZ Clap"
