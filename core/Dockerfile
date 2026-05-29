@@ -16,11 +16,6 @@ RUN apt-get update \
    && apt-get install -y --no-install-recommends \
       build-essential pkgconf git \
       nasm yasm \
-      zlib1g-dev \
-      libssl-dev \
-      libsrt-openssl-dev \
-      libsrt1.5-openssl \
-      libffmpeg-nvenc-dev \
       libfdk-aac-dev \
    && rm -rf /var/lib/apt/lists/*
 
@@ -42,38 +37,65 @@ RUN git clone --depth 1 --branch "$FFMPEG_NV_CODEC_HEADERS_VERSION" \
       --extra-ldflags="-L/usr/local/cuda/lib64" \
       --nvccflags="-gencode arch=compute_75,code=sm_75 -O2" \
       --extra-libs="-lpthread -lm" \
-      --disable-doc --disable-debug \
+      \
+      --disable-everything \
+      --disable-autodetect \
+      --disable-doc \
+      --disable-debug \
+      --disable-ffplay \
+      --disable-ffprobe \
+      --disable-avdevice \
+      --disable-indevs \
+      --disable-outdevs \
+      \
+      --enable-ffmpeg \
+      --enable-network \
+      --enable-pthreads \
+      --enable-swresample \
+      --enable-swscale \
       \
       --enable-nonfree \
-      --enable-openssl \
-      --enable-libsrt \
       --enable-libfdk_aac \
       \
       --enable-ffnvcodec \
       --enable-nvenc \
+      --enable-nvdec \
       --enable-cuda-nvcc \
+      --enable-cuvid \
+      --enable-decoder=hevc_cuvid \
+      --enable-hwaccel=hevc_cuda \
+      --enable-filter=hwupload_cuda \
       --enable-filter=scale_cuda \
-      --enable-filter=overlay_cuda \
-      --enable-filter=pad_cuda \
-      --enable-filter=thumbnail_cuda \
-      --enable-filter=transpose_cuda \
-      --enable-filter=yadif_cuda \
-      --enable-filter=bwdif_cuda \
-      --enable-filter=bilateral_cuda \
-      --enable-filter=chromakey_cuda \
-      --enable-filter=colorspace_cuda \
       \
+      --enable-protocol=tcp \
+      --enable-protocol=unix \
       --enable-protocol=rtmp \
+      \
+      --enable-demuxer=rtsp \
+      --enable-demuxer=rtp \
+      --enable-demuxer=mpegts \
       \
       --enable-muxer=flv \
       --enable-muxer=mpegts \
-      --enable-demuxer=flv \
-      --enable-demuxer=mpegts \
       \
-      --enable-encoder=aac \
-      --enable-encoder=pcm_s24le \
+      --enable-decoder=hevc \
       --enable-decoder=aac \
-      --enable-decoder=pcm_s24le || true \
+      \
+      --enable-encoder=hevc_nvenc \
+      --enable-encoder=h264_nvenc \
+      --enable-encoder=libfdk_aac \
+      \
+      --enable-parser=hevc \
+      --enable-parser=aac \
+      \
+      --enable-bsf=hevc_mp4toannexb \
+      --enable-bsf=aac_adtstoasc \
+      \
+      --enable-filter=fps \
+      --enable-filter=setpts \
+      --enable-filter=format \
+      --enable-filter=scale \
+      --enable-filter=aresample || true \
    && make -C /opt/ffmpeg-src -j$NPROC
 
    # && cat /opt/ffmpeg-src/ffbuild/config.log \
@@ -106,7 +128,6 @@ RUN cat /etc/apt/sources.list.d/debian.sources \
       ca-certificates \
       fish \
       gettext-base \
-      libsrt1.5-openssl \
       libfdk-aac2t64 \
       wget  \
       obs-studio \
@@ -116,7 +137,7 @@ RUN cat /etc/apt/sources.list.d/debian.sources \
    && echo "/usr/local/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/usr-local-x86_64-linux-gnu.conf \
    && ldconfig
 
-COPY mediamtx-entrypoint.sh /opt/mediamtx-entrypoint.sh
+COPY entrypoint.sh /opt/strimserver/entrypoint.sh
 
 RUN mkdir -p /opt/mediamtx \
    && wget $MEDIAMTX_BIN_URL -O /opt/mediamtx/mediamtx.tar.gz \
@@ -132,9 +153,9 @@ RUN mkdir -p /opt/mediamtx \
    && ffmpeg -version \
    && ffmpeg -h encoder=h264_nvenc \
    && ffmpeg -h encoder=hevc_nvenc \
-   && chmod +x /opt/mediamtx-entrypoint.sh
+   && chmod +x /opt/strimserver/entrypoint.sh
 
-ENTRYPOINT [ "/opt/mediamtx-entrypoint.sh" ]
+ENTRYPOINT [ "/opt/strimserver/entrypoint.sh" ]
 
 
 

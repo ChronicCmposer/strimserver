@@ -2,7 +2,7 @@
 set -xeuo
 
 set -a
-. /opt/strimserver.env
+. /opt/strimserver/config/strimserver.env
 set +a
 
 
@@ -17,10 +17,11 @@ fi
 
 
 # Render final config
-envsubst < /opt/mediamtx.yaml.template > /opt/mediamtx.yaml
+mkdir -p /opt/strimserver/runtime
+envsubst < /opt/strimserver/config/mediamtx.yaml.template > /opt/strimserver/runtime/mediamtx.yaml
 
 
 rm -f "$NORMALIZED_MPEGTS_SOCKET"
 
-exec /usr/bin/nice -n -10 /usr/local/bin/mediamtx /opt/mediamtx.yaml
+exec /usr/bin/nice -n -10 /usr/local/bin/mediamtx /opt/strimserver/runtime/mediamtx.yaml
 

@@ -14,12 +14,12 @@ ExecStartPre=-/usr/bin/ctr tasks kill --signal SIGKILL strimserver
 ExecStartPre=-/usr/bin/ctr containers delete strimserver
 ExecStart=/usr/bin/ctr run --net-host --gpus 0 \
   --cap-add CAP_SYS_NICE \
-  --mount type=bind,src=/mnt/nvme/strimserver.env,dst=/opt/strimserver.env,options=rbind:rw \
-  --mount type=bind,src=/mnt/nvme/mediamtx.yaml.template,dst=/opt/mediamtx.yaml.template,options=rbind:rw \
-  --mount type=bind,src=/mnt/nvme/transcodelib.sh,dst=/opt/transcodelib.sh,options=rbind:rw \
+  --mount type=bind,src=/mnt/nvme/config/strimserver.env,dst=/opt/strimserver/config/strimserver.env,options=rbind:rw \
+  --mount type=bind,src=/mnt/nvme/config/mediamtx.yaml.template,dst=/opt/strimserver/config/mediamtx.yaml.template,options=rbind:rw \
+  --mount type=bind,src=/mnt/nvme/bin/transcode.sh,dst=/opt/strimserver/bin/transcode.sh,options=rbind:rw \
   --mount type=bind,src=/mnt/nvme/srt-passphrase,dst=/run/secrets/srt-passphrase,options=rbind:rw \
-  --mount type=bind,src=/mnt/nvme/video-files,dst=/opt/video-files,options=rbind:rw \
-  --mount type=bind,src=/mnt/nvme/logs,dst=/opt/logs,options=rbind:rw \
+  --mount type=bind,src=/mnt/nvme/video-files,dst=/opt/strimserver/video-files,options=rbind:rw \
+  --mount type=bind,src=/mnt/nvme/logs,dst=/opt/strimserver/logs,options=rbind:rw \
   docker.io/library/strimserver:latest strimserver
 
 # on stop, terminate task, then delete container

@@ -16,9 +16,19 @@ trap cleanup EXIT INT TERM
 : "${TARGET_HOSTNAME:=strimserver}"
 
 # metadata / diagnostics
-source imdslib.sh 
+source /mnt/nvme/imdslib.sh 
 export PUBLIC_IP=$(get_public_ip)
 export INSTANCE_TYPE=$(get_instance_type)
+
+rm -f /mnt/nvme/imdslib.sh
+
+# config/bin directories
+mkdir -p /mnt/nvme/config
+mkdir -p /mnt/nvme/bin
+
+mv /mnt/nvme/strimserver.env /mnt/nvme/config/strimserver.env
+mv /mnt/nvme/mediamtx.yaml.template /mnt/nvme/config/mediamtx.yaml.template
+mv /mnt/nvme/transcode.sh /mnt/nvme/bin/transcode.sh
 
 # containerd
 printf "configuring containerd...\n"
@@ -39,7 +49,9 @@ SERVICE_FILES_TARGET=/usr/local/lib/systemd/system
 set -x
 
 sudo install -D -t $SERVICE_FILES_TARGET \
-	strimserver.service
+	/mnt/nvme/strimserver.service
+
+rm -f /mnt/nvme/strimserver.service
 
 sudo systemctl daemon-reload
 set +x
@@ -49,6 +61,7 @@ printf "systemd service files installed!\n"
 printf "importing images...\n"
 set -x
 sudo ctr i import strimserver-container.tar
+rm -f strimserver-container.tar
 set +x
 printf "image import started!\n"
 
@@ -59,7 +72,8 @@ export SRT_READ_PASSPHRASE="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 70)"
 printf "%s\n" "$SRT_READ_PASSPHRASE" > $SRT_READ_PASSPHRASE_FILE
 printf "srt passphrase generated!\n"
 
-source fish-deploy.sh
+source /mnt/nvme/fish-deploy.sh
+rm -f /mnt/nvme/fish-deploy.sh
 
 printf "installing remaining tools...\n"
 sudo dnf install -y htop
@@ -67,6 +81,8 @@ sudo dnf install -y htop
 aws s3 cp s3://strimserver.cvbn.cc/openssh-connor-10.3p1-1.amzn2023.x86_64.rpm /mnt/nvme/openssh.rpm
 
 sudo dnf install -y /mnt/nvme/openssh.rpm
+rm -f /mnt/nvme/openssh.rpm
+
 sudo /usr/local/bin/ssh-keygen -A
 sudo /usr/local/sbin/sshd
 
@@ -82,14 +98,14 @@ printf "hostname set to %s\n" $(hostname)
 printf "creating video-files directory...\n"
 set -x
 VIDEO_FILES_DIRECTORY=/mnt/nvme/video-files
-sudo mkdir -p $VIDEO_FILES_DIRECTORY
+mkdir -p $VIDEO_FILES_DIRECTORY
 set +x
 printf "video-files directory created: %s\n" "$VIDEO_FILES_DIRECTORY"
 
 printf "configuring offline segment...\n"
 set -x
 OFFLINE_SEGMENT_FILE_NAME=strimserver-offline-2160p60.mp4
-sudo cp "$OFFLINE_SEGMENT_FILE_NAME" "$VIDEO_FILES_DIRECTORY"
+mv "$OFFLINE_SEGMENT_FILE_NAME" "$VIDEO_FILES_DIRECTORY"
 set +x
 printf "offline segment configured: %s\n" "$OFFLINE_SEGMENT_FILE_NAME"
 
@@ -114,4 +130,5 @@ printf "ssh strimserver \"sudo systemctl start strimserver.service\"\n\n"
 
 printf "configure-local-encoder.zsh --strimserver-host %s --passphrase %s\n\n" "$PUBLIC_IP" "$SRT_READ_PASSPHRASE"
 
+rm -f /mnt/nvme/deploy.sh
 
