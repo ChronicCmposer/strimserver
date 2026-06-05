@@ -21,7 +21,7 @@ set +a
 : "${SRT_PB_KEY_LEN:?SRT_PB_KEY_LEN is not set}"
 : "${FFMPEG_CMD:?FFMPEG_CMD is not set}"
 : "${FFMPEG_NICE:?FFMPEG_NICE is not set}"
-: "${INPUT_FIFO:?INPUT_FIFO is not set}"
+: "${INPUT_SOCKET:?INPUT_SOCKET is not set}"
 : "${VIDEO_BITRATE:?VIDEO_BITRATE is not set}"
 : "${AUDIO_BITRATE:?AUDIO_BITRATE is not set}"
 
@@ -69,13 +69,16 @@ STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_s
   # -keyint_min 120 \
   # -force_key_frames "expr:gte(t,n_forced*4)" \
 
+rm -f "$INPUT_SOCKET"
+
 exec "$FFMPEG_CMD" \
   -fflags +nobuffer \
   -flags low_delay \
   -analyzeduration 0 \
   -probesize 32 \
   -thread_queue_size 16 \
-  -i "$INPUT_FIFO" \
+  -listen 1 \
+  -i "unix://$INPUT_SOCKET" \
   -c:v copy \
   -c:a copy \
   -max_interleave_delta 0 \
