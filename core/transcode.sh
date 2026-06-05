@@ -65,10 +65,8 @@ normalize() {
    : "${NORMALIZED_AUDIO_BITRATE:?NORMALIZED_AUDIO_BITRATE is not set}"
 
    VIDEO_FILTER="\
+   scale_cuda=w=iw:h=ih:format=p010le:interp_algo=bicubic:passthrough=0,\
    fps=60,setpts=N/(60*TB),\
-   scale=w=iw:h=ih,format=p010le,\
-   hwupload_cuda,\
-   scale_cuda=w=iw:h=ih:format=p010le:interp_algo=bicubic:passthrough=0\
    "
 
    AUDIO_FILTER="aresample=out_sample_rate=48000:out_sample_fmt=s16:out_chlayout=stereo"
@@ -85,6 +83,9 @@ normalize() {
      -probesize 32 \
      -thread_queue_size 16 \
      -flags2 +showall \
+     -hwaccel cuda \
+     -hwaccel_output_format cuda \
+     -c:v hevc_cuvid \
      -rtsp_transport tcp \
      -i "$INPUT_RTSP_URL" \
      -map 0:v:0 \
