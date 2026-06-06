@@ -3,6 +3,7 @@ AWS_DEPLOY_DIR := deploy/aws
 LOCAL_ENCODER_DIR := tools/local-encoder
 BANDWIDTH_TEST_DIR := tools/bandwidth-test
 SRT_TEST_DIR := tools/srt-test
+OPENSSH_DIR := tools/openssh
 
 
 S3_BUCKET 								?= s3://<bucket-name>
@@ -18,10 +19,17 @@ IPERF3_DEPLOYMENT_FILE_NAME 		?= iperf3-deployment.tar
 STRIMSERVER_CONTAINER_OUTPUT 		:= $(OUTPUT_PATH)/$(STRIMSERVER_IMAGE_FILE_NAME)
 OFFLINE_SEGMENT_FILE_NAME			:= strimserver-offline-2160p60.mp4
 OFFLINE_SEGMENT_OUTPUT				:= $(OUTPUT_PATH)/$(OFFLINE_SEGMENT_FILE_NAME)
+OPENSSH_RPM_FILE_NAME				:= openssh-experimental.rpm
+OPENSSH_RPM_OUTPUT					:= $(OUTPUT_PATH)/$(OPENSSH_RPM_FILE_NAME)
 LIBSRT_CONTAINER_OUTPUT 			:= $(OUTPUT_PATH)/$(LIBSRT_IMAGE_FILE_NAME)
 IPERF3_CONTAINER_OUTPUT 			:= $(OUTPUT_PATH)/$(IPERF3_IMAGE_FILE_NAME)
 STRIMSERVER_DEPLOYMENT_TAR			:= $(OUTPUT_PATH)/$(STRIMSERVER_DEPLOYMENT_FILE_NAME)
 IPERF3_DEPLOYMENT_TAR				:= $(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
+
+
+-include feature-toggles.env
+
+ENABLE_EXPERIMENTAL_OPENSSH		?= 0
 
 
 .DEFAULT_GOAL := publish-strimserver
@@ -38,6 +46,18 @@ $(STRIMSERVER_CONTAINER_OUTPUT): \
 		--opt filename=./Dockerfile \
 		--progress=plain \
 		--output type=oci,name=$(STRIMSERVER_IMAGE_NAME),dest=$@
+
+$(OPENSSH_RPM_OUTPUT): \
+	$(OPENSSH_DIR)/Dockerfile
+	sudo buildctl build \
+		--frontend=dockerfile.v0 \
+		--opt platform=linux/amd64 \
+		--local context=$(OPENSSH_DIR) \
+		--local dockerfile=$(OPENSSH_DIR) \
+		--opt filename=./Dockerfile \
+		--opt target=artifact \
+		--progress=plain \
+		--output type=local,dest=$(OUTPUT_PATH)
 
 $(LIBSRT_CONTAINER_OUTPUT): \
 	$(SRT_TEST_DIR)/Dockerfile
@@ -64,9 +84,22 @@ $(IPERF3_CONTAINER_OUTPUT): \
 core/strimserver.env:
 	$(error Missing core/strimserver.env. Copy core/strimserver.env.example and fill in secrets)
 
-$(STRIMSERVER_DEPLOYMENT_TAR): \
+
+STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_DEPS := \
    $(STRIMSERVER_CONTAINER_OUTPUT) \
-   $(OFFLINE_SEGMENT_OUTPUT) \
+   $(OFFLINE_SEGMENT_OUTPUT)
+
+STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_FILES := \
+	$(STRIMSERVER_IMAGE_FILE_NAME) \
+	$(OFFLINE_SEGMENT_FILE_NAME)
+
+ifeq ($(ENABLE_EXPERIMENTAL_OPENSSH),"true")
+STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_DEPS += $(OPENSSH_RPM_OUTPUT)
+STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_FILES += $(OPENSSH_RPM_FILE_NAME)
+endif
+
+$(STRIMSERVER_DEPLOYMENT_TAR): \
+	feature-toggles.env \
 	deploy/aws/deploy.sh \
 	deploy/aws/fish-deploy.sh \
 	deploy/aws/imdslib.sh \
@@ -74,11 +107,13 @@ $(STRIMSERVER_DEPLOYMENT_TAR): \
 	deploy/aws/strimserver.service \
 	core/strimserver.env \
 	core/mediamtx.yaml.template \
-	core/transcode.sh
+	core/transcode.sh \
+	$(STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_DEPS)
 	tar -cvf $@ \
 		--ignore-failed-read --warning=all --show-transformed-names \
 		--transform='s#deploy/aws/##' \
 		--transform='s#core/##' \
+		feature-toggles.env \
 		deploy/aws/deploy.sh \
 		deploy/aws/fish-deploy.sh \
 		deploy/aws/imdslib.sh \
@@ -87,7 +122,7 @@ $(STRIMSERVER_DEPLOYMENT_TAR): \
 		core/strimserver.env \
 		core/mediamtx.yaml.template \
 		core/transcode.sh \
-		-C $(OUTPUT_PATH) $(STRIMSERVER_IMAGE_FILE_NAME) $(OFFLINE_SEGMENT_FILE_NAME)
+		-C $(OUTPUT_PATH) $(STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_FILES)
 
 $(IPERF3_DEPLOYMENT_TAR): \
    $(IPERF3_CONTAINER_OUTPUT) \

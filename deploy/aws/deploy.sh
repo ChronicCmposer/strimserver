@@ -12,8 +12,12 @@ trap cleanup EXIT INT TERM
 
 
 # Env variables
-: "${S3_BUCKET:=s3://<bucket-name>}"
+: "${S3_BUCKET:=<S3_BUCKET>}"
 : "${TARGET_HOSTNAME:=strimserver}"
+
+set -a
+. feature-toggles.env
+set +a
 
 # metadata / diagnostics
 source /mnt/nvme/imdslib.sh 
@@ -78,13 +82,13 @@ rm -f /mnt/nvme/fish-deploy.sh
 printf "installing remaining tools...\n"
 sudo dnf install -y htop
 
-aws s3 cp s3://<bucket-name>/openssh-connor-10.3p1-1.amzn2023.x86_64.rpm /mnt/nvme/openssh.rpm
+if [ "$ENABLE_EXPERIMENTAL_OPENSSH" = "true" ]; then
+   sudo dnf install -y /mnt/nvme/openssh-experimental.rpm
+   rm -f /mnt/nvme/openssh-experimental.rpm
 
-sudo dnf install -y /mnt/nvme/openssh.rpm
-rm -f /mnt/nvme/openssh.rpm
-
-sudo /usr/local/bin/ssh-keygen -A
-sudo /usr/local/sbin/sshd
+   sudo /usr/local/bin/ssh-keygen -A
+   sudo /usr/local/sbin/sshd
+fi
 
 # put other package installations here
 printf "tool installation complete!\n"
