@@ -163,7 +163,7 @@ func (c *Controller) startStage(stage Stage) error {
 	_ = stopStage(stage)
 
 	args := []string{
-      "ctr"
+      "ctr",
 		"run",
 		"--net-host",
 		"--gpus", "0",
@@ -243,6 +243,9 @@ func (c *Controller) statusHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	controller := NewController()
 
+   log.Printf("Hello, World!")
+   log.Printf("%s", controller)
+
 	// Conservative startup cleanup. The controller owns FFmpeg lifecycle.
 	for _, stage := range controller.stages {
 		_ = stopStage(stage)
@@ -256,7 +259,7 @@ func main() {
 	addr := env("STRIMSERVER_CONTROLLER_ADDR", "127.0.0.1:9177")
 	log.Printf("strim-controller listening on %s", addr)
 
-   // TODO: does http.ListenAndServe(addr, mux) block indefinitely
+	  // TODO: does http.ListenAndServe(addr, mux) block indefinitely
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}

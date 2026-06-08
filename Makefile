@@ -35,6 +35,18 @@ ENABLE_EXPERIMENTAL_OPENSSH		?= 0
 .DEFAULT_GOAL := publish-strimserver
 
 
+strimserver-controller: \
+	core/controller/Dockerfile
+	sudo buildctl build \
+		--frontend=dockerfile.v0 \
+		--opt platform=linux/amd64 \
+		--local context=core/controller \
+		--local dockerfile=core/controller \
+		--opt filename=./Dockerfile \
+		--opt target=output \
+		--progress=plain \
+		--output type=local,dest=core/controller
+
 $(STRIMSERVER_CONTAINER_OUTPUT): \
 	$(CORE_DIR)/Dockerfile \
 	$(CORE_DIR)/entrypoint.sh
