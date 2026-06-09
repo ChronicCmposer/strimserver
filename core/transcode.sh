@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
 set -xeuo pipefail
 FFMPEG="/usr/local/bin/ffmpeg"
@@ -127,10 +127,17 @@ scale_and_egress() {
    : "${TWITCH_STREAM_KEY:?TWITCH_STREAM_KEY is not set - you should get this from twitch...}"
    : "${BANDWIDTH_TEST:?BANDWIDTH_TEST is not set}"
    
-   case "${BANDWIDTH_TEST,,}" in
-     1|true|yes|y|on)   BW_PARAM="?bandwidthtest=true" ;;
-     0|false|no|n|off|"") BW_PARAM="" ;;
-     *) echo "Invalid BANDWIDTH_TEST: '$BANDWIDTH_TEST' (use true/false)"; exit 2 ;;
+   case "${BANDWIDTH_TEST:-}" in
+     1|true|TRUE|True|yes|YES|Yes|y|Y|on|ON|On)
+       BW_PARAM="?bandwidthtest=true"
+       ;;
+     0|false|FALSE|False|no|NO|No|n|N|off|OFF|Off|"")
+       BW_PARAM=""
+       ;;
+     *)
+       echo "Invalid BANDWIDTH_TEST: '${BANDWIDTH_TEST:-}' (use true/false)"
+       exit 2
+       ;;
    esac
 
    INPUT_RTSP_URL="$NORMALIZED_READ_URL"

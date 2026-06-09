@@ -312,14 +312,14 @@ paths:
 
   ingress0:
     source: publisher
-    runOnReady: '/usr/bin/nice -n 5 /bin/bash -lc ". /opt/strimserver/bin/transcode.sh && sleep ${NORMALIZE_STARTUP_DELAY_SECONDS} && normalize 2>&1 | log_prefix normalize"'
+    runOnReady: '/usr/bin/nice -n 5 /bin/sh -lc ". /opt/strimserver/bin/transcode.sh && normalize 2>&1 | log_prefix normalize"'
     srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     alwaysAvailable: true
     alwaysAvailableFile: "/opt/strimserver/video-files/strimserver-offline-2160p60.mp4"
 
   normalized:
     source: 'unix+mpegts://${NORMALIZED_MPEGTS_SOCKET}'
-    runOnReady: '/usr/bin/nice -n 5 /bin/bash -lc ". /opt/strimserver/bin/transcode.sh && sleep ${SCALE_STARTUP_DELAY_SECONDS} && scale_and_egress 2>&1 | log_prefix scale-and-egress"'
+    runOnReady: '/usr/bin/nice -n 5 /bin/sh -lc ". /opt/strimserver/bin/transcode.sh && scale_and_egress 2>&1 | log_prefix scale-and-egress"'
     record: yes
     # Path of recording segments.
     # Extension is added automatically.

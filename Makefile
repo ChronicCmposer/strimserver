@@ -29,7 +29,9 @@ IPERF3_DEPLOYMENT_TAR				:= $(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
 
 -include feature-toggles.env
 
-ENABLE_EXPERIMENTAL_OPENSSH		?= 0
+ENABLE_EXPERIMENTAL_OPENSSH		?= false
+ENABLE_OBS								?= false
+ENABLE_EMBEDDED_FISH_SHELL			?= false
 
 
 .DEFAULT_GOAL := publish-strimserver
@@ -56,6 +58,9 @@ $(STRIMSERVER_CONTAINER_OUTPUT): \
 		--local context=$(CORE_DIR) \
 		--local dockerfile=$(CORE_DIR) \
 		--opt filename=./Dockerfile \
+		--opt build-arg:ENABLE_OBS=$(ENABLE_OBS) \
+		--opt build-arg:ENABLE_EMBEDDED_FISH_SHELL=$(ENABLE_EMBEDDED_FISH_SHELL) \
+		--opt target=runtime \
 		--progress=plain \
 		--output type=oci,name=$(STRIMSERVER_IMAGE_NAME),dest=$@
 
