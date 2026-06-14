@@ -30,24 +30,36 @@ IPERF3_DEPLOYMENT_TAR				:= $(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
 -include feature-toggles.env
 
 ENABLE_EXPERIMENTAL_OPENSSH		?= false
-ENABLE_OBS								?= false
-ENABLE_EMBEDDED_FISH_SHELL			?= false
 
 
 .DEFAULT_GOAL := publish-strimserver
 
+.PHONY := controller test-controller
 
-strimserver-controller: \
-	core/controller/Dockerfile
+controller: \
+	core/controller/dockerfile
 	sudo buildctl build \
 		--frontend=dockerfile.v0 \
 		--opt platform=linux/amd64 \
 		--local context=core/controller \
 		--local dockerfile=core/controller \
 		--opt filename=./Dockerfile \
-		--opt target=output \
-		--progress=plain \
-		--output type=local,dest=core/controller
+      --opt build-arg:CACHEBUST=$$(date +%s%3N) \
+		--opt target=build \
+		--progress=plain
+
+
+test-controller: \
+	core/controller/dockerfile
+	sudo buildctl build \
+		--frontend=dockerfile.v0 \
+		--opt platform=linux/amd64 \
+		--local context=core/controller \
+		--local dockerfile=core/controller \
+		--opt filename=./Dockerfile \
+      --opt build-arg:CACHEBUST=$$(date +%s%3N) \
+		--opt target=test \
+		--progress=plain
 
 $(STRIMSERVER_CONTAINER_OUTPUT): \
 	$(CORE_DIR)/Dockerfile \
