@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM golang:1.26.4-alpine3.24 AS test
 
-COPY *.go go.mod /opt/strimserver-controller/
+COPY *.go go.mod .golangci.yml /opt/strimserver-controller/
 ARG CACHEBUST=0
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
@@ -24,5 +24,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
    set -x && go version \
    && echo "cachebust=$CACHEBUST" \
    && cd /opt/strimserver-controller \
+   && go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8 \
+   && golangci-lint run \
    && go test -v .
 

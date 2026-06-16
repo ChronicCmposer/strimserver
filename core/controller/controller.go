@@ -1,242 +1,242 @@
-// strim-controller.go
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
-	"os"
-	"os/exec"
-	"sync"
-	"time"
+	"maps"
+	"slices"
 )
 
-type Event struct {
-	Path  string `json:"path"`
-	State string `json:"state"`
+type Path string
+type Stage string
+
+type PathStatus string
+type StageStatus struct {
+	Desired	string `json:"desired"`
+	Actual	string `json:"actual"`
 }
 
-type Stage struct {
-	Name          string
-	ContainerName string
-   Command       []string
+type ControllerStatus struct {
+	Paths 	map[Path]PathStatus 		`json:"paths"`
+	Stages	map[Stage]StageStatus 	`json:"stages"`
 }
+
+type StatusRequest struct {
+	Reply 	chan ControllerStatus
+}
+
+type Event struct {
+	Path  	string 		`json:"path"`
+	Status 	string 		`json:"status"`
+	Reply 	chan error
+}
+
+type ControlCommand struct {
+	Component 	string `json:"component"`
+	Action 		string `json:"action"`
+	Reply			chan error
+}
+
 
 type Controller struct {
-	mu sync.Mutex
 
-	paths map[string]string
-	desired map[string]string
-	stages map[string]Stage
+	paths 	map[Path]PathStatus
+	stages	map[Stage]*StageStatus
 
-	image string
+	events 				chan Event
+	controlCommands 	chan ControlCommand
+	statusRequests 	chan StatusRequest
+
+	stageLaunchers 	map[Stage]func() error
+	stageTerminators 	map[Stage]func() error
+
 }
 
-func env(name, fallback string) string {
-	v := os.Getenv(name)
-	if v == "" {
-		return fallback
-	}
-	return v
-}
 
-func NewController() *Controller {
+func NewController(
+	paths 				map[Path]PathStatus,
+	stages 				map[Stage]*StageStatus,
+	stageLaunchers 	map[Stage]func() error,
+	stageTerminators 	map[Stage]func() error,
+) *Controller {
 	return &Controller{
-		paths: map[string]string{
-			"ingress0":   "unknown",
-			"normalized": "unknown",
-		},
-		desired: map[string]string{
-			"normalize":        "stopped",
-			"scale-and-egress": "stopped",
-		},
-		stages: map[string]Stage{
-			"normalize": {
-				Name:          "normalize",
-				ContainerName: "strimserver-ffmpeg-normalize", //TODO: Do I need this ?
-				Command:       []string{"/opt/strimserver/bin/run-ffmpeg-stage", "normalize"},
-			},
-			"scale-and-egress": {
-				Name:          "scale-and-egress",
-            ContainerName: "strimserver-ffmpeg-scale-egress", //TODO: Do I need this ?
-				Command:       []string{"/opt/strimserver/bin/run-ffmpeg-stage", "scale-and-egress"},
-			},
-		},
-      // TODO: find a different place for this
-		image: env("STRIMSERVER_FFMPEG_IMAGE", "docker.io/library/strimserver-ffmpeg:latest"),
+		paths: paths,
+		stages: stages,
+		events: make(chan Event),
+		controlCommands: make(chan ControlCommand),
+		statusRequests: make(chan StatusRequest),
+		stageLaunchers: stageLaunchers,
+		stageTerminators: stageTerminators,
+	}
+}
+
+func (c *Controller) run() {
+	for {
+		select {
+			case e := <-c.events:
+				e.Reply <- c.HandleEvent(e)
+			case cmd := <-c.controlCommands:
+				cmd.Reply <- c.HandleControl(cmd)
+			case sr := <-c.statusRequests:
+				sr.Reply <- c.HandleStatus()
+
+		}
+	}
+}
+
+var validComponents 	= [...]string { "scale-and-egress", }
+var validActions 		= [...]string { "start", "stop", }
+
+var isValidComponent = func(component string) bool {
+	return slices.Contains(validComponents[:], component)
+}
+
+var isValidAction = func(action string) bool {
+	return slices.Contains(validActions[:], action)
+}
+
+func (c *Controller) HandleControl(cmd ControlCommand) error {
+
+	if !isValidComponent(cmd.Component) || !isValidAction(cmd.Action) {
+		return fmt.Errorf("invalid control command: +%v", cmd)
+	}
+	
+	log.Printf("controlCommand component=%s action=%s", cmd.Component, cmd.Action)
+
+	switch {
+		case cmd.Component == "scale-and-egress" && cmd.Action == "start":
+			c.stages["scale-and-egress"].Desired = "running"
+			if c.stages["scale-and-egress"].Actual == "running" {
+				log.Print("cannot start scale-and-egress stage, it is already running")
+				return nil 
+			}
+			if c.paths["normalized"] != "ready" {
+				return fmt.Errorf("cannot start scale-and-egress stage, normalize path not yet ready: %s", c.paths["normalize"])
+			}
+			err := c.stageLaunchers["scale-and-egress"]() 
+			if err != nil {
+				return fmt.Errorf("could not start scale-and-egress stage: %v", err)
+			}
+			c.stages["scale-and-egress"].Actual = "running"
+			return nil
+
+		case cmd.Component == "scale-and-egress" && cmd.Action == "stop":
+			c.stages["scale-and-egress"].Desired = "stopped"
+			if c.stages["scale-and-egress"].Actual != "running" {
+				log.Print("cannot stop scale-and-egress stage, it is not running")
+				return nil 
+			}
+			err := c.stageTerminators["scale-and-egress"]()
+			if err != nil {
+				return fmt.Errorf("could not stop scale-and-egress stage: %v", err)
+			}
+			c.stages["scale-and-egress"].Actual = "stopped"
+			return nil
+
+		default:
+			return fmt.Errorf("control not implemented: %v", cmd)
 	}
 }
 
 
-// TODO: make this more extensible - how to add new paths without modifying
-// function ?
-func validEvent(e Event) bool {
-	validPath := e.Path == "ingress0" || e.Path == "normalized"
-	validState := e.State == "ready" || e.State == "not-ready"
-	return validPath && validState
+var validPaths = [...]string { "ingress0", "normalized", }
+
+var validPathStatuses = [...]string { "ready", "not-ready", "unknown" }
+
+var isValidPath = func(path string) bool {
+	return slices.Contains(validPaths[:], path)
+}
+
+var isValidPathStatus = func(pathStatus string) bool {
+	return slices.Contains(validPathStatuses[:], pathStatus)
 }
 
 func (c *Controller) HandleEvent(e Event) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
-	if !validEvent(e) {
-		return fmt.Errorf("invalid event: path=%q state=%q", e.Path, e.State)
+	if !isValidPath(e.Path) || !isValidPathStatus(e.Status) {
+		return fmt.Errorf("invalid event: %v", e)
 	}
 
-	log.Printf("event path=%s state=%s", e.Path, e.State)
-	c.paths[e.Path] = e.State
+	path 		  := Path(e.Path)
+	pathStatus := PathStatus(e.Status)
 
-   // TODO: Consider implementing strategy pattern instead
+	log.Printf("event path=%s state=%s", e.Path, e.Status)
+	c.paths[path] = pathStatus
+
 	switch {
-	case e.Path == "ingress0" && e.State == "ready":
-		c.desired["normalize"] = "running"
-		return c.reconcileLocked()
+		case e.Path == "ingress0" && e.Status == "ready":
 
-	case e.Path == "ingress0" && e.State == "not-ready":
-      c.desired["normalize"] = "stopped" // TODO: correct this
-		c.desired["scale-and-egress"] = "stopped"
-		return c.reconcileLocked()
+			c.stages["normalize"].Desired = "running"
 
-	case e.Path == "normalized" && e.State == "ready":
-		c.desired["scale-and-egress"] = "running"
-		return c.reconcileLocked()
-
-	case e.Path == "normalized" && e.State == "not-ready":
-      c.desired["scale-and-egress"] = "stopped" // TODO: correct this
-		return c.reconcileLocked()
-	}
-
-	return nil
-}
-
-// TODO: write this better - DankReading, consider Strategy pattern
-func (c *Controller) reconcileLocked() error {
-	for stageName, desired := range c.desired {
-		stage := c.stages[stageName]
-
-		if desired == "running" {
-			if !containerExists(stage.ContainerName) {
-				if err := c.startStage(stage); err != nil {
-					return err
-				}
+			if c.stages["normalize"].Actual == "running" {
+				log.Printf("normalize stage already running")
+				return nil
 			}
-		} else { // "stopped"
-			if containerExists(stage.ContainerName) {
-            if err := stopStage(stage); err != nil { // TODO: is this a bug ? need a controller reference ?
-					return err
-				}
+
+			err := c.stageLaunchers["normalize"]()
+			if err != nil {
+				return fmt.Errorf("error launching normalize stage: %v", err)
 			}
-		}
+
+			c.stages["normalize"].Actual = "running"
+			return nil
+
+		case e.Path == "ingress0" && e.Status == "not-ready":
+			c.stages["normalize"].Desired = "stopped" 
+			if c.stages["normalize"].Actual != "running" {
+				log.Printf("normalize stage already not running")
+				return nil
+			}
+			err := c.stageTerminators["normalize"]()
+			if err != nil {
+				return fmt.Errorf("error terminating normalize stage: %v", err)
+			}
+
+			c.stages["normalize"].Actual = "stopped"
+			return nil
+
+		case e.Path == "normalized" && e.Status == "ready":
+			c.stages["scale-and-egress"].Desired = "running"
+			if c.stages["scale-and-egress"].Actual == "running" {
+				log.Printf("scale-and-egress stage already running")
+				return nil
+			}
+			err := c.stageLaunchers["scale-and-egress"]()
+			if err != nil {
+				return fmt.Errorf("error launching scale-and-egres stage: %v", err)
+			}
+			c.stages["scale-and-egress"].Actual = "running"
+			return nil
+
+		case e.Path == "normalized" && e.Status == "not-ready":
+			c.stages["scale-and-egress"].Desired = "stopped"
+			if c.stages["scale-and-egress"].Actual != "running" {
+				log.Printf("scale-and-egress stage already not running")
+				return nil
+			}
+			err := c.stageTerminators["scale-and-egress"]()
+			if err != nil {
+				return fmt.Errorf("error terminating scale-and-egress stage: %v", err)
+			}
+
+			c.stages["scale-and-egress"].Actual = "stopped"
+			return nil
+		
+		default:
+			return fmt.Errorf("event not implemented: %v", e)
 	}
-	return nil
 }
 
-// TODO: are all cases handled ? what error codes do we expect ?
-// TODO: rename to stageIsRunning
-func containerExists(name string) bool {
-	cmd := exec.Command("ctr", "containers", "info", name)
-	return cmd.Run() == nil
+func (c *Controller) HandleStatus() ControllerStatus {
+	outPaths := maps.Clone(c.paths)
+	outStages := make(map[Stage]StageStatus, len(c.stages))
+	for name, stageStatus := range c.stages {
+		outStages[name] = *stageStatus
+	}
+	return ControllerStatus{
+		Paths: 	outPaths,
+		Stages: 	outStages,
+	}
 }
 
-func ignoreRun(args ...string) {
-	cmd := exec.Command(args[0], args[1:]...)
-   _ = cmd.Run() // TODO: sus
-}
-
-func stopStage(stage Stage) error {
-	log.Printf("stopping stage=%s container=%s", stage.Name, stage.ContainerName)
-
-	ignoreRun("ctr", "tasks", "kill", "--signal", "SIGTERM", stage.ContainerName)
-   time.Sleep(300 * time.Millisecond) // TODO: make this not hardcoded
-	ignoreRun("ctr", "tasks", "kill", "--signal", "SIGKILL", stage.ContainerName)
-	ignoreRun("ctr", "containers", "delete", stage.ContainerName)
-
-	return nil
-}
-
-// TODO: remove controller implicit argument - inject the image name a different way
-func (c *Controller) startStage(stage Stage) error {
-	log.Printf("starting stage=%s container=%s", stage.Name, stage.ContainerName)
-
-	_ = stopStage(stage)
-
-	args := []string{
-      "ctr",
-		"run",
-		"--net-host",
-		"--gpus", "0",
-		"--cap-add", "CAP_SYS_NICE",
-
-      // TODO: is there a smarter way to inject this configuration ?
-		"--mount", "type=bind,src=/mnt/nvme/config/strimserver.env,dst=/opt/strimserver/config/strimserver.env,options=rbind:ro",
-		"--mount", "type=bind,src=/mnt/nvme/runtime,dst=/opt/strimserver/runtime,options=rbind:rw",
-		"--mount", "type=bind,src=/mnt/nvme/logs,dst=/opt/strimserver/logs,options=rbind:rw",
-
-      c.image, // TODO: inject this in a smarter way
-		stage.ContainerName,
-	}
-
-	args = append(args, stage.Command...)
-
-   cmd := exec.Command(args[0], args[1:]...) // TODO: confirm that this subprocess detaches from tty ?
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ctr run failed for %s: %w: %s", stage.Name, err, string(out))
-	}
-
-	return nil
-}
-
-func (c *Controller) eventHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-   // method of request must be POST - therefore it must have a request body
-
-	var e Event
-	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
-		return
-	}
-
-   // var e Event is now populated with string values for each key in the datatype
-
-	if err := c.HandleEvent(e); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-   // EZ Clap - event is handled
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (c *Controller) healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok\n"))
-}
-
-func (c *Controller) statusHandler(w http.ResponseWriter, r *http.Request) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	actual := map[string]bool{}
-	for name, stage := range c.stages {
-		actual[name] = containerExists(stage.ContainerName)
-	}
-
-   // TODO: this is a bug according to GPT's own specification
-	body := map[string]any{
-		"paths":   c.paths,
-		"desired": c.desired,
-		"actual":  actual,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-   _ = json.NewEncoder(w).Encode(body) // TODO: Is this even real ?
-}
 
