@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"iter"
 	"log"
 	"maps"
 	"slices"
@@ -10,10 +11,23 @@ import (
 type Path string
 type Stage string
 
-type PathStatus string
+type PathStatus string 
+const (
+	Unknown  PathStatus = "unknown"
+	Ready		PathStatus = "ready"
+	NotReady	PathStatus = "not-ready"
+)
+
+type StageState string 
+const (
+	Running StageState = "running"
+	Stopped StageState = "stopped"
+)
+
+
 type StageStatus struct {
-	Desired	string `json:"desired"`
-	Actual	string `json:"actual"`
+	Desired	StageState `json:"desired"`
+	Actual	StageState `json:"actual"`
 }
 
 type ControllerStatus struct {
@@ -37,194 +51,199 @@ type ControlCommand struct {
 	Reply			chan error
 }
 
+type EventKey struct {
+	Path 		Path
+	Status	PathStatus
+}
+
+type ControlCommandKey struct {
+	Component	string
+	Action		string
+}
+
+type StageTarget struct {
+	Stage				Stage
+	State				StageState
+	Prerequisite	func(c *Controller) error
+}
 
 type Controller struct {
 
-	paths 	map[Path]PathStatus
-	stages	map[Stage]*StageStatus
+	paths 			map[Path]PathStatus
+	stages			map[Stage]*StageStatus
+	ops				map[Stage]map[StageState]func() error
+	eventRoutes		map[EventKey]StageTarget
+	commandRoutes	map[ControlCommandKey]StageTarget
 
 	events 				chan Event
 	controlCommands 	chan ControlCommand
 	statusRequests 	chan StatusRequest
 
-	stageLaunchers 	map[Stage]func() error
-	stageTerminators 	map[Stage]func() error
+	validPathNames			[]string
+	validStageNames		[]string
+	validComponentNames 	[]string
+	validActionNames		[]string
 
 }
 
+func components(keys iter.Seq[ControlCommandKey]) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for key := range keys { if !yield(key.Component) { return } }
+	}
+}
+
+func actions(keys iter.Seq[ControlCommandKey]) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for key := range keys { if !yield(key.Action) { return } }
+	}
+}
+
+func asStrings[T ~string](keys iter.Seq[T]) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		for key := range keys { if !yield(string(key)) { return } }
+	}
+}
+
+func oneOf[T comparable](allowed []T, v T) bool {
+	return slices.Contains(allowed, v)
+}
+
+var validPathStatusNames = slices.Collect(asStrings(slices.Values([]PathStatus { Unknown, Ready, NotReady })))
+// var validStageStateNames 	= slices.Collect(asStrings(slices.Values([]StageState { Running, Stopped })))
 
 func NewController(
-	paths 				map[Path]PathStatus,
-	stages 				map[Stage]*StageStatus,
-	stageLaunchers 	map[Stage]func() error,
-	stageTerminators 	map[Stage]func() error,
+	paths 			map[Path]PathStatus,
+	stages 			map[Stage]*StageStatus,
+	ops				map[Stage]map[StageState]func() error,
+	eventRoutes		map[EventKey]StageTarget,
+	commandRoutes	map[ControlCommandKey]StageTarget,
 ) *Controller {
 	return &Controller{
 		paths: paths,
 		stages: stages,
+		ops:	ops,
+		eventRoutes: eventRoutes,
+		commandRoutes: commandRoutes,
 		events: make(chan Event),
 		controlCommands: make(chan ControlCommand),
 		statusRequests: make(chan StatusRequest),
-		stageLaunchers: stageLaunchers,
-		stageTerminators: stageTerminators,
+		validPathNames: slices.Collect(asStrings(maps.Keys(paths))),
+		validStageNames: slices.Collect(asStrings(maps.Keys(stages))),
+		validComponentNames: slices.Compact(slices.Sorted(components(maps.Keys(commandRoutes)))),
+		validActionNames: slices.Compact(slices.Sorted(actions(maps.Keys(commandRoutes)))),
 	}
 }
 
 func (c *Controller) run() {
 	for {
 		select {
-			case e := <-c.events:
-				e.Reply <- c.HandleEvent(e)
+
+			case e 	:= <-c.events:
+				e.Reply 		<- c.HandleEvent(e)
+
 			case cmd := <-c.controlCommands:
-				cmd.Reply <- c.HandleControl(cmd)
-			case sr := <-c.statusRequests:
-				sr.Reply <- c.HandleStatus()
+				cmd.Reply 	<- c.HandleControl(cmd)
+
+			case sr 	:= <-c.statusRequests:
+				sr.Reply 	<- c.HandleStatus()
 
 		}
 	}
 }
 
-var validComponents 	= [...]string { "scale-and-egress", }
-var validActions 		= [...]string { "start", "stop", }
+// prerequisite is allowed to be nil 
+func (c *Controller) setStage(
+	s Stage, 
+	target StageState, 
+	action func() error, 
+	prerequisite func(c *Controller) error,
+) error {
 
-var isValidComponent = func(component string) bool {
-	return slices.Contains(validComponents[:], component)
+	c.stages[s].Desired = target
+
+	if c.stages[s].Actual == target {
+		log.Printf("stage `%s` already %s", s, target)
+		return nil
+	}
+
+	var err error
+	if prerequisite != nil {
+		err = prerequisite(c)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot set stage `%s` to %s, prerequisite not satisfied: %w", s, target, err)
+	}
+
+	err = action()
+	if err != nil {
+		return fmt.Errorf("cannot set stage `%s` to %s: %w", s, target, err)
+	}
+
+	c.stages[s].Actual = target
+	return nil
 }
 
-var isValidAction = func(action string) bool {
-	return slices.Contains(validActions[:], action)
-}
 
 func (c *Controller) HandleControl(cmd ControlCommand) error {
 
-	if !isValidComponent(cmd.Component) || !isValidAction(cmd.Action) {
-		return fmt.Errorf("invalid control command: +%v", cmd)
+	if !oneOf(c.validComponentNames, cmd.Component) {
+		return fmt.Errorf("invalid component: %+v", cmd)
+	}
+
+	if !oneOf(c.validActionNames, cmd.Action) {
+		return fmt.Errorf("invalid action: %+v", cmd)
 	}
 	
 	log.Printf("controlCommand component=%s action=%s", cmd.Component, cmd.Action)
 
-	switch {
-		case cmd.Component == "scale-and-egress" && cmd.Action == "start":
-			c.stages["scale-and-egress"].Desired = "running"
-			if c.stages["scale-and-egress"].Actual == "running" {
-				log.Print("cannot start scale-and-egress stage, it is already running")
-				return nil 
-			}
-			if c.paths["normalized"] != "ready" {
-				return fmt.Errorf("cannot start scale-and-egress stage, normalize path not yet ready: %s", c.paths["normalize"])
-			}
-			err := c.stageLaunchers["scale-and-egress"]() 
-			if err != nil {
-				return fmt.Errorf("could not start scale-and-egress stage: %v", err)
-			}
-			c.stages["scale-and-egress"].Actual = "running"
-			return nil
+	key := ControlCommandKey{cmd.Component, cmd.Action}
+	target, ok := c.commandRoutes[key]
 
-		case cmd.Component == "scale-and-egress" && cmd.Action == "stop":
-			c.stages["scale-and-egress"].Desired = "stopped"
-			if c.stages["scale-and-egress"].Actual != "running" {
-				log.Print("cannot stop scale-and-egress stage, it is not running")
-				return nil 
-			}
-			err := c.stageTerminators["scale-and-egress"]()
-			if err != nil {
-				return fmt.Errorf("could not stop scale-and-egress stage: %v", err)
-			}
-			c.stages["scale-and-egress"].Actual = "stopped"
-			return nil
-
-		default:
-			return fmt.Errorf("control not implemented: %v", cmd)
+	if !ok {
+		return fmt.Errorf("control not implemented: %+v", cmd)
 	}
+
+	return c.setStage(
+		target.Stage, 
+		target.State, 
+		c.ops[target.Stage][target.State], 
+		target.Prerequisite,
+	)
+
 }
 
-
-var validPaths = [...]string { "ingress0", "normalized", }
-
-var validPathStatuses = [...]string { "ready", "not-ready", "unknown" }
-
-var isValidPath = func(path string) bool {
-	return slices.Contains(validPaths[:], path)
-}
-
-var isValidPathStatus = func(pathStatus string) bool {
-	return slices.Contains(validPathStatuses[:], pathStatus)
-}
 
 func (c *Controller) HandleEvent(e Event) error {
 
-	if !isValidPath(e.Path) || !isValidPathStatus(e.Status) {
-		return fmt.Errorf("invalid event: %v", e)
+	if !oneOf(c.validPathNames, e.Path) {
+		return fmt.Errorf("invalid path: %+v", e)
+	}
+
+	if !oneOf(validPathStatusNames, e.Status) {
+		return fmt.Errorf("invalid path status: %+v", e)
 	}
 
 	path 		  := Path(e.Path)
 	pathStatus := PathStatus(e.Status)
 
 	log.Printf("event path=%s state=%s", e.Path, e.Status)
+
 	c.paths[path] = pathStatus
 
-	switch {
-		case e.Path == "ingress0" && e.Status == "ready":
+	key := EventKey{path, pathStatus}
+	target, ok := c.eventRoutes[key]
 
-			c.stages["normalize"].Desired = "running"
-
-			if c.stages["normalize"].Actual == "running" {
-				log.Printf("normalize stage already running")
-				return nil
-			}
-
-			err := c.stageLaunchers["normalize"]()
-			if err != nil {
-				return fmt.Errorf("error launching normalize stage: %v", err)
-			}
-
-			c.stages["normalize"].Actual = "running"
-			return nil
-
-		case e.Path == "ingress0" && e.Status == "not-ready":
-			c.stages["normalize"].Desired = "stopped" 
-			if c.stages["normalize"].Actual != "running" {
-				log.Printf("normalize stage already not running")
-				return nil
-			}
-			err := c.stageTerminators["normalize"]()
-			if err != nil {
-				return fmt.Errorf("error terminating normalize stage: %v", err)
-			}
-
-			c.stages["normalize"].Actual = "stopped"
-			return nil
-
-		case e.Path == "normalized" && e.Status == "ready":
-			c.stages["scale-and-egress"].Desired = "running"
-			if c.stages["scale-and-egress"].Actual == "running" {
-				log.Printf("scale-and-egress stage already running")
-				return nil
-			}
-			err := c.stageLaunchers["scale-and-egress"]()
-			if err != nil {
-				return fmt.Errorf("error launching scale-and-egres stage: %v", err)
-			}
-			c.stages["scale-and-egress"].Actual = "running"
-			return nil
-
-		case e.Path == "normalized" && e.Status == "not-ready":
-			c.stages["scale-and-egress"].Desired = "stopped"
-			if c.stages["scale-and-egress"].Actual != "running" {
-				log.Printf("scale-and-egress stage already not running")
-				return nil
-			}
-			err := c.stageTerminators["scale-and-egress"]()
-			if err != nil {
-				return fmt.Errorf("error terminating scale-and-egress stage: %v", err)
-			}
-
-			c.stages["scale-and-egress"].Actual = "stopped"
-			return nil
-		
-		default:
-			return fmt.Errorf("event not implemented: %v", e)
+	if !ok {
+		return fmt.Errorf("event not implemented: %+v", e)
 	}
+
+	return c.setStage(
+		target.Stage, 
+		target.State, 
+		c.ops[target.Stage][target.State], 
+		target.Prerequisite,
+	)
+
 }
 
 func (c *Controller) HandleStatus() ControllerStatus {
