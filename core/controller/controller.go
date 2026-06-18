@@ -1,15 +1,15 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"log"
 	"maps"
-	"slices"
 )
 
-type Path string
-type Stage string
+type PathName string
+type StageName string
 
 type PathStatus string 
 const (
@@ -30,232 +30,177 @@ type StageStatus struct {
 	Actual	StageState `json:"actual"`
 }
 
-type ControllerStatus struct {
-	Paths 	map[Path]PathStatus 		`json:"paths"`
-	Stages	map[Stage]StageStatus 	`json:"stages"`
+type Stage struct {
+	Status 	StageStatus
+	Ops		map[StageState]func() error
 }
 
-type StatusRequest struct {
-	Reply 	chan ControllerStatus
+type ControllerStatus struct {
+	Paths 	map[PathName]PathStatus		`json:"paths"`
+	Stages	map[StageName]StageStatus 	`json:"stages"`
 }
 
 type Event struct {
-	Path  	string 		`json:"path"`
-	Status 	string 		`json:"status"`
-	Reply 	chan error
+	Path 		PathName 	`json:"path"`
+	Status 	PathStatus 	`json:"status"`
 }
 
 type ControlCommand struct {
 	Component 	string `json:"component"`
 	Action 		string `json:"action"`
-	Reply			chan error
-}
-
-type EventKey struct {
-	Path 		Path
-	Status	PathStatus
-}
-
-type ControlCommandKey struct {
-	Component	string
-	Action		string
 }
 
 type StageTarget struct {
-	Stage				Stage
+	Stage				StageName
 	State				StageState
 	Prerequisite	func(c *Controller) error
 }
 
 type Controller struct {
 
-	paths 			map[Path]PathStatus
-	stages			map[Stage]*StageStatus
-	ops				map[Stage]map[StageState]func() error
-	eventRoutes		map[EventKey]StageTarget
-	commandRoutes	map[ControlCommandKey]StageTarget
+	paths 			map[PathName]PathStatus
+	stages			map[StageName]*Stage
+	eventRoutes		map[Event]StageTarget
+	commandRoutes	map[ControlCommand]StageTarget
 
-	events 				chan Event
-	controlCommands 	chan ControlCommand
-	statusRequests 	chan StatusRequest
-
-	validPathNames			[]string
-	validStageNames		[]string
-	validComponentNames 	[]string
-	validActionNames		[]string
+	actions chan func(*Controller)
 
 }
 
-func components(keys iter.Seq[ControlCommandKey]) iter.Seq[string] {
-	return func(yield func(string) bool) {
-		for key := range keys { if !yield(key.Component) { return } }
-	}
+func concat[V any](seqs ...iter.Seq[V]) iter.Seq[V] {
+    return func(yield func(V) bool) {
+        for _, s := range seqs { for v := range s { if !yield(v) { return } } }
+    }
 }
 
-func actions(keys iter.Seq[ControlCommandKey]) iter.Seq[string] {
-	return func(yield func(string) bool) {
-		for key := range keys { if !yield(key.Action) { return } }
-	}
+func (s PathStatus) Valid() bool {
+	switch s { case Unknown, Ready, NotReady: return true }
+	return false
 }
-
-func asStrings[T ~string](keys iter.Seq[T]) iter.Seq[string] {
-	return func(yield func(string) bool) {
-		for key := range keys { if !yield(string(key)) { return } }
-	}
-}
-
-func oneOf[T comparable](allowed []T, v T) bool {
-	return slices.Contains(allowed, v)
-}
-
-var validPathStatusNames = slices.Collect(asStrings(slices.Values([]PathStatus { Unknown, Ready, NotReady })))
-// var validStageStateNames 	= slices.Collect(asStrings(slices.Values([]StageState { Running, Stopped })))
 
 func NewController(
-	paths 			map[Path]PathStatus,
-	stages 			map[Stage]*StageStatus,
-	ops				map[Stage]map[StageState]func() error,
-	eventRoutes		map[EventKey]StageTarget,
-	commandRoutes	map[ControlCommandKey]StageTarget,
-) *Controller {
+	paths 			map[PathName]PathStatus,
+	stages 			map[StageName]*Stage,
+	eventRoutes		map[Event]StageTarget,
+	commandRoutes	map[ControlCommand]StageTarget,
+) (*Controller, error) {
+
+	var errs []error
+
+   for target := range concat(maps.Values(eventRoutes), maps.Values(commandRoutes)) {
+      if stages[target.Stage] == nil {
+          errs = append(errs, fmt.Errorf("route targets unknown stage %q", target.Stage))
+			 continue
+      }
+      if stages[target.Stage].Ops[target.State] == nil {
+          errs = append(errs, fmt.Errorf("no op for stage %q state %q", target.Stage, target.State))
+      }
+   }
+	
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+
 	return &Controller{
 		paths: paths,
 		stages: stages,
-		ops:	ops,
 		eventRoutes: eventRoutes,
 		commandRoutes: commandRoutes,
-		events: make(chan Event),
-		controlCommands: make(chan ControlCommand),
-		statusRequests: make(chan StatusRequest),
-		validPathNames: slices.Collect(asStrings(maps.Keys(paths))),
-		validStageNames: slices.Collect(asStrings(maps.Keys(stages))),
-		validComponentNames: slices.Compact(slices.Sorted(components(maps.Keys(commandRoutes)))),
-		validActionNames: slices.Compact(slices.Sorted(actions(maps.Keys(commandRoutes)))),
-	}
+		actions: make(chan func(*Controller)),
+	}, nil
 }
 
 func (c *Controller) run() {
-	for {
-		select {
-
-			case e 	:= <-c.events:
-				e.Reply 		<- c.HandleEvent(e)
-
-			case cmd := <-c.controlCommands:
-				cmd.Reply 	<- c.HandleControl(cmd)
-
-			case sr 	:= <-c.statusRequests:
-				sr.Reply 	<- c.HandleStatus()
-
-		}
-	}
+	for act := range c.actions { act(c) }
 }
 
-// prerequisite is allowed to be nil 
-func (c *Controller) setStage(
-	s Stage, 
-	target StageState, 
-	action func() error, 
-	prerequisite func(c *Controller) error,
-) error {
-
-	c.stages[s].Desired = target
-
-	if c.stages[s].Actual == target {
-		log.Printf("stage `%s` already %s", s, target)
+func (c *Controller) applyStageTarget(target StageTarget) error {
+	stage := c.stages[target.Stage]
+	if stage.Status.Desired == target.State {
+		log.Printf("stage %q already %q", target.Stage, target.State)
 		return nil
 	}
 
 	var err error
-	if prerequisite != nil {
-		err = prerequisite(c)
-	}
-	if err != nil {
-		return fmt.Errorf("cannot set stage `%s` to %s, prerequisite not satisfied: %w", s, target, err)
+	if target.Prerequisite != nil {
+		err = target.Prerequisite(c)
 	}
 
-	err = action()
 	if err != nil {
-		return fmt.Errorf("cannot set stage `%s` to %s: %w", s, target, err)
+		return fmt.Errorf("cannot set stage %q to %q, prerequisite not satisfied: %w", target.Stage, target.State, err)
 	}
 
-	c.stages[s].Actual = target
+	stage.Status.Desired = target.State
 	return nil
 }
 
-
 func (c *Controller) HandleControl(cmd ControlCommand) error {
-
-	if !oneOf(c.validComponentNames, cmd.Component) {
-		return fmt.Errorf("invalid component: %+v", cmd)
-	}
-
-	if !oneOf(c.validActionNames, cmd.Action) {
-		return fmt.Errorf("invalid action: %+v", cmd)
-	}
 	
-	log.Printf("controlCommand component=%s action=%s", cmd.Component, cmd.Action)
+	log.Printf("controlCommand %+v", cmd)
 
-	key := ControlCommandKey{cmd.Component, cmd.Action}
-	target, ok := c.commandRoutes[key]
+	target, ok := c.commandRoutes[cmd]
 
 	if !ok {
 		return fmt.Errorf("control not implemented: %+v", cmd)
 	}
 
-	return c.setStage(
-		target.Stage, 
-		target.State, 
-		c.ops[target.Stage][target.State], 
-		target.Prerequisite,
-	)
+	return c.applyStageTarget(target)
 
 }
 
-
 func (c *Controller) HandleEvent(e Event) error {
 
-	if !oneOf(c.validPathNames, e.Path) {
+	if _, ok := c.paths[e.Path]; !ok {
 		return fmt.Errorf("invalid path: %+v", e)
 	}
 
-	if !oneOf(validPathStatusNames, e.Status) {
+	if !e.Status.Valid() {
 		return fmt.Errorf("invalid path status: %+v", e)
 	}
 
-	path 		  := Path(e.Path)
-	pathStatus := PathStatus(e.Status)
+	log.Printf("event %+v", e)
 
-	log.Printf("event path=%s state=%s", e.Path, e.Status)
+	c.paths[e.Path] = e.Status
 
-	c.paths[path] = pathStatus
-
-	key := EventKey{path, pathStatus}
-	target, ok := c.eventRoutes[key]
+	target, ok := c.eventRoutes[e]
 
 	if !ok {
-		return fmt.Errorf("event not implemented: %+v", e)
+		return nil
 	}
 
-	return c.setStage(
-		target.Stage, 
-		target.State, 
-		c.ops[target.Stage][target.State], 
-		target.Prerequisite,
-	)
+	return c.applyStageTarget(target)
 
+}
+
+func (c *Controller) HandleReconcile() error {
+
+	var errs []error
+
+	for name, stage := range c.stages { 
+		actual  := stage.Status.Actual
+		desired := stage.Status.Desired
+
+		if actual == desired {
+			continue
+		}
+
+		err := stage.Ops[desired]()
+
+		if err != nil {
+			errs = append(errs, fmt.Errorf("cannot set stage %q to %q: %w", name, desired, err))
+			continue
+		}
+		stage.Status.Actual = desired
+	}
+
+	return errors.Join(errs...)
 }
 
 func (c *Controller) HandleStatus() ControllerStatus {
 	outPaths := maps.Clone(c.paths)
-	outStages := make(map[Stage]StageStatus, len(c.stages))
-	for name, stageStatus := range c.stages {
-		outStages[name] = *stageStatus
-	}
-	return ControllerStatus{
-		Paths: 	outPaths,
-		Stages: 	outStages,
-	}
+	outStages := make(map[StageName]StageStatus, len(c.stages))
+	for name, stage := range c.stages { outStages[name] = stage.Status }
+	return ControllerStatus{ Paths: outPaths, Stages: outStages, }
 }
 
 

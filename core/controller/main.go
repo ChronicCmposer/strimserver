@@ -2,101 +2,68 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"fmt"
+	"time"
 )
 
 func main() {
-	paths  := map[Path]PathStatus {
-		"ingress0": "unknown", "normalized": "unknown",
-	}
-	stages := map[Stage]*StageStatus {
-		"normalize": 			{ Desired: "stopped", Actual: "stopped", },
-		"scale-and-egress": 	{ Desired: "stopped", Actual: "stopped", },
-	}
-	ops := map[Stage]map[StageState]func() error {
+	paths := map[PathName]PathStatus { "ingress0": Unknown, "normalized": Unknown, }
+	stages := map[StageName]*Stage {
 		"normalize": {
-			Running: func() error { fmt.Println("launched normalize stage"); return nil }, 
-			Stopped: func() error { fmt.Println("terminated normalize stage"); return nil },
+			Status: StageStatus{ Desired: Stopped, Actual: Stopped, },
+			Ops: map[StageState]func() error{
+				Running: func() error { fmt.Println("launched normalize stage"); return nil },
+				Stopped: func() error { fmt.Println("terminated normalize stage"); return nil },
+			},
 		},
 		"scale-and-egress": {
-			Running:	func() error { fmt.Println("launched scale-and-egress stage"); return nil },
-			Stopped: func() error { fmt.Println("terminated scale-and-egress stage"); return nil },
+			Status: StageStatus{ Desired: Stopped, Actual: Stopped, },
+			Ops: map[StageState]func() error{
+				Running:	func() error { fmt.Println("launched scale-and-egress stage"); return nil },
+				Stopped: func() error { fmt.Println("terminated scale-and-egress stage"); return nil },
+			},
 		},
 	}
-	eventRoutes 	:= map[EventKey]StageTarget {
-		{ "ingress0", "ready" }: 			{ "normalize", Running, nil }, 
-		{ "ingress0", "not-ready" }: 		{ "normalize", Stopped, nil }, 
-		{ "normalized", "ready" }: 		{ "scale-and-egress", Running, nil }, 
-		{ "normalized", "not-ready" }: 	{ "scale-and-egress", Stopped, nil }, 
+	eventRoutes := map[Event]StageTarget {
+		{ Path: "ingress0", Status: Ready }: 			{ Stage: "normalize", State: Running },
+		{ Path: "ingress0", Status: NotReady }: 		{ Stage: "normalize", State: Stopped },
+		{ Path: "normalized", Status: Ready }: 		{ Stage: "scale-and-egress", State: Running },
+		{ Path: "normalized", Status: NotReady }: 	{ Stage: "scale-and-egress", State: Stopped },
 	}	
-	commandRoutes 	:= map[ControlCommandKey]StageTarget {
-		{ "scale-and-egress", "start" }: 	{ 
-			"scale-and-egress", 
-			Running, 
-			func(c *Controller) error {
-				if c.paths["normalized"] != "ready" {
+	commandRoutes := map[ControlCommand]StageTarget {
+		{ Component: "scale-and-egress", Action: "start" }: { Stage: "scale-and-egress", State: Running,
+			Prerequisite: func(c *Controller) error {
+				if c.paths["normalized"] != Ready {
 					return fmt.Errorf("normalize path is not ready")
 				}
 				return nil
 			}, 
 		},
-		{ "scale-and-egress", "stop" }: 	{ "scale-and-egress", Stopped, nil },
+		{ Component: "scale-and-egress", Action: "stop" }: { Stage: "scale-and-egress", State: Stopped },
 	}	
 
-	controller := NewController(
-		paths, 
-		stages, 
-		ops,
-		eventRoutes,
-		commandRoutes,
-	)
+	controller, err := NewController(paths, stages, eventRoutes, commandRoutes)
+
+	if err != nil {
+		log.Fatalf("error constructing controller: %v", err)
+	}
 
    log.Printf("%+v", controller)
 
-
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/event", postJSON(
-			controller.events, 
-			func(e *Event, reply chan error) { e.Reply = reply },
-		),
-	)
+	mux.HandleFunc("/event", postJSON(controller, (*Controller).HandleEvent))
 
-	mux.HandleFunc("/control", postJSON(
-			controller.controlCommands, 
-			func(c *ControlCommand, reply chan error) { c.Reply = reply },
-		),
-	)
+	mux.HandleFunc("/control", postJSON(controller, (*Controller).HandleControl))
 
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-				
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		sr := StatusRequest{
-			Reply: make(chan ControllerStatus),
-		}
-
-		controller.statusRequests <- sr
-		controllerStatus := <-sr.Reply
-
-		
-		w.Header().Set("Content-Type", "application/json")
-		err := json.NewEncoder(w).Encode(controllerStatus)
-		if err != nil {
-			log.Printf("status endpoint error: %+v", err.Error())	
-		}
-
-	})
+	mux.HandleFunc("/status", getJSON(controller, (*Controller).HandleStatus))
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, err := w.Write([]byte("ok\n"))
+		_, err = w.Write([]byte("ok\n"))
 		if err != nil {
 			log.Printf("healthz endpoint error: %+v", err.Error())
 		}
@@ -105,17 +72,20 @@ func main() {
 	// Start the controller loop
 	go controller.run()
 
+	// Start the reconcile loop
+	go invokeReconcileEvery(controller, 5 * time.Second)
+
 	addr := env("STRIMSERVER_CONTROLLER_ADDR", "127.0.0.1:9177")
 	log.Printf("controller listening on %s", addr)
 
-	err := http.ListenAndServe(addr, mux)
+	err = http.ListenAndServe(addr, mux)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 }
 
-func postJSON[T any](toController chan<- T, setReplyChannel func(*T, chan error)) http.HandlerFunc {
+func postJSON[T any](c *Controller, handle func(*Controller, T) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
 		if r.Method != http.MethodPost {
@@ -126,21 +96,52 @@ func postJSON[T any](toController chan<- T, setReplyChannel func(*T, chan error)
 		var message T
 		err := json.NewDecoder(r.Body).Decode(&message)
 		if err != nil {
-			http.Error(w, "bad json", http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("bad json: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		fromController := make(chan error)
-		setReplyChannel(&message, fromController)
-		toController <- message
-
-		err = <-fromController
+		err = submit(c, func(c *Controller) error { return handle(c, message) } )
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func getJSON[T any](c *Controller, handle func(*Controller) T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		err := json.NewEncoder(w).Encode(submit(c, handle))
+		if err != nil {
+			log.Printf("json serialization error: %v", err)
+		}
+	}
+}
+
+func submit[T any](c *Controller, fn func(*Controller) T) T {
+	reply := make(chan T, 1)
+	c.actions <- func(c *Controller) { reply <- fn(c) }
+	return <-reply
+}
+
+func invokeReconcileEvery(c *Controller, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		err := submit(c, (*Controller).HandleReconcile)
+		if err != nil {
+			log.Printf("reconcile error: %v", err)
+		}
 	}
 }
 
@@ -151,29 +152,6 @@ func env(name, fallback string) string {
 	}
 	return v
 }
-
-
-// TODO: write this better - DankReading, consider Strategy pattern
-// func (c *Controller) reconcileLocked() error {
-// 	for stageName, desired := range c.desired {
-// 		stage := c.stages[stageName]
-//
-// 		if desired == "running" {
-// 			if !containerExists(stage.ContainerName) {
-// 				if err := c.startStage(stage); err != nil {
-// 					return err
-// 				}
-// 			}
-// 		} else { // "stopped"
-// 			if containerExists(stage.ContainerName) {
-//             if err := stopStage(stage); err != nil { // TODO: is this a bug ? need a controller reference ?
-// 					return err
-// 				}
-// 			}
-// 		}
-// 	}
-// 	return nil
-// }
 
 // TODO: are all cases handled ? what error codes do we expect ?
 // TODO: rename to stageIsRunning
