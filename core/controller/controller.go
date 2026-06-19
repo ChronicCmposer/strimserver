@@ -33,6 +33,7 @@ type StageStatus struct {
 type Stage struct {
 	Status 	StageStatus
 	Ops		map[StageState]func() error
+	InFlight	bool
 }
 
 type ControllerStatus struct {
@@ -57,14 +58,11 @@ type StageTarget struct {
 }
 
 type Controller struct {
-
 	paths 			map[PathName]PathStatus
 	stages			map[StageName]*Stage
 	eventRoutes		map[Event]StageTarget
 	commandRoutes	map[ControlCommand]StageTarget
-
-	actions chan func(*Controller)
-
+	actions 			chan func(*Controller)
 }
 
 func concat[V any](seqs ...iter.Seq[V]) iter.Seq[V] {
@@ -96,22 +94,76 @@ func NewController(
           errs = append(errs, fmt.Errorf("no op for stage %q state %q", target.Stage, target.State))
       }
    }
-	
-	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
+
+	for status := range maps.Values(paths) {
+		 if !status.Valid() {
+			  errs = append(errs, fmt.Errorf("path seeded with invalid status %q", status))
+		 }
 	}
+	for ev := range maps.Keys(eventRoutes) {
+		 if _, ok := paths[ev.Path]; !ok {
+			  errs = append(errs, fmt.Errorf("event route references unknown path %q", ev.Path))
+		 }
+		 if !ev.Status.Valid() {
+			  errs = append(errs, fmt.Errorf("event route %+v has invalid status", ev))
+		 }
+	}
+	
+	if len(errs) > 0 { return nil, errors.Join(errs...) }
 
 	return &Controller{
 		paths: paths,
 		stages: stages,
 		eventRoutes: eventRoutes,
 		commandRoutes: commandRoutes,
-		actions: make(chan func(*Controller)),
+		actions: make(chan func(*Controller), 64),
 	}, nil
 }
 
 func (c *Controller) run() {
 	for act := range c.actions { act(c) }
+}
+
+func submit[T any](c *Controller, fn func(*Controller) T) T {
+	reply := make(chan T, 1)
+	c.actions <- func(c *Controller) { reply <- fn(c) }
+	return <-reply
+}
+
+func (c *Controller) SubmitEvent(e Event) error {
+	return submit(c, func(c *Controller) error { return c.handleEvent(e) })
+}
+
+func (c *Controller) SubmitControl(cmd ControlCommand) error {
+	return submit(c, func(c *Controller) error { return c.handleControl(cmd) })
+}
+
+func (c *Controller) Status() ControllerStatus {
+	return submit(c, (*Controller).handleStatus)
+}
+
+func (c *Controller) RequestReconcile() {
+	c.actions <- func(c *Controller) { c.handleReconcile() }
+}
+
+func (c *Controller) handleControl(cmd ControlCommand) error {
+	log.Printf("controlCommand %+v", cmd)
+	target, ok := c.commandRoutes[cmd]
+	if !ok { return fmt.Errorf("control not implemented: %+v", cmd) }
+	return c.applyStageTarget(target)
+}
+
+func (c *Controller) handleEvent(e Event) error {
+	_, ok := c.paths[e.Path]
+	if !ok { return fmt.Errorf("invalid path: %+v", e) }
+	if !e.Status.Valid() { return fmt.Errorf("invalid path status: %+v", e) }
+
+	log.Printf("event %+v", e)
+
+	c.paths[e.Path] = e.Status
+	target, ok := c.eventRoutes[e]
+	if !ok { return nil }
+	return c.applyStageTarget(target)
 }
 
 func (c *Controller) applyStageTarget(target StageTarget) error {
@@ -122,10 +174,7 @@ func (c *Controller) applyStageTarget(target StageTarget) error {
 	}
 
 	var err error
-	if target.Prerequisite != nil {
-		err = target.Prerequisite(c)
-	}
-
+	if target.Prerequisite != nil { err = target.Prerequisite(c) }
 	if err != nil {
 		return fmt.Errorf("cannot set stage %q to %q, prerequisite not satisfied: %w", target.Stage, target.State, err)
 	}
@@ -134,73 +183,34 @@ func (c *Controller) applyStageTarget(target StageTarget) error {
 	return nil
 }
 
-func (c *Controller) HandleControl(cmd ControlCommand) error {
-	
-	log.Printf("controlCommand %+v", cmd)
-
-	target, ok := c.commandRoutes[cmd]
-
-	if !ok {
-		return fmt.Errorf("control not implemented: %+v", cmd)
-	}
-
-	return c.applyStageTarget(target)
-
-}
-
-func (c *Controller) HandleEvent(e Event) error {
-
-	if _, ok := c.paths[e.Path]; !ok {
-		return fmt.Errorf("invalid path: %+v", e)
-	}
-
-	if !e.Status.Valid() {
-		return fmt.Errorf("invalid path status: %+v", e)
-	}
-
-	log.Printf("event %+v", e)
-
-	c.paths[e.Path] = e.Status
-
-	target, ok := c.eventRoutes[e]
-
-	if !ok {
-		return nil
-	}
-
-	return c.applyStageTarget(target)
-
-}
-
-func (c *Controller) HandleReconcile() error {
-
-	var errs []error
-
-	for name, stage := range c.stages { 
-		actual  := stage.Status.Actual
-		desired := stage.Status.Desired
-
-		if actual == desired {
+func (c *Controller) handleReconcile() {
+	for name, stage := range c.stages {
+		if stage.Status.Actual == stage.Status.Desired || stage.InFlight {
 			continue
 		}
+	  	stage.InFlight = true
+	  	target := stage.Status.Desired
+	  	operation := stage.Ops[target]
 
-		err := stage.Ops[desired]()
-
-		if err != nil {
-			errs = append(errs, fmt.Errorf("cannot set stage %q to %q: %w", name, desired, err))
-			continue
-		}
-		stage.Status.Actual = desired
+		// closes over loop variables per-iteration: name, stage, target
+		go func() {
+			err := operation()
+			c.actions <- func(c *Controller) {
+				c.stages[name].InFlight = false 
+				if err != nil {
+					log.Printf("reconcile %q->%q failed: %v", name, target, err)
+					return
+				}
+				c.stages[name].Status.Actual = target 
+			}
+		}()
 	}
-
-	return errors.Join(errs...)
 }
 
-func (c *Controller) HandleStatus() ControllerStatus {
+func (c *Controller) handleStatus() ControllerStatus {
 	outPaths := maps.Clone(c.paths)
 	outStages := make(map[StageName]StageStatus, len(c.stages))
 	for name, stage := range c.stages { outStages[name] = stage.Status }
 	return ControllerStatus{ Paths: outPaths, Stages: outStages, }
 }
-
 

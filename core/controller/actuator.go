@@ -31,8 +31,8 @@ type Actuator struct {
 func NewActuator(
 	context 			context.Context, 
 	runner 			CommandRunner, 
-	commands 		map[StageName]StageCommands, 
 	defaultTimeout time.Duration,
+	commands 		map[StageName]StageCommands, 
 ) (*Actuator, error) {
 
 	var errs []error
@@ -50,8 +50,7 @@ func NewActuator(
 	}
 
 	for name, c := range commands {
-		startCommands := c.Start
-		if len(startCommands) == 0 {
+		if len(c.Start) == 0 {
 			errs = append(errs, fmt.Errorf("error constructing actuator, stage %q has 0 start commands", name))
 		} 
 	}
@@ -63,21 +62,25 @@ func NewActuator(
 	return &Actuator{
 		context: context,
 		runner: runner,
-		commands: commands,
 		defaultTimeout: defaultTimeout,
+		commands: commands,
 	}, nil
+}
+
+func (a *Actuator) runCommand(cmd Command) error {
+	timeout := cmd.Timeout
+	if timeout <= 0 {
+		 timeout = a.defaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(a.context, timeout)
+	defer cancel()
+	return a.runner.Run(ctx, cmd.Argv)
 }
 
 func (a *Actuator) StartOp(stage StageName) func() error {
 	return func() error { 
 		for _, cmd := range a.commands[stage].Start {
-			timeout := cmd.Timeout
-			if cmd.Timeout <= 0 {
-				timeout = a.defaultTimeout
-			}
-			startOpContext, cancel := context.WithTimeout(a.context, timeout)
-			defer cancel()
-			err := a.runner.Run(startOpContext, cmd.Argv)
+			err := a.runCommand(cmd)
 			if err != nil {
 				return fmt.Errorf("could not start stage %q: %w", stage, err)
 			}
@@ -92,23 +95,14 @@ func (a *Actuator) StopOp(stage StageName) func() error {
 		var errs []error
 
 		for _, cmd := range a.commands[stage].Stop {
-			timeout := cmd.Timeout
-			if cmd.Timeout <= 0 {
-				timeout = a.defaultTimeout
-			}
-			stopOpContext, cancel := context.WithTimeout(a.context, timeout)
-			defer cancel()
-			err := a.runner.Run(stopOpContext, cmd.Argv)
+			err := a.runCommand(cmd)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("could not stop stage %q: %w", stage, err))
 			}
 		}
 
-		if len(errs) > 0 {
-			return errors.Join(errs...)
-		}
-
-		return nil
+		// nil if no errors
+		return errors.Join(errs...)
 	}
 }
 
