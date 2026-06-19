@@ -1,6 +1,8 @@
 package main
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,26 +11,49 @@ import (
 	"time"
 )
 
+type CommandRunnerFunc func(context.Context, []string) error 
+
+func (r CommandRunnerFunc) Run(ctx context.Context, argv []string) error { return r(ctx,argv) } 
+
 func main() {
 
-	// actuator := nil
+	rootContext := context.Background()
 
-	paths := map[PathName]PathStatus { "ingress0": Unknown, "normalized": Unknown, }
-	stages := map[StageName]*Stage {
+	var runner CommandRunner = CommandRunnerFunc(func(_ context.Context, argv []string) error {
+		fmt.Printf("running command: %v\n", argv); return nil
+	})
+	
+	defaultCommandTimeout := 5 * time.Second
+
+	commands := map[StageName]StageCommands{
 		"normalize": {
-			Status: StageStatus{ Desired: Stopped, Actual: Stopped, },
-			Ops: map[StageState]func() error{
-				Running: func() error { fmt.Println("launched normalize stage"); return nil },
-				Stopped: func() error { fmt.Println("terminated normalize stage"); return nil },
-			},
+			Start: 	[]Command{{ Argv: []string{"/usr/bin/echo", "normalize is running" }}},
+			Stop: 	[]Command{{ Argv: []string{"/usr/bin/echo", "normalize is stopped" }}},
 		},
 		"scale-and-egress": {
-			Status: StageStatus{ Desired: Stopped, Actual: Stopped, },
-			Ops: map[StageState]func() error{
-				Running:	func() error { fmt.Println("launched scale-and-egress stage"); return nil },
-				Stopped: func() error { fmt.Println("terminated scale-and-egress stage"); return nil },
-			},
+			Start: 	[]Command{{ Argv: []string{"/usr/bin/echo", "scale-and-egress is running" }}},
+			Stop: 	[]Command{{ Argv: []string{"/usr/bin/echo", "scale-and-egress is stopped" }}},
 		},
+	}
+
+	actuator, err := NewActuator(rootContext, runner, defaultCommandTimeout, commands)
+
+	if err != nil {
+		log.Fatalf("error constructing actuator: %v", err)
+	}
+
+	paths := map[PathName]PathStatus { "ingress0": Unknown, "normalized": Unknown, }
+
+	stages := map[StageName]*Stage{
+		"normalize": {
+			Status: StageStatus{ Desired: Stopped, Actual: Stopped},
+			Ops: actuator.Ops("normalize"),
+		},
+		"scale-and-egress": {
+			Status: StageStatus{ Desired: Stopped, Actual: Stopped},
+			Ops: actuator.Ops("scale-and-egress"),
+		},
+
 	}
 	eventRoutes := map[Event]StageTarget {
 		{ Path: "ingress0", Status: Ready }: 			{ Stage: "normalize", State: Running },
@@ -58,11 +83,11 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/event", postJSON(controller, (*Controller).HandleEvent))
+	mux.HandleFunc("/event", postJSON(controller, (*Controller).SubmitEvent))
 
-	mux.HandleFunc("/control", postJSON(controller, (*Controller).HandleControl))
+	mux.HandleFunc("/control", postJSON(controller, (*Controller).SubmitControl))
 
-	mux.HandleFunc("/status", getJSON(controller, (*Controller).HandleStatus))
+	mux.HandleFunc("/status", getJSON(controller, (*Controller).Status))
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -78,7 +103,7 @@ func main() {
 	// Start the reconcile loop
 	go invokeReconcileEvery(controller, 5 * time.Second)
 
-	addr := env("STRIMSERVER_CONTROLLER_ADDR", "127.0.0.1:9177")
+	addr := cmp.Or(os.Getenv("STRIMSERVER_CONTROLLER_ADDR"), "127.0.0.1:9177")
 	log.Printf("controller listening on %s", addr)
 
 	err = http.ListenAndServe(addr, mux)
@@ -103,12 +128,12 @@ func postJSON[T any](c *Controller, handle func(*Controller, T) error) http.Hand
 			return
 		}
 
-		err = submit(c, func(c *Controller) error { return handle(c, message) } )
+		err = handle(c, message) 
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
+		c.RequestReconcile()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -123,36 +148,16 @@ func getJSON[T any](c *Controller, handle func(*Controller) T) http.HandlerFunc 
 
 		w.Header().Set("Content-Type", "application/json")
 
-		err := json.NewEncoder(w).Encode(submit(c, handle))
+		err := json.NewEncoder(w).Encode(handle(c))
 		if err != nil {
 			log.Printf("json serialization error: %v", err)
 		}
 	}
 }
 
-func submit[T any](c *Controller, fn func(*Controller) T) T {
-	reply := make(chan T, 1)
-	c.actions <- func(c *Controller) { reply <- fn(c) }
-	return <-reply
-}
-
 func invokeReconcileEvery(c *Controller, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-
-	for range ticker.C {
-		err := submit(c, (*Controller).HandleReconcile)
-		if err != nil {
-			log.Printf("reconcile error: %v", err)
-		}
-	}
-}
-
-func env(name, fallback string) string {
-	v := os.Getenv(name)
-	if v == "" {
-		return fallback
-	}
-	return v
+	for range ticker.C { c.RequestReconcile() }
 }
 

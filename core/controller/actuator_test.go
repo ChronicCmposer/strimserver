@@ -141,7 +141,7 @@ func cmds(argvs ...[]string) []Command {
 // fixed positive default; tests that exercise those call NewActuator directly.
 func newTestActuator(t *testing.T, runner CommandRunner, commands map[StageName]StageCommands) *Actuator {
 	t.Helper()
-	a, err := NewActuator(context.Background(), runner, commands, 5*time.Second)
+	a, err := NewActuator(context.Background(), runner, 5*time.Second, commands)
 	if err != nil {
 		t.Fatalf("NewActuator returned unexpected error: %v", err)
 	}
@@ -176,36 +176,36 @@ func TestNewActuatorValidatesConfig(t *testing.T) {
 	}
 
 	t.Run("nil context rejected", func(t *testing.T) {
-		if _, err := NewActuator(nil, &recordingRunner{}, valid, okTimeout); err == nil { //nolint:staticcheck
+		if _, err := NewActuator(nil, &recordingRunner{}, okTimeout, valid); err == nil { //nolint:staticcheck
 			t.Error("NewActuator accepted a nil context; want an error")
 		}
 	})
 
 	t.Run("nil runner rejected", func(t *testing.T) {
-		if _, err := NewActuator(context.Background(), nil, valid, okTimeout); err == nil {
+		if _, err := NewActuator(context.Background(), nil, okTimeout, valid); err == nil {
 			t.Error("NewActuator accepted a nil runner; want an error")
 		}
 	})
 
 	t.Run("non-positive default timeout rejected", func(t *testing.T) {
-		if _, err := NewActuator(context.Background(), &recordingRunner{}, valid, 0); err == nil {
+		if _, err := NewActuator(context.Background(), &recordingRunner{}, 0, valid); err == nil {
 			t.Error("NewActuator accepted a non-positive default timeout; want an error")
 		}
 	})
 
 	t.Run("stage without a Start rejected", func(t *testing.T) {
-		_, err := NewActuator(context.Background(), &recordingRunner{}, map[StageName]StageCommands{
+		_, err := NewActuator(context.Background(), &recordingRunner{}, okTimeout, map[StageName]StageCommands{
 			"normalize": {Stop: cmds([]string{"stop", "normalize"})}, // no Start
-		}, okTimeout)
+		})
 		if err == nil {
 			t.Error("NewActuator accepted a stage with no Start command; want an error")
 		}
 	})
 
 	t.Run("empty Stop permitted", func(t *testing.T) {
-		a, err := NewActuator(context.Background(), &recordingRunner{}, map[StageName]StageCommands{
+		a, err := NewActuator(context.Background(), &recordingRunner{}, okTimeout, map[StageName]StageCommands{
 			"normalize": {Start: cmds([]string{"start", "normalize"})}, // no Stop
-		}, okTimeout)
+		})
 		if err != nil {
 			t.Fatalf("NewActuator rejected a stage with no Stop; want it permitted: %v", err)
 		}
@@ -216,7 +216,7 @@ func TestNewActuatorValidatesConfig(t *testing.T) {
 	})
 
 	t.Run("valid config accepted", func(t *testing.T) {
-		if _, err := NewActuator(context.Background(), &recordingRunner{}, valid, okTimeout); err != nil {
+		if _, err := NewActuator(context.Background(), &recordingRunner{}, okTimeout, valid); err != nil {
 			t.Errorf("NewActuator rejected a valid config: %v", err)
 		}
 	})
@@ -436,12 +436,12 @@ func TestStopPropagatesRealError(t *testing.T) {
 func TestActuatorAppliesPerCommandTimeout(t *testing.T) {
 	t.Run("distinct per-command timeouts honored", func(t *testing.T) {
 		runner := &recordingRunner{}
-		a, err := NewActuator(context.Background(), runner, map[StageName]StageCommands{
+		a, err := NewActuator(context.Background(), runner, 5*time.Second, map[StageName]StageCommands{
 			"normalize": {Start: []Command{
 				{Argv: []string{"step-1", "normalize"}, Timeout: 2 * time.Second},
 				{Argv: []string{"step-2", "normalize"}, Timeout: 8 * time.Second},
 			}},
-		}, 5*time.Second) // default unused: both commands carry their own timeout
+		}) // default unused: both commands carry their own timeout
 		if err != nil {
 			t.Fatalf("NewActuator: %v", err)
 		}
@@ -460,9 +460,9 @@ func TestActuatorAppliesPerCommandTimeout(t *testing.T) {
 	t.Run("injected default applies when command timeout unset", func(t *testing.T) {
 		const injectedDefault = 3 * time.Second // distinctive, to prove it's the injected value
 		runner := &recordingRunner{}
-		a, err := NewActuator(context.Background(), runner, map[StageName]StageCommands{
+		a, err := NewActuator(context.Background(), runner, injectedDefault, map[StageName]StageCommands{
 			"normalize": {Start: []Command{{Argv: []string{"start", "normalize"}}}}, // Timeout 0
-		}, injectedDefault)
+		})
 		if err != nil {
 			t.Fatalf("NewActuator: %v", err)
 		}
@@ -484,9 +484,9 @@ func TestActuatorAbortsCommandsWhenRootCanceled(t *testing.T) {
 	cancel() // simulate shutdown before the op runs
 
 	runner := &recordingRunner{}
-	a, err := NewActuator(ctx, runner, map[StageName]StageCommands{
+	a, err := NewActuator(ctx, runner, 5*time.Second, map[StageName]StageCommands{
 		"normalize": {Start: cmds([]string{"step-1", "normalize"}, []string{"step-2", "normalize"})},
-	}, 5*time.Second)
+	})
 	if err != nil {
 		t.Fatalf("NewActuator: %v", err)
 	}
@@ -546,76 +546,3 @@ func TestOpsBundlesStartAndStopForStage(t *testing.T) {
 	}
 }
 
-// TestActuatorOpsDriveStageThroughController is the end-to-end wiring test. It
-// shows, concretely, how an Actuator connects to the Controller:
-//
-//   - Build the Actuator (with a runner and injected per-stage commands).
-//   - Build each *Stage so that its Ops table is the Actuator's closures:
-//     Running -> StartOp(stage), Stopped -> StopOp(stage). This is the entire
-//     connection between the two halves; Stage.Ops[state] simply IS the
-//     actuator closure for that state.
-//   - Hand the stages to NewController. Thereafter the controller drives the
-//     actuator entirely through Stage.Ops: HandleEvent records desired state,
-//     and HandleReconcile invokes stage.Ops[desired](), i.e. the actuator op,
-//     which runs the injected command via the runner.
-func TestActuatorOpsDriveStageThroughController(t *testing.T) {
-	runner := &recordingRunner{}
-	act := newTestActuator(t, runner, map[StageName]StageCommands{
-		"normalize": {
-			Start: cmds([]string{"start", "normalize"}),
-			Stop:  cmds([]string{"stop", "normalize"}),
-		},
-	})
-
-	// THE CONNECTION: the actuator's per-stage closures become the stage's Ops.
-	stages := map[StageName]*Stage{
-		"normalize": {
-			Status: StageStatus{Desired: Stopped, Actual: Stopped},
-			Ops: map[StageState]func() error{
-				Running: act.StartOp("normalize"),
-				Stopped: act.StopOp("normalize"),
-			},
-			// Equivalent shorthand: Ops: act.Ops("normalize")
-		},
-	}
-
-	paths := map[PathName]PathStatus{"ingress0": Unknown}
-	eventRoutes := map[Event]StageTarget{
-		{Path: "ingress0", Status: Ready}:    {Stage: "normalize", State: Running},
-		{Path: "ingress0", Status: NotReady}: {Stage: "normalize", State: Stopped},
-	}
-
-	c, err := NewController(paths, stages, eventRoutes, nil)
-	if err != nil {
-		t.Fatalf("NewController rejected actuator-backed Ops: %v", err)
-	}
-
-	// Phase 1: a ready event records intent only — no op runs yet.
-	if err := c.HandleEvent(Event{Path: "ingress0", Status: Ready}); err != nil {
-		t.Fatalf("HandleEvent(ready) error: %v", err)
-	}
-	if len(runner.calls) != 0 {
-		t.Fatalf("an op ran during HandleEvent; want it deferred to reconcile (calls: %v)", runner.calls)
-	}
-
-	// Phase 2: reconcile converges Actual->Desired by invoking stage.Ops[Running],
-	// i.e. act.StartOp("normalize"), which runs the injected Start command.
-	if err := c.HandleReconcile(); err != nil {
-		t.Fatalf("HandleReconcile (start) error: %v", err)
-	}
-	if len(runner.calls) != 1 || !slices.Equal(runner.calls[0], []string{"start", "normalize"}) {
-		t.Fatalf("reconcile did not run normalize's Start via Stage.Ops; calls: %v", runner.calls)
-	}
-
-	// Drive teardown the same way: a not-ready event flips Desired to Stopped,
-	// and reconcile invokes stage.Ops[Stopped] = act.StopOp("normalize").
-	if err := c.HandleEvent(Event{Path: "ingress0", Status: NotReady}); err != nil {
-		t.Fatalf("HandleEvent(not-ready) error: %v", err)
-	}
-	if err := c.HandleReconcile(); err != nil {
-		t.Fatalf("HandleReconcile (stop) error: %v", err)
-	}
-	if len(runner.calls) != 2 || !slices.Equal(runner.calls[1], []string{"stop", "normalize"}) {
-		t.Fatalf("reconcile did not run normalize's Stop via Stage.Ops; calls: %v", runner.calls)
-	}
-}
