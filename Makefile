@@ -30,7 +30,7 @@ IPERF3_DEPLOYMENT_TAR				:= $(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
 -include feature-toggles.env
 
 ENABLE_EXPERIMENTAL_OPENSSH		?= false
-
+ENABLE_LINT								?= true
 
 .DEFAULT_GOAL := publish-strimserver
 
@@ -58,6 +58,7 @@ test-controller: \
 		--local dockerfile=core/controller \
 		--opt filename=./Dockerfile \
       --opt build-arg:CACHEBUST=$$(date +%s%3N) \
+		--opt build-arg:ENABLE_LINT=$(ENABLE_LINT) \
 		--opt target=test \
 		--progress=plain
 

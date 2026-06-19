@@ -152,7 +152,7 @@ func newTestActuator(t *testing.T, runner CommandRunner, commands map[StageName]
 // Deadline() is stable after the per-command cancel fires, so reading it
 // post-Run is valid. Tolerance is generous (±1s) since commands run instantly
 // under the fake; it still cleanly distinguishes e.g. 2s from 8s.
-func assertDeadlineNear(t *testing.T, ctx context.Context, start time.Time, want time.Duration) {
+func assertDeadlineNear(t *testing.T, ctx context.Context, start time.Time, want time.Duration) { //nolint:revive
 	t.Helper()
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -176,7 +176,7 @@ func TestNewActuatorValidatesConfig(t *testing.T) {
 	}
 
 	t.Run("nil context rejected", func(t *testing.T) {
-		if _, err := NewActuator(nil, &recordingRunner{}, valid, okTimeout); err == nil {
+		if _, err := NewActuator(nil, &recordingRunner{}, valid, okTimeout); err == nil { //nolint:staticcheck
 			t.Error("NewActuator accepted a nil context; want an error")
 		}
 	})
@@ -375,8 +375,9 @@ func TestStartIsFailFast(t *testing.T) {
 // TestStopIsIdempotentWhenNotFound: ErrContainerNotFound from teardown is
 // success. Stop still issues every configured command (best-effort).
 func TestStopIsIdempotentWhenNotFound(t *testing.T) {
+	var ErrContainerNotFound error
 	runner := &recordingRunner{
-		result: func(int, []string) error { return ErrContainerNotFound },
+		result: func(int, []string) error { return ErrContainerNotFound }, 
 	}
 	a := newTestActuator(t, runner, map[StageName]StageCommands{
 		"normalize": {
