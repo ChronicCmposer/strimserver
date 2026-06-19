@@ -10,6 +10,9 @@ import (
 )
 
 func main() {
+
+	// actuator := nil
+
 	paths := map[PathName]PathStatus { "ingress0": Unknown, "normalized": Unknown, }
 	stages := map[StageName]*Stage {
 		"normalize": {
