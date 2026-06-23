@@ -1,163 +1,248 @@
 package main
 
 import (
-	"cmp"
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"time"
+   "context"
+   "encoding/json"
+   "errors"
+   "fmt"
+   "log"
+   "net/http"
+   "strconv"
+   "syscall"
+   "time"
+
+   containerd "github.com/containerd/containerd/v2/client"
+   "github.com/containerd/containerd/v2/pkg/namespaces"
 )
 
-type CommandRunnerFunc func(context.Context, []string) error 
+type ContainerConfig struct{ ContainerID, SnapshotID, ImageName, Logfile string }
+type Config struct {
+   ContainerdSocket, ContainerdNamespace, ControllerHTTPPort string
+   ControllerReconcileInterval time.Duration
+   ControllerInFlightTimeout time.Duration
+   ControllerActionsBufferSize uint8
+   MediaMTX, Normalize, ScaleAndEgress ContainerConfig
+}
 
-func (r CommandRunnerFunc) Run(ctx context.Context, argv []string) error { return r(ctx,argv) } 
+func LoadConfig() (Config, error) {
+   var errs []error
+   require := func(key string) string {
+      v, found := syscall.Getenv(key)
+      if !found { errs = append(errs, fmt.Errorf("missing required env var %q", key)) }
+      return v
+   }
+
+   requireUInt8 := func(key string) uint8 {
+      s, found := syscall.Getenv(key)
+      if !found { errs = append(errs, fmt.Errorf("missing required env var %q", key)); return 0 }
+      i, err := strconv.ParseUint(s, 10, 8)
+      if err != nil { errs = append(errs, fmt.Errorf("could not convert %q = %q to uint8", key, s)) }
+      return uint8(i)
+   }
+
+   requireDuration := func(key string) time.Duration {
+      s, found := syscall.Getenv(key)
+      if !found { errs = append(errs, fmt.Errorf("missing required env var %q", key)); return 0 }
+      d, err := time.ParseDuration(s)
+      if err != nil { errs = append(errs, fmt.Errorf("could not convert %q = %q to time.Duration", key, s)) }
+      return d
+   }
+
+   // optional := func(key, def string) string {
+   //    v, found := syscall.Getenv(key)
+   //    if !found { return def }
+   //    return v
+   // }
+
+   cfg := Config{
+      ContainerdSocket:             require("CONTAINERD_SOCKET"),
+      ContainerdNamespace:          require("CONTAINERD_NAMESPACE"),
+      ControllerReconcileInterval:  requireDuration("CONTROLLER_RECONCILE_INTERVAL"),
+      ControllerInFlightTimeout:    requireDuration("CONTROLLER_INFLIGHT_TIMEOUT"),
+      ControllerActionsBufferSize:  requireUInt8("CONTROLLER_ACTIONS_BUFFER_SIZE"),
+      ControllerHTTPPort:           require("CONTROLLER_HTTP_PORT"),
+
+      MediaMTX: ContainerConfig{
+         ContainerID:   require("MEDIAMTX_CONTAINER_ID"),
+         SnapshotID:    require("MEDIAMTX_SNAPSHOT_ID"),
+         ImageName:     require("MEDIAMTX_IMAGE_NAME"),
+         Logfile:       require("MEDIAMTX_LOG_FILE"),
+      },
+
+      Normalize: ContainerConfig{
+         ContainerID:   require("NORMALIZE_CONTAINER_ID"),
+         SnapshotID:    require("NORMALIZE_SNAPSHOT_ID"),
+         ImageName:     require("FFMPEG_IMAGE_NAME"),
+         Logfile:       require("NORMALIZE_LOG_FILE"),
+      },
+
+      ScaleAndEgress: ContainerConfig{
+         ContainerID:   require("EGRESS_CONTAINER_ID"),
+         SnapshotID:    require("EGRESS_SNAPSHOT_ID"),
+         ImageName:     require("FFMPEG_IMAGE_NAME"),
+         Logfile:       require("EGRESS_LOG_FILE"),
+      },
+   }
+
+   if len(errs) > 0 {
+      return Config{}, errors.Join(errs...)
+   }
+   return cfg, nil
+}
+
 
 func main() {
 
-	rootContext := context.Background()
 
-	var runner CommandRunner = CommandRunnerFunc(func(_ context.Context, argv []string) error {
-		fmt.Printf("running command: %v\n", argv); return nil
-	})
-	
-	defaultCommandTimeout := 5 * time.Second
+   config, err := LoadConfig()
+   if err != nil { log.Fatalf("could not load config: %v", err) }
 
-	commands := map[StageName]StageCommands{
-		"normalize": {
-			Start: 	[]Command{{ Argv: []string{"/usr/bin/echo", "normalize is running" }}},
-			Stop: 	[]Command{{ Argv: []string{"/usr/bin/echo", "normalize is stopped" }}},
-		},
-		"scale-and-egress": {
-			Start: 	[]Command{{ Argv: []string{"/usr/bin/echo", "scale-and-egress is running" }}},
-			Stop: 	[]Command{{ Argv: []string{"/usr/bin/echo", "scale-and-egress is stopped" }}},
-		},
-	}
+   // path names
+   const Ingress0    = "ingress0"
+   const Normalized  = "normalized"
 
-	actuator, err := NewActuator(rootContext, runner, defaultCommandTimeout, commands)
+   // stage names
+   const Normalize      = "normalize"
+   const ScaleAndEgress = "scale-and-egress"
 
-	if err != nil {
-		log.Fatalf("error constructing actuator: %v", err)
-	}
+   paths := map[PathName]PathStatus { Ingress0: Unknown, Normalized: Unknown }
 
-	paths := map[PathName]PathStatus { "ingress0": Unknown, "normalized": Unknown, }
+   pathEventRoutes := map[PathEvent]StageTarget {
+      { Path: Ingress0,    Status: Ready     }: { Stage: Normalize,        State: Running },
+      { Path: Ingress0,    Status: NotReady  }: { Stage: Normalize,        State: Stopped },
+      { Path: Normalized,  Status: Ready     }: { Stage: ScaleAndEgress,   State: Running },
+      { Path: Normalized,  Status: NotReady  }: { Stage: ScaleAndEgress,   State: Stopped },
+   }
 
-	stages := map[StageName]*Stage{
-		"normalize": {
-			Status: StageStatus{ Desired: Stopped, Actual: Stopped},
-			Ops: actuator.Ops("normalize"),
-		},
-		"scale-and-egress": {
-			Status: StageStatus{ Desired: Stopped, Actual: Stopped},
-			Ops: actuator.Ops("scale-and-egress"),
-		},
+   commandRoutes := map[ControlCommand]StageTarget {
+      { Component: "scale-and-egress", Action: "start" }: { Stage: ScaleAndEgress, State: Running,
+         Prerequisite: func(c *Controller) error {
+            if c.paths[Normalized] != Ready { return fmt.Errorf("normalized path is not ready") }
+            return nil
+         },
+      },
+      { Component: "scale-and-egress", Action: "stop" }: { Stage: ScaleAndEgress, State: Stopped },
+   }
 
-	}
-	eventRoutes := map[Event]StageTarget {
-		{ Path: "ingress0", Status: Ready }: 			{ Stage: "normalize", State: Running },
-		{ Path: "ingress0", Status: NotReady }: 		{ Stage: "normalize", State: Stopped },
-		{ Path: "normalized", Status: Ready }: 		{ Stage: "scale-and-egress", State: Running },
-		{ Path: "normalized", Status: NotReady }: 	{ Stage: "scale-and-egress", State: Stopped },
-	}	
-	commandRoutes := map[ControlCommand]StageTarget {
-		{ Component: "scale-and-egress", Action: "start" }: { Stage: "scale-and-egress", State: Running,
-			Prerequisite: func(c *Controller) error {
-				if c.paths["normalized"] != Ready {
-					return fmt.Errorf("normalize path is not ready")
-				}
-				return nil
-			}, 
-		},
-		{ Component: "scale-and-egress", Action: "stop" }: { Stage: "scale-and-egress", State: Stopped },
-	}	
+   rootContext := context.Background()
+   nsCtx := namespaces.WithNamespace(rootContext, config.ContainerdNamespace)
 
-	controller, err := NewController(paths, stages, eventRoutes, commandRoutes)
+   client, err := containerd.New(config.ContainerdSocket)
+   if err != nil { log.Fatalf("could not initialize containerd client: %v", err) }
 
-	if err != nil {
-		log.Fatalf("error constructing controller: %v", err)
-	}
+   containerIDtoStageName := map[string]string {
+      config.Normalize.ContainerID:       Normalize,
+      config.ScaleAndEgress.ContainerID:  ScaleAndEgress,
+   }
+
+   containerFactory := &ContainerFactory{
+      client: client, stageNames: containerIDtoStageName,
+   }
+
+   stages := map[StageName]*Stage{
+      Normalize: {
+         Status: StageStatus{ Desired: Stopped, Actual: Stopped },
+         Ops: containerFactory.CreateStageOps(config.Normalize),
+      },
+      ScaleAndEgress: {
+         Status: StageStatus{ Desired: Stopped, Actual: Stopped },
+         Ops: containerFactory.CreateStageOps(config.ScaleAndEgress),
+      },
+   }
+
+   now := time.Now // function pointer - not a time value
+   inflightTimeout := config.ControllerInFlightTimeout
+   actionsBufferSize := config.ControllerActionsBufferSize
+
+   controller, err := NewController(
+      nsCtx, paths, stages, pathEventRoutes, commandRoutes,
+      now, inflightTimeout, actionsBufferSize,
+   )
+   if err != nil { log.Fatalf("error constructing controller: %v", err) }
 
    log.Printf("%+v", controller)
 
-	mux := http.NewServeMux()
+   // wire up HTTP listener
+   mux := http.NewServeMux()
 
-	mux.HandleFunc("/event", postJSON(controller, (*Controller).SubmitEvent))
+   mux.HandleFunc("/event", postJSON(controller, (*Controller).SubmitPathEvent))
 
-	mux.HandleFunc("/control", postJSON(controller, (*Controller).SubmitControl))
+   mux.HandleFunc("/control", postJSON(controller, (*Controller).SubmitControl))
 
-	mux.HandleFunc("/status", getJSON(controller, (*Controller).Status))
+   mux.HandleFunc("/status", getJSON(controller, (*Controller).Status))
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, err = w.Write([]byte("ok\n"))
-		if err != nil {
-			log.Printf("healthz endpoint error: %+v", err.Error())
-		}
-	})
+   mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+      w.WriteHeader(http.StatusOK)
+      _, err := w.Write([]byte("ok\n"))
+      if err != nil {
+         log.Printf("healthz endpoint error: %+v", err)
+      }
+   })
 
-	// Start the controller loop
-	go controller.run()
+   // wire up containerd listener
+   topicFilters := []string { `topic~="/tasks/.*"` }
+   eventHandlers := containerFactory.CreateEventHandlers(controller)
 
-	// Start the reconcile loop
-	go invokeReconcileEvery(controller, 5 * time.Second)
+   listenForContainerdEvents := containerFactory.CreateContainerdEventListener(
+      nsCtx, topicFilters, eventHandlers)
 
-	addr := cmp.Or(os.Getenv("STRIMSERVER_CONTROLLER_ADDR"), "127.0.0.1:9177")
-	log.Printf("controller listening on %s", addr)
+   // Start the controller loop
+   go controller.Run()
 
-	err = http.ListenAndServe(addr, mux)
-	if err != nil {
-		log.Fatal(err)
-	}
+   // Start the containerd loop
+   go listenForContainerdEvents()
 
+   // Start the reconcile loop
+   go invokeReconcileEvery(controller, config.ControllerReconcileInterval)
+
+   // Start the HTTP server loop
+   addr := fmt.Sprintf("127.0.0.1:%s", config.ControllerHTTPPort)
+   log.Printf("controller listening on %s", addr)
+
+   err = http.ListenAndServe(addr, mux)
+   if err != nil { log.Fatal(err) }
 }
 
 func postJSON[T any](c *Controller, handle func(*Controller, T) error) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+   return func(w http.ResponseWriter, r *http.Request) {
 
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+      if r.Method != http.MethodPost {
+         http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+         return
+      }
 
-		var message T
-		err := json.NewDecoder(r.Body).Decode(&message)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("bad json: %v", err), http.StatusBadRequest)
-			return
-		}
+      var message T
+      err := json.NewDecoder(r.Body).Decode(&message)
+      if err != nil {
+         http.Error(w, fmt.Sprintf("bad json: %v", err), http.StatusBadRequest)
+         return
+      }
 
-		err = handle(c, message) 
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		c.RequestReconcile()
-		w.WriteHeader(http.StatusNoContent)
-	}
+      err = handle(c, message)
+      if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+      c.RequestReconcile()
+      w.WriteHeader(http.StatusNoContent)
+   }
 }
 
 func getJSON[T any](c *Controller, handle func(*Controller) T) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+   return func(w http.ResponseWriter, r *http.Request) {
 
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+      if r.Method != http.MethodGet {
+         http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+         return
+      }
 
-		w.Header().Set("Content-Type", "application/json")
+      w.Header().Set("Content-Type", "application/json")
 
-		err := json.NewEncoder(w).Encode(handle(c))
-		if err != nil {
-			log.Printf("json serialization error: %v", err)
-		}
-	}
+      err := json.NewEncoder(w).Encode(handle(c))
+      if err != nil { log.Printf("json serialization error: %v", err) }
+   }
 }
 
 func invokeReconcileEvery(c *Controller, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for range ticker.C { c.RequestReconcile() }
+   ticker := time.NewTicker(interval)
+   defer ticker.Stop()
+   for range ticker.C { c.RequestReconcile() }
 }
 

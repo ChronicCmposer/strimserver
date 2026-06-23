@@ -2,7 +2,7 @@
 
 FROM golang:1.26.4-alpine3.24 AS build
 
-COPY *.go go.mod /opt/strimserver-controller/
+COPY *.go go.mod go.sum /opt/strimserver-controller/
 ARG CACHEBUST=0
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM golang:1.26.4-alpine3.24 AS test
 
-COPY *.go go.mod .golangci.yml /opt/strimserver-controller/
+COPY *.go go.mod go.sum .golangci.yml /opt/strimserver-controller/
 ARG CACHEBUST=0
 ARG ENABLE_LINT=0
 

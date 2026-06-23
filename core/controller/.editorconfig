@@ -1,0 +1,7 @@
+# top of the source dir; root = true stops it searching parent dirs
+root = true
+
+[*.go]
+indent_style = space
+indent_size = 3
+tab_width = 3

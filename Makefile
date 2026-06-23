@@ -34,7 +34,19 @@ ENABLE_LINT								?= true
 
 .DEFAULT_GOAL := publish-strimserver
 
-.PHONY := controller test-controller
+.PHONY := controller test-controller goroot
+
+goroot:
+	@test -n "$(PROJECT_GO_VERSION_TAG)" || { echo "PROJECT_GO_VERSION_TAG required"; exit 1; }
+	@test -n "$(PROJECT_GO_ROOT)" 	|| { echo "PROJECT_GO_ROOT required"; exit 1; }
+	@test -n "$(GOROOT_BOOTSTRAP)" 	|| { echo "GOROOT_BOOTSTRAP required"; exit 1; }
+	set -x && rm -rf go && mkdir go
+	set -x && cd go && git init \
+		&& git remote add origin https://github.com/golang/go.git \
+		&& git fetch --depth 1 origin refs/tags/$(PROJECT_GO_VERSION_TAG):refs/tags/$(PROJECT_GO_VERSION_TAG) \
+		&& git checkout $(PROJECT_GO_VERSION_TAG)
+	set -x && cd go/src \
+		&& GOROOT_BOOTSTRAP=$(GOROOT_BOOTSTRAP) GOROOT_FINAL=$(PROJECT_GO_ROOT) ./make.bash -v
 
 controller: \
 	core/controller/dockerfile
