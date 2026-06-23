@@ -1,4 +1,4 @@
 .env
 core/strimserver.env
 tools/local-encoder/local-encoder.env
-
+go
