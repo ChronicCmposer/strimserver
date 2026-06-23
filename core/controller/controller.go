@@ -7,20 +7,21 @@ import (
    "iter"
    "log"
    "maps"
+   "sync"
    "time"
 )
 
 type PathName string
 type StageName string
 
-type PathStatus string 
+type PathStatus string
 const (
    Unknown  PathStatus = "unknown"
    Ready    PathStatus = "ready"
    NotReady PathStatus = "not-ready"
 )
 
-type StageState string 
+type StageState string
 const (
    Running  StageState = "running"
    Stopped  StageState = "stopped"
@@ -93,6 +94,7 @@ type Controller struct {
    now               func() time.Time
    inflightTimeout   time.Duration
    actions           chan func(*Controller)
+   ops               sync.WaitGroup
 }
 
 func NewController(
@@ -260,9 +262,11 @@ func (c *Controller) handleReconcile() {
       operation, ok := stage.Ops[target]
       if !ok { log.Printf("reconcile %q: no op registered for %q", name, target); continue }
 
-      operationCtx, cancel := context.WithTimeout(c.ctx, c.inflightTimeout)
+      operationCtx, cancel := context.WithTimeout(context.WithoutCancel(c.ctx), c.inflightTimeout)
       stage.InFlightSince = c.now()
+      c.ops.Add(1)
       go func() {
+         defer c.ops.Done()
          defer cancel()
          err := operation(operationCtx)
          if err != nil {
@@ -286,3 +290,24 @@ func (c *Controller) handleStatus() ControllerStatus {
    return ControllerStatus{ Paths: outPaths, Stages: outStages }
 }
 
+func (c *Controller) WaitForOps() { c.ops.Wait() }
+
+func (c *Controller) Teardown() {
+   submit(c, func(c *Controller) struct{} {
+      base := context.WithoutCancel(c.ctx) // survives the signal
+      for name, stage := range c.stages {
+         if stage.Status.Actual != Running { continue }
+         stop, ok := stage.Ops[Stopped]
+         if !ok { continue }
+         opCtx, cancel := context.WithTimeout(base, c.inflightTimeout)
+         err := stop(opCtx)
+         if err != nil { log.Printf("shutdown: stopping %q failed: %v", name, err) }
+         cancel()
+         stage.Status.Desired, stage.Status.Actual = Stopped, Stopped
+         stage.InFlightSince = time.Time{}
+      }
+      return struct{}{}
+   })
+}
+
+func (c *Controller) Close() { close(c.actions) }
