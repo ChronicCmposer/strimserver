@@ -207,9 +207,9 @@ func (f *ContainerFactory) CreateEventHandlers(controller *Controller) map[strin
 }
 
 func (f ContainerFactory) CreateContainerdEventListener(
-   ctx context.Context, filters []string, handlers map[string]func(any)error,
-) func() {
-   return func() {
+   filters []string, handlers map[string]func(any)error,
+) func(context.Context) {
+   return func(ctx context.Context) {
       eventChannel, errorChannel := f.client.Subscribe(ctx, filters...)
 
       for {
@@ -232,10 +232,10 @@ func (f ContainerFactory) CreateContainerdEventListener(
                continue
 
             case err := <-errorChannel:
-               log.Fatalf("containerd event stream ended: %v", err)
-               return
-            case <-ctx.Done():
-               return
+               if ctx.Err() != nil { return }
+               log.Printf("containerd event stream error: %v", err); return
+
+            case <-ctx.Done(): return
          }
       }
    }

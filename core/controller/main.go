@@ -7,6 +7,7 @@ import (
    "fmt"
    "log"
    "net/http"
+   "os/signal"
    "strconv"
    "syscall"
    "time"
@@ -20,6 +21,7 @@ type Config struct {
    ContainerdSocket, ContainerdNamespace, ControllerHTTPPort string
    ControllerReconcileInterval time.Duration
    ControllerInFlightTimeout time.Duration
+   ControllerShutdownTimeout time.Duration
    ControllerActionsBufferSize uint8
    MediaMTX, Normalize, ScaleAndEgress ContainerConfig
 }
@@ -59,6 +61,7 @@ func LoadConfig() (Config, error) {
       ContainerdNamespace:          require("CONTAINERD_NAMESPACE"),
       ControllerReconcileInterval:  requireDuration("CONTROLLER_RECONCILE_INTERVAL"),
       ControllerInFlightTimeout:    requireDuration("CONTROLLER_INFLIGHT_TIMEOUT"),
+      ControllerShutdownTimeout:    requireDuration("CONTROLLER_SHUTDOWN_TIMEOUT"),
       ControllerActionsBufferSize:  requireUInt8("CONTROLLER_ACTIONS_BUFFER_SIZE"),
       ControllerHTTPPort:           require("CONTROLLER_HTTP_PORT"),
 
@@ -124,7 +127,7 @@ func main() {
       { Component: "scale-and-egress", Action: "stop" }: { Stage: ScaleAndEgress, State: Stopped },
    }
 
-   rootContext := context.Background()
+   rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
    nsCtx := namespaces.WithNamespace(rootContext, config.ContainerdNamespace)
 
    client, err := containerd.New(config.ContainerdSocket)
@@ -158,7 +161,10 @@ func main() {
       nsCtx, paths, stages, pathEventRoutes, commandRoutes,
       now, inflightTimeout, actionsBufferSize,
    )
-   if err != nil { log.Fatalf("error constructing controller: %v", err) }
+   if err != nil {
+      client.Close()
+      log.Fatalf("error constructing controller: %v", err)
+   }
 
    log.Printf("%+v", controller)
 
@@ -183,24 +189,62 @@ func main() {
    topicFilters := []string { `topic~="/tasks/.*"` }
    eventHandlers := containerFactory.CreateEventHandlers(controller)
 
-   listenForContainerdEvents := containerFactory.CreateContainerdEventListener(
-      nsCtx, topicFilters, eventHandlers)
+   listenForContainerdEvents := containerFactory.CreateContainerdEventListener(topicFilters, eventHandlers)
+
+   // last call for any defers - before we start the threads
+   defer client.Close()
 
    // Start the controller loop
-   go controller.Run()
+   runDone := make(chan struct{})
+   go func() { controller.Run(); close(runDone) }()
 
    // Start the containerd loop
-   go listenForContainerdEvents()
+   listenerDone := make(chan struct{})
+   go func() {
+      listenForContainerdEvents(nsCtx)
+      close(listenerDone)
+   }()
 
    // Start the reconcile loop
-   go invokeReconcileEvery(controller, config.ControllerReconcileInterval)
-
+   tickerDone := make(chan struct{})
+   go func() {
+      invokeReconcileEvery(nsCtx, controller, config.ControllerReconcileInterval)
+      close(tickerDone)
+   }()
    // Start the HTTP server loop
    addr := fmt.Sprintf("127.0.0.1:%s", config.ControllerHTTPPort)
-   log.Printf("controller listening on %s", addr)
 
-   err = http.ListenAndServe(addr, mux)
-   if err != nil { log.Fatal(err) }
+   srv := &http.Server{ Addr: addr, Handler: mux }
+   go func() {
+      log.Printf("controller listening on %s", addr)
+      err := srv.ListenAndServe()
+      if err != nil && !errors.Is(err, http.ErrServerClosed) {
+         log.Printf("http server error: %v", err)
+         stop()
+      }
+   }()
+
+   <-rootContext.Done()
+   stop()
+   log.Printf("shutting down")
+
+   shutdownCtx, cancel := context.WithTimeout(context.Background(), config.ControllerShutdownTimeout)
+   defer cancel()
+
+   err = srv.Shutdown(shutdownCtx)
+   if err != nil {
+      log.Printf("graceful http shutdown failed: %v", err)
+      _ = srv.Close()
+   }
+
+   <-tickerDone
+   <-listenerDone
+
+   controller.WaitForOps()
+   controller.Teardown()
+   controller.Close()
+   <-runDone
+
 }
 
 func postJSON[T any](c *Controller, handle func(*Controller, T) error) http.HandlerFunc {
@@ -240,9 +284,16 @@ func getJSON[T any](c *Controller, handle func(*Controller) T) http.HandlerFunc 
    }
 }
 
-func invokeReconcileEvery(c *Controller, interval time.Duration) {
+func invokeReconcileEvery(ctx context.Context, c *Controller, interval time.Duration) {
    ticker := time.NewTicker(interval)
    defer ticker.Stop()
-   for range ticker.C { c.RequestReconcile() }
+   for {
+      select {
+         case <-ctx.Done(): return
+         case <-ticker.C:
+            if ctx.Err() != nil { return }
+            c.RequestReconcile()
+      }
+   }
 }
 
