@@ -1,5 +1,5 @@
 [Unit]
-Description=Strimserver Container
+Description=Strimserver Controller
 After=network.target containerd.service
 Wants=containerd.service
 
@@ -10,21 +10,20 @@ Nice=-10
 CPUWeight=150
 
 # before starting, kill & delete any leftover container/task
-ExecStartPre=-/usr/bin/ctr tasks kill --signal SIGKILL strimserver
-ExecStartPre=-/usr/bin/ctr containers delete strimserver
-ExecStart=/usr/bin/ctr run --net-host --gpus 0 \
-  --cap-add CAP_SYS_NICE \
-  --mount type=bind,src=/mnt/nvme/config/strimserver.env,dst=/opt/strimserver/config/strimserver.env,options=rbind:rw \
-  --mount type=bind,src=/mnt/nvme/config/mediamtx.yaml.template,dst=/opt/strimserver/config/mediamtx.yaml.template,options=rbind:rw \
-  --mount type=bind,src=/mnt/nvme/bin/transcode.sh,dst=/opt/strimserver/bin/transcode.sh,options=rbind:rw \
-  --mount type=bind,src=/mnt/nvme/srt-passphrase,dst=/run/secrets/srt-passphrase,options=rbind:rw \
-  --mount type=bind,src=/mnt/nvme/video-files,dst=/opt/strimserver/video-files,options=rbind:rw \
-  --mount type=bind,src=/mnt/nvme/logs,dst=/opt/strimserver/logs,options=rbind:rw \
-  docker.io/library/strimserver:latest strimserver
+ExecStartPre=-/usr/bin/ctr -n strimserver tasks kill --signal SIGKILL strimserver-controller
+ExecStartPre=-/usr/bin/ctr -n strimserver containers delete strimserver-controller
+ExecStart=/usr/bin/ctr -n strimserver run --net-host --cap-add CAP_SYS_ADMIN \
+   --mount type=bind,src=/mnt/nvme/config/strimserver.env,dst=/strimserver.env,options=rbind:rw \
+   --mount type=bind,src=/run/containerd/containerd.sock,dst=/containerd.sock,options=rbind:rw \
+   --mount type=bind,src=/tmp,dst=/tmp,options=rbind:rw \
+   --mount type=bind,src=/mnt/nvme/containerd,dst=/mnt/nvme/containerd,options=rbind:rslave \
+   --mount type=bind,src=/var/run/cdi,dst=/var/run/cdi,options=rbind:ro \
+   --mount type=bind,src=/dev,dst=/dev,options=rbind:rslave \
+   docker.io/library/strimserver-controller:latest strimserver-controller
 
 # on stop, terminate task, then delete container
-ExecStop=/usr/bin/ctr tasks kill --signal SIGTERM strimserver
-ExecStopPost=-/usr/bin/ctr containers delete strimserver
+ExecStop=/usr/bin/ctr -n strimserver tasks kill --signal SIGTERM strimserver-controller
+ExecStopPost=-/usr/bin/ctr -n strimserver containers delete strimserver-controller
 
 
 [Install]

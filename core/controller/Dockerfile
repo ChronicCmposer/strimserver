@@ -10,7 +10,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
    set -x && go version \
    && echo "cachebust=$CACHEBUST" \
    && cd /opt/strimserver-controller \
-   && go build -v -o strimserver-controller .
+   && CGO_ENABLED=0 GOOS=linux \
+      go build -v -trimpath -ldflags='-s -w' -o strimserver-controller .
 
 # -------------------------------------------------
 
@@ -29,3 +30,26 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
    && if [ "$ENABLE_LINT" = "true" ]; then golangci-lint run; fi \
    && go test -v .
 
+# -------------------------------------------------
+
+FROM debian:trixie-20260518-slim AS libs
+
+RUN set -x \
+   && apt-get update \
+   && apt-get install -y --no-install-recommends dash \
+   && rm -rf /var/lib/apt/lists/*
+
+# -------------------------------------------------
+
+FROM scratch AS runtime
+
+COPY --from=libs  /bin/dash   /bin/sh
+COPY --from=libs  /lib64/ld-linux-x86-64.so.2   /lib64/
+COPY --from=libs  /lib/x86_64-linux-gnu/libc.so.6  /lib/x86_64-linux-gnu/
+
+
+COPY --from=build /opt/strimserver-controller/strimserver-controller /strimserver-controller
+
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

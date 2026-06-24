@@ -2,6 +2,7 @@ package main
 
 import (
    "context"
+   "errors"
    "fmt"
    "log"
    "reflect"
@@ -13,13 +14,25 @@ import (
    "github.com/containerd/errdefs"
    "github.com/containerd/typeurl/v2"
    "github.com/opencontainers/runtime-spec/specs-go"
-   "github.com/containerd/containerd/api/events"
 )
 
 
 type ContainerFactory struct {
-   client         *containerd.Client
-   stageNames     map[string]string
+   client      *containerd.Client
+   stageNames  map[string]StageName
+}
+
+func NewContainerFactory(
+   client *containerd.Client,
+   stageNames map[string]StageName,
+) (*ContainerFactory, error) {
+   var errs []error
+   if client == nil { errs = append(errs, fmt.Errorf("containerd client cannot be nil")) }
+   for id, stageName := range stageNames {
+      if stageName == "" { errs = append(errs, fmt.Errorf("empty stage name for container id %q", id)) }
+   }
+   if len(errs) > 0 { return nil, errors.Join(errs...) }
+   return &ContainerFactory{client: client, stageNames: stageNames}, nil
 }
 
 func (f *ContainerFactory) CreateFFmpegContainer(
@@ -33,8 +46,10 @@ func (f *ContainerFactory) CreateFFmpegContainer(
    rw := []string{"rbind", "rw"}
    const Bind = "bind"
    mapping := map[string]string {
-      "/mnt/nvme/config/strimserver.env": "/opt/strimserver/config/strimserver.env",
-      "/mnt/nvme/bin/transcode.sh": "/opt/strimserver/bin/transcode.sh",
+      "/mnt/nvme/config/strimserver.env":          "/strimserver.env",
+      "/mnt/nvme/bin/transcode.sh":                "/transcode.sh",
+      "/run/systemd/resolve/resolv.conf":   "/etc/resolv.conf",
+      "/tmp":                                      "/tmp",
    }
 
 
@@ -71,9 +86,12 @@ func (f *ContainerFactory) CreateMediaMTXContainer(
    rw := []string{"rbind", "rw"}
    const Bind = "bind"
    mapping := map[string]string {
-      "/mnt/nvme/config/strimserver.env": "/opt/strimserver/config/strimserver.env",
-      "/mnt/nvme/srt-passphrase": "/run/secrets/srt-passphrase",
-      "/mnt/nvme/video-files": "/opt/strimserver/video-files",
+      "/mnt/nvme/config/strimserver.env":          "/strimserver.env",
+      "/mnt/nvme/config/mediamtx.yaml.template":   "/mediamtx.yaml.template",
+      "/mnt/nvme/bin/notify.sh":                   "/notify.sh",
+      "/mnt/nvme/srt-passphrase":                  "/run/secrets/srt-passphrase",
+      "/mnt/nvme/video-files":                     "/video-files",
+      "/tmp":                                      "/tmp",
    }
 
    mounts := make([]specs.Mount, 0, len(mapping))
@@ -87,7 +105,6 @@ func (f *ContainerFactory) CreateMediaMTXContainer(
       oci.WithHostNamespace(specs.NetworkNamespace),
       oci.WithAddedCapabilities([]string{"CAP_SYS_NICE"}),
       oci.WithMounts(mounts),
-      oci.WithProcessArgs(argv...),
    )
 
    container, err := f.client.NewContainer(ctx, id, snapshot, spec)
@@ -105,28 +122,15 @@ func (f *ContainerFactory) CreateTask(
 }
 
 func (f *ContainerFactory) CreateContainerOps(
-   name        string,
+   name        StageName,
    createFunc  func(context.Context) (containerd.Container, string, error),
    lookupFunc  func(context.Context) (containerd.Container, error),
 ) map[StageState]func(context.Context) error {
-   start := func(ctx context.Context) error {
-      container, logfile, err := createFunc(ctx)
-      if err != nil { return fmt.Errorf("could not create %q container: %w", name, err) }
-
-      task, err := f.CreateTask(ctx, container, logfile)
-      if err != nil { return fmt.Errorf("could not create %q task: %w", name, err) }
-
-      err = task.Start(ctx)
-      if err != nil { return fmt.Errorf("could not start %q task: %w", name, err) }
-
-      return nil
-   }
    stop := func(ctx context.Context) error {
-      // prerequisite - valid task
-      deleteTask := func(task containerd.Task) error {
-         exitStatus, err := task.Delete(ctx, containerd.WithProcessKill)
-         if err == nil { log.Printf("deleted %q task, exit status: %+v", name, exitStatus); return nil }
-         return fmt.Errorf("could not delete %q task: %w", name, err)
+      container, err := lookupFunc(ctx)
+      if err != nil {
+         if !errdefs.IsNotFound(err) { return fmt.Errorf("could not load %q container for deletion: %w", name, err) }
+         log.Printf("%q container not found, could not delete, continuing...", name); return nil
       }
 
       // prerequisite - valid container, no running tasks
@@ -134,13 +138,6 @@ func (f *ContainerFactory) CreateContainerOps(
          err := container.Delete(ctx, containerd.WithSnapshotCleanup)
          if err != nil { return fmt.Errorf("could not delete %q container: %w", name, err) }
          log.Printf("%q container deleted", name); return nil
-      }
-
-      container, err := lookupFunc(ctx)
-
-      if err != nil {
-         if !errdefs.IsNotFound(err) { return fmt.Errorf("could not load %q container for deletion: %w", name, err) }
-         log.Printf("%q container not found, could not delete, continuing...", name); return nil
       }
 
       // if we get to this point, container must be valid
@@ -152,23 +149,47 @@ func (f *ContainerFactory) CreateContainerOps(
          return nil
       }
 
+      // prerequisite - valid task
+      deleteTask := func(task containerd.Task) error {
+         exitStatus, err := task.Delete(ctx, containerd.WithProcessKill)
+         if err == nil { log.Printf("deleted %q task, exit status: %+v", name, exitStatus); return nil }
+         return fmt.Errorf("could not delete %q task: %w", name, err)
+      }
+
       err = deleteTask(task)
       if err != nil { return err }
       err = deleteContainer(container)
       if err != nil { return err }
       return nil
    }
+
+   start := func(ctx context.Context) error {
+      err := stop(ctx)
+      if err != nil { return fmt.Errorf("could not clean up %q before start: %w", name, err) }
+
+      container, logfile, err := createFunc(ctx)
+      if err != nil { return fmt.Errorf("could not create %q container: %w", name, err) }
+
+      task, err := f.CreateTask(ctx, container, logfile)
+      if err != nil { return fmt.Errorf("could not create %q task: %w", name, err) }
+
+      err = task.Start(ctx)
+      if err != nil { return fmt.Errorf("could not start %q task: %w", name, err) }
+
+      return nil
+   }
+
    return map[StageState]func(context.Context) error { Running: start, Stopped: stop }
 }
 
 func (f *ContainerFactory) CreateStageOps(containerConfig ContainerConfig) map[StageState]func(context.Context) error {
    stageName, ok := f.stageNames[containerConfig.ContainerID]
-   if !ok { stageName = containerConfig.ContainerID }
+   if !ok { stageName = StageName(containerConfig.ContainerID) }
 
    createFunc := func(ctx context.Context) (containerd.Container, string, error) {
       container, err := f.CreateFFmpegContainer(
          ctx, containerConfig.ContainerID, containerConfig.SnapshotID, containerConfig.ImageName,
-         "/opt/strimserver/bin/transcode.sh", stageName)
+         "/transcode.sh", string(stageName))
       return container, containerConfig.Logfile, err
    }
 
@@ -179,57 +200,36 @@ func (f *ContainerFactory) CreateStageOps(containerConfig ContainerConfig) map[S
    return f.CreateContainerOps(stageName, createFunc, lookupFunc)
 }
 
-func (f *ContainerFactory) CreateEventHandlers(controller *Controller) map[string]func(any)error {
-   return map[string]func(any) error{
-      "TaskStart": func(e any) error {
-         event := e.(*events.TaskStart)
-         name, ok := f.stageNames[event.GetContainerID()]
-         if !ok {
-            log.Printf("received TaskStart event, but not associated with any stage: %+v", event)
-            return nil
-         }
-         err := controller.SubmitStageEvent(StageEvent{ Stage: StageName(name), State: Running })
-         if err != nil { return fmt.Errorf("could not handle TaskStart event: %w", err) }
-         return nil
-      },
-      "TaskExit": func(e any) error {
-         event := e.(*events.TaskExit)
-         name, ok := f.stageNames[event.GetContainerID()]
-         if !ok {
-            log.Printf("received TaskExit event, but not associated with any stage: %+v", event)
-            return nil
-         }
-         err := controller.SubmitStageEvent(StageEvent{ Stage: StageName(name), State: Stopped })
-         if err != nil { return fmt.Errorf("could not handle TaskExit event: %w", err) }
-         return nil
-      },
-   }
-}
-
 func (f ContainerFactory) CreateContainerdEventListener(
-   filters []string, handlers map[string]func(any)error,
-) func(context.Context) {
-   return func(ctx context.Context) {
+   filters []string, stageStates map[reflect.Type]StageState,
+) func(context.Context, *Controller) {
+
+   type TaskEvent interface { GetContainerID() string }
+
+   return func(ctx context.Context, controller *Controller) {
       eventChannel, errorChannel := f.client.Subscribe(ctx, filters...)
 
       for {
          select {
             case envelope := <-eventChannel:
                if envelope == nil || envelope.Event == nil { continue }
+
                event, err := typeurl.UnmarshalAny(envelope.Event)
                if err != nil { log.Printf("error decoding containerd event: %v", err); continue }
 
-               // look up event handler
-               eventName := reflect.TypeOf(event).Name()
-               handle, ok := handlers[eventName]
+               eventType := reflect.TypeOf(event)
+               eventName := eventType.Name()
+               target, ok := f.stageNames[event.(TaskEvent).GetContainerID()]
                if !ok {
-                  log.Printf("no containerd event handler for type %q, continuing...", eventName)
+                  log.Printf("received %q event, but not associated with any stage: %+v", eventName, event)
                   continue
                }
 
-               err = handle(event)
-               if err != nil { log.Printf("could not handle containerd event: %v", err) }
-               continue
+               targetState, ok := stageStates[eventType]
+               if !ok { continue }
+
+               err = controller.SubmitStageEvent(StageEvent{ Stage: target, State: targetState })
+               if err != nil { log.Printf("could not handle %q event: %v", eventName, err) }
 
             case err := <-errorChannel:
                if ctx.Err() != nil { return }

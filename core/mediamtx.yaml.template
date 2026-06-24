@@ -312,20 +312,22 @@ paths:
 
   ingress0:
     source: publisher
-    runOnReady: '/usr/bin/nice -n 5 /bin/sh -lc ". /opt/strimserver/bin/transcode.sh && normalize 2>&1 | log_prefix normalize"'
+    runOnReady: /notify.sh ingress0 ready
+    runOnNotReady: /notify.sh ingress0 not-ready
     srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     alwaysAvailable: true
-    alwaysAvailableFile: "/opt/strimserver/video-files/strimserver-offline-2160p60.mp4"
+    alwaysAvailableFile: "/video-files/strimserver-offline-2160p60.mp4"
 
   normalized:
     source: 'unix+mpegts://${NORMALIZED_MPEGTS_SOCKET}'
-    runOnReady: '/usr/bin/nice -n 5 /bin/sh -lc ". /opt/strimserver/bin/transcode.sh && scale_and_egress 2>&1 | log_prefix scale-and-egress"'
+    runOnReady: /notify.sh normalized ready
+    runOnNotReady: /notify.sh normalized not-ready
     record: yes
     # Path of recording segments.
     # Extension is added automatically.
     # Available variables are %path (path name), %Y %m %d (year, month, day),
     # %H %M %S (hours, minutes, seconds), %f (microseconds), %z (time zone), %s (unix epoch).
-    recordPath: /opt/strimserver/video-files/%path/%Y-%m-%d_%H-%M-%S-%f
+    recordPath: /video-files/%path/%Y-%m-%d_%H-%M-%S-%f
     # Format of recorded segments.
     # Available formats are "fmp4" (fragmented MP4) and "mpegts" (MPEG-TS).
     recordFormat: mpegts
