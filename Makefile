@@ -1,4 +1,5 @@
 CORE_DIR := core
+CONTROLLER_DIR := core/controller
 AWS_DEPLOY_DIR := deploy/aws
 LOCAL_ENCODER_DIR := tools/local-encoder
 BANDWIDTH_TEST_DIR := tools/bandwidth-test
@@ -6,23 +7,30 @@ SRT_TEST_DIR := tools/srt-test
 OPENSSH_DIR := tools/openssh
 
 
-S3_BUCKET 								?= s3://<bucket-name>
-OUTPUT_PATH								?= $(HOME)/local-dev/strimserver
-STRIMSERVER_IMAGE_NAME 				?= docker.io/library/strimserver:latest
-LIBSRT_IMAGE_NAME 					?= docker.io/library/libsrt:latest
-IPERF3_IMAGE_NAME 					?= docker.io/library/iperf3:latest
-STRIMSERVER_IMAGE_FILE_NAME 		?= strimserver-container.tar
-LIBSRT_IMAGE_FILE_NAME 				?= libsrt-container.tar
-IPERF3_IMAGE_FILE_NAME 				?= iperf3-container.tar
+S3_BUCKET										?= s3://<bucket-name>
+OUTPUT_PATH									?= $(HOME)/local-dev/strimserver
+CONTROLLER_IMAGE_NAME				?= docker.io/library/strimserver-controller:latest
+FFMPEG_IMAGE_NAME				?= docker.io/library/ffmpeg:latest
+MEDIAMTX_IMAGE_NAME				?= docker.io/library/mediamtx:latest
+LIBSRT_IMAGE_NAME						?= docker.io/library/libsrt:latest
+IPERF3_IMAGE_NAME						?= docker.io/library/iperf3:latest
+CONTROLLER_IMAGE_FILE_NAME			?= controller-container.tar
+FFMPEG_IMAGE_FILE_NAME			?= ffmpeg-container.tar
+MEDIAMTX_IMAGE_FILE_NAME			?= mediamtx-container.tar
+LIBSRT_IMAGE_FILE_NAME				?= libsrt-container.tar
+IPERF3_IMAGE_FILE_NAME				?= iperf3-container.tar
 STRIMSERVER_DEPLOYMENT_FILE_NAME ?= strimserver-deployment.tar
-IPERF3_DEPLOYMENT_FILE_NAME 		?= iperf3-deployment.tar
-STRIMSERVER_CONTAINER_OUTPUT 		:= $(OUTPUT_PATH)/$(STRIMSERVER_IMAGE_FILE_NAME)
+IPERF3_DEPLOYMENT_FILE_NAME		?= iperf3-deployment.tar
+CONTROLLER_CONTAINER_OUTPUT		?= $(OUTPUT_PATH)/$(CONTROLLER_IMAGE_FILE_NAME)
+FFMPEG_CONTAINER_OUTPUT		?= $(OUTPUT_PATH)/$(FFMPEG_IMAGE_FILE_NAME)
+MEDIAMTX_CONTAINER_OUTPUT		?= $(OUTPUT_PATH)/$(MEDIAMTX_IMAGE_FILE_NAME)
+STRIMSERVER_CONTAINER_OUTPUT		:= $(OUTPUT_PATH)/$(STRIMSERVER_IMAGE_FILE_NAME)
 OFFLINE_SEGMENT_FILE_NAME			:= strimserver-offline-2160p60.mp4
 OFFLINE_SEGMENT_OUTPUT				:= $(OUTPUT_PATH)/$(OFFLINE_SEGMENT_FILE_NAME)
 OPENSSH_RPM_FILE_NAME				:= openssh-experimental.rpm
 OPENSSH_RPM_OUTPUT					:= $(OUTPUT_PATH)/$(OPENSSH_RPM_FILE_NAME)
-LIBSRT_CONTAINER_OUTPUT 			:= $(OUTPUT_PATH)/$(LIBSRT_IMAGE_FILE_NAME)
-IPERF3_CONTAINER_OUTPUT 			:= $(OUTPUT_PATH)/$(IPERF3_IMAGE_FILE_NAME)
+LIBSRT_CONTAINER_OUTPUT				:= $(OUTPUT_PATH)/$(LIBSRT_IMAGE_FILE_NAME)
+IPERF3_CONTAINER_OUTPUT				:= $(OUTPUT_PATH)/$(IPERF3_IMAGE_FILE_NAME)
 STRIMSERVER_DEPLOYMENT_TAR			:= $(OUTPUT_PATH)/$(STRIMSERVER_DEPLOYMENT_FILE_NAME)
 IPERF3_DEPLOYMENT_TAR				:= $(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
 
@@ -38,8 +46,8 @@ ENABLE_LINT								?= true
 
 goroot:
 	@test -n "$(PROJECT_GO_VERSION_TAG)" || { echo "PROJECT_GO_VERSION_TAG required"; exit 1; }
-	@test -n "$(PROJECT_GO_ROOT)" 	|| { echo "PROJECT_GO_ROOT required"; exit 1; }
-	@test -n "$(GOROOT_BOOTSTRAP)" 	|| { echo "GOROOT_BOOTSTRAP required"; exit 1; }
+	@test -n "$(PROJECT_GO_ROOT)"		|| { echo "PROJECT_GO_ROOT required"; exit 1; }
+	@test -n "$(GOROOT_BOOTSTRAP)"	|| { echo "GOROOT_BOOTSTRAP required"; exit 1; }
 	set -x && rm -rf go && mkdir go
 	set -x && cd go && git init \
 		&& git remote add origin https://github.com/golang/go.git \
@@ -56,7 +64,7 @@ controller: \
 		--local context=core/controller \
 		--local dockerfile=core/controller \
 		--opt filename=./Dockerfile \
-      --opt build-arg:CACHEBUST=$$(date +%s%3N) \
+		--opt build-arg:CACHEBUST=$$(date +%s%3N) \
 		--opt target=build \
 		--progress=plain
 
@@ -69,25 +77,53 @@ test-controller: \
 		--local context=core/controller \
 		--local dockerfile=core/controller \
 		--opt filename=./Dockerfile \
-      --opt build-arg:CACHEBUST=$$(date +%s%3N) \
+		--opt build-arg:CACHEBUST=$$(date +%s%3N) \
 		--opt build-arg:ENABLE_LINT=$(ENABLE_LINT) \
 		--opt target=test \
 		--progress=plain
 
-$(STRIMSERVER_CONTAINER_OUTPUT): \
-	$(CORE_DIR)/Dockerfile \
-	$(CORE_DIR)/entrypoint.sh
+$(CONTROLLER_CONTAINER_OUTPUT): \
+	core/controller/Dockerfile \
+	core/controller/entrypoint.sh \
+	$(wildcard core/controller/*.go) \
+	core/controller/go.mod \
+	core/controller/go.sum
+	sudo buildctl build \
+		--frontend=dockerfile.v0 \
+		--opt platform=linux/amd64 \
+		--local context=$(CONTROLLER_DIR) \
+		--local dockerfile=$(CONTROLLER_DIR) \
+		--opt filename=./Dockerfile \
+		--opt build-arg:CACHEBUST=$$(date +%s%3N) \
+		--opt target=runtime \
+		--progress=plain \
+		--output type=oci,name=$(CONTROLLER_IMAGE_NAME),dest=$@
+
+
+$(FFMPEG_CONTAINER_OUTPUT): \
+	$(CORE_DIR)/Dockerfile
 	sudo buildctl --addr tcp://127.0.0.1:1234 build \
 		--frontend=dockerfile.v0 \
 		--opt platform=linux/amd64 \
 		--local context=$(CORE_DIR) \
 		--local dockerfile=$(CORE_DIR) \
 		--opt filename=./Dockerfile \
-		--opt build-arg:ENABLE_OBS=$(ENABLE_OBS) \
-		--opt build-arg:ENABLE_EMBEDDED_FISH_SHELL=$(ENABLE_EMBEDDED_FISH_SHELL) \
-		--opt target=runtime \
+		--opt target=ffmpeg \
 		--progress=plain \
-		--output type=oci,name=$(STRIMSERVER_IMAGE_NAME),dest=$@
+		--output type=oci,name=$(FFMPEG_IMAGE_NAME),dest=$@
+
+$(MEDIAMTX_CONTAINER_OUTPUT): \
+	$(CORE_DIR)/Dockerfile \
+	$(CORE_DIR)/entrypoint.mediamtx.sh
+	sudo buildctl build \
+		--frontend=dockerfile.v0 \
+		--opt platform=linux/amd64 \
+		--local context=$(CORE_DIR) \
+		--local dockerfile=$(CORE_DIR) \
+		--opt filename=./Dockerfile \
+		--opt target=mediamtx \
+		--progress=plain \
+		--output type=oci,name=$(MEDIAMTX_IMAGE_NAME),dest=$@
 
 $(OPENSSH_RPM_OUTPUT): \
 	$(OPENSSH_DIR)/Dockerfile
@@ -128,11 +164,15 @@ core/strimserver.env:
 
 
 STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_DEPS := \
-   $(STRIMSERVER_CONTAINER_OUTPUT) \
-   $(OFFLINE_SEGMENT_OUTPUT)
+	$(CONTROLLER_CONTAINER_OUTPUT) \
+	$(FFMPEG_CONTAINER_OUTPUT) \
+	$(MEDIAMTX_CONTAINER_OUTPUT) \
+	$(OFFLINE_SEGMENT_OUTPUT)
 
 STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_FILES := \
-	$(STRIMSERVER_IMAGE_FILE_NAME) \
+	$(CONTROLLER_IMAGE_FILE_NAME) \
+	$(FFMPEG_IMAGE_FILE_NAME) \
+	$(MEDIAMTX_IMAGE_FILE_NAME) \
 	$(OFFLINE_SEGMENT_FILE_NAME)
 
 ifeq ($(ENABLE_EXPERIMENTAL_OPENSSH),"true")
@@ -150,6 +190,7 @@ $(STRIMSERVER_DEPLOYMENT_TAR): \
 	core/strimserver.env \
 	core/mediamtx.yaml.template \
 	core/transcode.sh \
+	core/notify.sh \
 	$(STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_DEPS)
 	tar -cvf $@ \
 		--ignore-failed-read --warning=all --show-transformed-names \
@@ -164,25 +205,26 @@ $(STRIMSERVER_DEPLOYMENT_TAR): \
 		core/strimserver.env \
 		core/mediamtx.yaml.template \
 		core/transcode.sh \
+		core/notify.sh \
 		-C $(OUTPUT_PATH) $(STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_FILES)
 
 $(IPERF3_DEPLOYMENT_TAR): \
-   $(IPERF3_CONTAINER_OUTPUT) \
-   $(BANDWIDTH_TEST_DIR)/iperf-deploy.sh \
-   $(BANDWIDTH_TEST_DIR)/fish-deploy.sh \
-   $(BANDWIDTH_TEST_DIR)/imdslib.sh \
-   $(BANDWIDTH_TEST_DIR)/prompt_login.fish \
-   $(BANDWIDTH_TEST_DIR)/iperf3.service \
-   $(BANDWIDTH_TEST_DIR)/iperf3.env
+	$(IPERF3_CONTAINER_OUTPUT) \
+	$(BANDWIDTH_TEST_DIR)/iperf-deploy.sh \
+	$(BANDWIDTH_TEST_DIR)/fish-deploy.sh \
+	$(BANDWIDTH_TEST_DIR)/imdslib.sh \
+	$(BANDWIDTH_TEST_DIR)/prompt_login.fish \
+	$(BANDWIDTH_TEST_DIR)/iperf3.service \
+	$(BANDWIDTH_TEST_DIR)/iperf3.env
 	tar --ignore-failed-read --warning=all --show-transformed-names -cvf $@ \
-      --transform='s#iperf-deploy\.sh$$#deploy.sh#' \
+		--transform='s#iperf-deploy\.sh$$#deploy.sh#' \
 		$(BANDWIDTH_TEST_DIR)/iperf-deploy.sh \
 		$(BANDWIDTH_TEST_DIR)/fish-deploy.sh \
 		$(BANDWIDTH_TEST_DIR)/imdslib.sh \
 		$(BANDWIDTH_TEST_DIR)/prompt_login.fish \
 		$(BANDWIDTH_TEST_DIR)/iperf3.service \
 		$(BANDWIDTH_TEST_DIR)/iperf3.env \
-      -C $(OUTPUT_PATH) $(IPERF3_IMAGE_FILE_NAME)
+		-C $(OUTPUT_PATH) $(IPERF3_IMAGE_FILE_NAME)
 
 build-libsrt: $(LIBSRT_CONTAINER_OUTPUT)
 	@echo "We built $(LIBSRT_CONTAINER_OUTPUT) EZ Clap"
@@ -190,10 +232,10 @@ build-libsrt: $(LIBSRT_CONTAINER_OUTPUT)
 publish-strimserver: $(STRIMSERVER_DEPLOYMENT_TAR)
 	@echo "We built $(STRIMSERVER_DEPLOYMENT_TAR) EZ Clap"
 	aws s3 cp $(STRIMSERVER_DEPLOYMENT_TAR) $(S3_BUCKET)/$(STRIMSERVER_DEPLOYMENT_FILE_NAME)
-	rm -rf $(STRIMSERVER_DEPLOYMENT_TAR) 
+	rm -rf $(STRIMSERVER_DEPLOYMENT_TAR)
 
 publish-iperf3: $(IPERF3_DEPLOYMENT_TAR)
 	@echo "We built $(IPERF3_DEPLOYMENT_TAR) EZ Clap"
 	aws s3 cp $(IPERF3_DEPLOYMENT_TAR) $(S3_BUCKET)/$(IPERF3_DEPLOYMENT_FILE_NAME)
-	rm -rf $(IPERF3_DEPLOYMENT_TAR) 
+	rm -rf $(IPERF3_DEPLOYMENT_TAR)
 

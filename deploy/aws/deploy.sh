@@ -33,6 +33,10 @@ mkdir -p /mnt/nvme/bin
 mv /mnt/nvme/strimserver.env /mnt/nvme/config/strimserver.env
 mv /mnt/nvme/mediamtx.yaml.template /mnt/nvme/config/mediamtx.yaml.template
 mv /mnt/nvme/transcode.sh /mnt/nvme/bin/transcode.sh
+mv /mnt/nvme/notify.sh /mnt/nvme/bin/notify.sh
+
+chmod +x /mnt/nvme/bin/transcode.sh
+chmod +x /mnt/nvme/bin/notify.sh
 
 # containerd
 printf "configuring containerd...\n"
@@ -63,9 +67,12 @@ printf "systemd service files installed!\n"
 
 # import images
 printf "importing images...\n"
+CONTAINERD_NAMESPACE="strimserver"
 set -x
-sudo ctr i import strimserver-container.tar
-rm -f strimserver-container.tar
+sudo ctr -n $CONTAINERD_NAMESPACE i import controller-container.tar
+sudo ctr -n $CONTAINERD_NAMESPACE i import ffmpeg-container.tar
+sudo ctr -n $CONTAINERD_NAMESPACE i import mediamtx-container.tar
+rm -f {controller,ffmpeg,mediamtx}-container.tar
 set +x
 printf "image import started!\n"
 

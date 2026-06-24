@@ -1,10 +1,10 @@
 #!/bin/sh
 
 set -xeuo pipefail
-FFMPEG="/usr/local/bin/ffmpeg"
+FFMPEG="/ffmpeg"
 
 set -a
-. /opt/strimserver/config/strimserver.env
+. /strimserver.env
 set +a
 
 # loglevel is a string or a number containing one of the following values:
@@ -45,7 +45,7 @@ set +a
 INGRESS0_PATH="ingress0"
 NORMALIZED_PATH="normalized"
 
-RTSP_READ_URL_TEMPLATE="rtsp://localhost:$STRIMSERVER_RTSP_PORT/%s"
+RTSP_READ_URL_TEMPLATE="rtsp://127.0.0.1:$STRIMSERVER_RTSP_PORT/%s"
 
 INGRESS0_READ_URL="$(printf "$RTSP_READ_URL_TEMPLATE" "$INGRESS0_PATH")"
 
@@ -71,7 +71,7 @@ normalize() {
 
    AUDIO_FILTER="aresample=out_sample_rate=48000:out_sample_fmt=s16:out_chlayout=stereo"
 
-   exec "$FFMPEG" \
+   exec nice -n "$FFMPEG_NICE" "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -noauto_conversion_filters \
      -init_hw_device cuda=strim_gpu:0 \
@@ -117,7 +117,6 @@ normalize() {
      -avioflags direct \
      -f mpegts \
      "$OUTPUT_SOCKET_URL"
-
 }
 
 
@@ -126,7 +125,7 @@ scale_and_egress() {
    : "${TWITCH_INGEST_SERVER:?TWITCH_INGEST_SERVER is not set (e.g. ingest.global-contribute.live-video.net)}"
    : "${TWITCH_STREAM_KEY:?TWITCH_STREAM_KEY is not set - you should get this from twitch...}"
    : "${BANDWIDTH_TEST:?BANDWIDTH_TEST is not set}"
-   
+
    case "${BANDWIDTH_TEST:-}" in
      1|true|TRUE|True|yes|YES|Yes|y|Y|on|ON|On)
        BW_PARAM="?bandwidthtest=true"
@@ -158,7 +157,7 @@ scale_and_egress() {
 
    AUDIO_FILTER="aresample=out_sample_rate=48000:out_sample_fmt=s16:out_chlayout=stereo"
 
-   exec "$FFMPEG" \
+   exec nice -n "$FFMPEG_NICE" "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -noauto_conversion_filters \
      -init_hw_device cuda=strim_gpu:0 \
@@ -204,11 +203,40 @@ scale_and_egress() {
      -avioflags direct \
      -f flv \
      "$TWITCH_RTMP_URL"
-
 }
 
+# symlink cuda libs if needed
 
-log_prefix() {
-  local tag="$1"
-  tee -a "/opt/strimserver/logs/ffmpeg-$tag.log"
-}
+case "${FFMPEG_CUDA_SYMLINKS:-false}" in
+   1|true|TRUE|True|yes|YES|y|Y|on|ON|On)
+      : "${NVIDIA_DRIVER_VERSION_MAJOR:?NVIDIA_DRIVER_VERSION_MAJOR required when FFMPEG_CUDA_SYMLINKS=true}"
+      cd /usr/lib64 \
+         && ln -sf libcuda.so.$NVIDIA_DRIVER_VERSION_MAJOR* libcuda.so.1 \
+         && ln -sf libnvcuvid.so.$NVIDIA_DRIVER_VERSION_MAJOR* libnvcuvid.so.1 \
+         && ln -sf libnvidia-ptxjitcompiler.so.$NVIDIA_DRIVER_VERSION_MAJOR* libnvidia-ptxjitcompiler.so.1 \
+         && ln -sf libnvidia-encode.so.$NVIDIA_DRIVER_VERSION_MAJOR* libnvidia-encode.so.1 \
+         && cd
+      ;;
+   *) : ;;
+esac
+
+
+# =============================================================================
+# Entrypoint dispatch
+#
+# transcode.sh is the ffmpeg container's entrypoint and is only ever EXECUTED
+# (never sourced). The controller starts the container with process args:
+#
+#     /opt/strimserver/bin/transcode.sh <stage>
+#
+# (containerd oci.WithProcessArgs). The chosen stage exec()s ffmpeg, which then
+# becomes the container's main process; the controller owns the lifecycle and
+# captures stdout/stderr to the task's log file.
+# =============================================================================
+STAGE="${1:?usage: transcode.sh <normalize|scale_and_egress>}"
+
+case "$STAGE" in
+   normalize|scale_and_egress) "$STAGE" ;;
+   *) echo "transcode.sh: unknown stage '$STAGE' (want: normalize|scale_and_egress)" >&2; exit 64 ;;
+esac
+

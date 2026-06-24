@@ -8,10 +8,12 @@ import (
    "log"
    "net/http"
    "os/signal"
+   "reflect"
    "strconv"
    "syscall"
    "time"
 
+   "github.com/containerd/containerd/api/events"
    containerd "github.com/containerd/containerd/v2/client"
    "github.com/containerd/containerd/v2/pkg/namespaces"
 )
@@ -28,33 +30,13 @@ type Config struct {
 
 func LoadConfig() (Config, error) {
    var errs []error
-   require := func(key string) string {
-      v, found := syscall.Getenv(key)
-      if !found { errs = append(errs, fmt.Errorf("missing required env var %q", key)) }
-      return v
-   }
-
-   requireUInt8 := func(key string) uint8 {
-      s, found := syscall.Getenv(key)
-      if !found { errs = append(errs, fmt.Errorf("missing required env var %q", key)); return 0 }
-      i, err := strconv.ParseUint(s, 10, 8)
-      if err != nil { errs = append(errs, fmt.Errorf("could not convert %q = %q to uint8", key, s)) }
-      return uint8(i)
-   }
-
-   requireDuration := func(key string) time.Duration {
-      s, found := syscall.Getenv(key)
-      if !found { errs = append(errs, fmt.Errorf("missing required env var %q", key)); return 0 }
-      d, err := time.ParseDuration(s)
-      if err != nil { errs = append(errs, fmt.Errorf("could not convert %q = %q to time.Duration", key, s)) }
-      return d
-   }
-
-   // optional := func(key, def string) string {
-   //    v, found := syscall.Getenv(key)
-   //    if !found { return def }
-   //    return v
-   // }
+   require := createRequireParsed(&errs, func(s string) (string, error) { return s, nil })
+   requireUInt8 := createRequireParsed(&errs, func (s string) (uint8, error) {
+      i, err := strconv.ParseUint(s, 10, 8); return uint8(i), err
+   })
+   requireDuration := createRequireParsed(&errs, func (s string) (time.Duration, error) {
+      return time.ParseDuration(s)
+   })
 
    cfg := Config{
       ContainerdSocket:             require("CONTAINERD_SOCKET"),
@@ -93,21 +75,70 @@ func LoadConfig() (Config, error) {
    return cfg, nil
 }
 
+func createRequireParsed[T any](errs *[]error, parse func(string) (T, error)) func(string) T {
+   return func(key string) T {
+      s, found := syscall.Getenv(key)
+      if !found {
+         *errs = append(*errs, fmt.Errorf("missing required env var %q", key))
+         var zero T; return zero
+      }
+      v, err := parse(s)
+      if err != nil { *errs = append(*errs, fmt.Errorf("could not parse %q = %q: %w", key, s, err)) }
+      return v
+   }
+}
 
 func main() {
+   err := run()
+   if err != nil { log.Fatal(err) }
+}
 
-
+func run() error {
    config, err := LoadConfig()
-   if err != nil { log.Fatalf("could not load config: %v", err) }
+   if err != nil { return fmt.Errorf("could not load config: %w", err) }
+
+   rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+   nsCtx := namespaces.WithNamespace(rootContext, config.ContainerdNamespace)
+
+   client, err := containerd.New(config.ContainerdSocket)
+   if err != nil { return fmt.Errorf("could not initialize containerd client: %w", err) }
+   defer client.Close()
 
    // path names
    const Ingress0    = "ingress0"
    const Normalized  = "normalized"
 
    // stage names
+   const MediaMTX       = "mediamtx"
    const Normalize      = "normalize"
-   const ScaleAndEgress = "scale-and-egress"
+   const ScaleAndEgress = "scale_and_egress"
 
+   // build the container factory
+
+   containerIDtoStageName := map[string]StageName {
+      config.MediaMTX.ContainerID:        MediaMTX,
+      config.Normalize.ContainerID:       Normalize,
+      config.ScaleAndEgress.ContainerID:  ScaleAndEgress,
+   }
+
+   containerFactory, err := NewContainerFactory(client, containerIDtoStageName)
+   if err != nil { return fmt.Errorf("could not create container factory: %w", err) }
+
+   // build the mediamtx operations
+   createFunc := func(ctx context.Context) (containerd.Container, string, error) {
+      cfg := config.MediaMTX
+      container, err := containerFactory.CreateMediaMTXContainer(
+         ctx, cfg.ContainerID, cfg.SnapshotID, cfg.ImageName)
+      return container, cfg.Logfile, err
+   }
+
+   lookupFunc := func(ctx context.Context) (containerd.Container, error) {
+      return containerFactory.client.LoadContainer(ctx, config.MediaMTX.ContainerID)
+   }
+
+   mediamtxOps := containerFactory.CreateContainerOps("mediamtx", createFunc, lookupFunc)
+
+   // build the controller
    paths := map[PathName]PathStatus { Ingress0: Unknown, Normalized: Unknown }
 
    pathEventRoutes := map[PathEvent]StageTarget {
@@ -118,31 +149,20 @@ func main() {
    }
 
    commandRoutes := map[ControlCommand]StageTarget {
-      { Component: "scale-and-egress", Action: "start" }: { Stage: ScaleAndEgress, State: Running,
+      { Component: "scale_and_egress", Action: "start" }: { Stage: ScaleAndEgress, State: Running,
          Prerequisite: func(c *Controller) error {
             if c.paths[Normalized] != Ready { return fmt.Errorf("normalized path is not ready") }
             return nil
          },
       },
-      { Component: "scale-and-egress", Action: "stop" }: { Stage: ScaleAndEgress, State: Stopped },
-   }
-
-   rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-   nsCtx := namespaces.WithNamespace(rootContext, config.ContainerdNamespace)
-
-   client, err := containerd.New(config.ContainerdSocket)
-   if err != nil { log.Fatalf("could not initialize containerd client: %v", err) }
-
-   containerIDtoStageName := map[string]string {
-      config.Normalize.ContainerID:       Normalize,
-      config.ScaleAndEgress.ContainerID:  ScaleAndEgress,
-   }
-
-   containerFactory := &ContainerFactory{
-      client: client, stageNames: containerIDtoStageName,
+      { Component: "scale_and_egress", Action: "stop" }: { Stage: ScaleAndEgress, State: Stopped },
    }
 
    stages := map[StageName]*Stage{
+      MediaMTX: {
+         Status: StageStatus{ Desired: Running, Actual: Stopped },
+         Ops: mediamtxOps,
+      },
       Normalize: {
          Status: StageStatus{ Desired: Stopped, Actual: Stopped },
          Ops: containerFactory.CreateStageOps(config.Normalize),
@@ -161,10 +181,7 @@ func main() {
       nsCtx, paths, stages, pathEventRoutes, commandRoutes,
       now, inflightTimeout, actionsBufferSize,
    )
-   if err != nil {
-      client.Close()
-      log.Fatalf("error constructing controller: %v", err)
-   }
+   if err != nil { return fmt.Errorf("error constructing controller: %w", err) }
 
    log.Printf("%+v", controller)
 
@@ -187,12 +204,15 @@ func main() {
 
    // wire up containerd listener
    topicFilters := []string { `topic~="/tasks/.*"` }
-   eventHandlers := containerFactory.CreateEventHandlers(controller)
+   eventTypeToStageState := map[reflect.Type]StageState {
+      reflect.TypeFor[*events.TaskStart]():   Running,
+      reflect.TypeFor[*events.TaskExit]():    Stopped,
+   }
 
-   listenForContainerdEvents := containerFactory.CreateContainerdEventListener(topicFilters, eventHandlers)
+   listenForContainerdEvents := containerFactory.CreateContainerdEventListener(
+      topicFilters, eventTypeToStageState)
 
-   // last call for any defers - before we start the threads
-   defer client.Close()
+   log.Printf("starting control plane...")
 
    // Start the controller loop
    runDone := make(chan struct{})
@@ -201,7 +221,7 @@ func main() {
    // Start the containerd loop
    listenerDone := make(chan struct{})
    go func() {
-      listenForContainerdEvents(nsCtx)
+      listenForContainerdEvents(nsCtx, controller)
       close(listenerDone)
    }()
 
@@ -211,6 +231,7 @@ func main() {
       invokeReconcileEvery(nsCtx, controller, config.ControllerReconcileInterval)
       close(tickerDone)
    }()
+
    // Start the HTTP server loop
    addr := fmt.Sprintf("127.0.0.1:%s", config.ControllerHTTPPort)
 
@@ -245,6 +266,7 @@ func main() {
    controller.Close()
    <-runDone
 
+   return nil
 }
 
 func postJSON[T any](c *Controller, handle func(*Controller, T) error) http.HandlerFunc {
