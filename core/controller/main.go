@@ -13,9 +13,12 @@ import (
    "syscall"
    "time"
 
-   "github.com/containerd/containerd/api/events"
+   "github.com/coder/websocket"
+   "github.com/coder/websocket/wsjson"
+
    containerd "github.com/containerd/containerd/v2/client"
    "github.com/containerd/containerd/v2/pkg/namespaces"
+   "github.com/containerd/containerd/api/events"
 )
 
 type ContainerConfig struct{ ContainerID, SnapshotID, ImageName, Logfile string }
@@ -24,6 +27,8 @@ type Config struct {
    ControllerReconcileInterval time.Duration
    ControllerInFlightTimeout time.Duration
    ControllerShutdownTimeout time.Duration
+   StageStopTimeout time.Duration
+   WebsocketWriteTimeout time.Duration
    ControllerActionsBufferSize uint8
    MediaMTX, Normalize, ScaleAndEgress ContainerConfig
 }
@@ -44,6 +49,8 @@ func LoadConfig() (Config, error) {
       ControllerReconcileInterval:  requireDuration("CONTROLLER_RECONCILE_INTERVAL"),
       ControllerInFlightTimeout:    requireDuration("CONTROLLER_INFLIGHT_TIMEOUT"),
       ControllerShutdownTimeout:    requireDuration("CONTROLLER_SHUTDOWN_TIMEOUT"),
+      StageStopTimeout:             requireDuration("STAGE_STOP_TIMEOUT"),
+      WebsocketWriteTimeout:        requireDuration("WEBSOCKET_WRITE_TIMEOUT"),
       ControllerActionsBufferSize:  requireUInt8("CONTROLLER_ACTIONS_BUFFER_SIZE"),
       ControllerHTTPPort:           require("CONTROLLER_HTTP_PORT"),
 
@@ -78,7 +85,7 @@ func LoadConfig() (Config, error) {
 func createRequireParsed[T any](errs *[]error, parse func(string) (T, error)) func(string) T {
    return func(key string) T {
       s, found := syscall.Getenv(key)
-      if !found {
+      if !found || s == "" {
          *errs = append(*errs, fmt.Errorf("missing required env var %q", key))
          var zero T; return zero
       }
@@ -121,7 +128,8 @@ func run() error {
       config.ScaleAndEgress.ContainerID:  ScaleAndEgress,
    }
 
-   containerFactory, err := NewContainerFactory(client, containerIDtoStageName)
+   containerFactory, err := NewContainerFactory(
+      client, containerIDtoStageName, config.StageStopTimeout)
    if err != nil { return fmt.Errorf("could not create container factory: %w", err) }
 
    // build the mediamtx operations
@@ -144,8 +152,8 @@ func run() error {
    pathEventRoutes := map[PathEvent]StageTarget {
       { Path: Ingress0,    Status: Ready     }: { Stage: Normalize,        State: Running },
       { Path: Ingress0,    Status: NotReady  }: { Stage: Normalize,        State: Stopped },
-      { Path: Normalized,  Status: Ready     }: { Stage: ScaleAndEgress,   State: Running },
-      { Path: Normalized,  Status: NotReady  }: { Stage: ScaleAndEgress,   State: Stopped },
+      // { Path: Normalized,  Status: Ready     }: { Stage: ScaleAndEgress,   State: Running },
+      // { Path: Normalized,  Status: NotReady  }: { Stage: ScaleAndEgress,   State: Stopped },
    }
 
    commandRoutes := map[ControlCommand]StageTarget {
@@ -194,6 +202,56 @@ func run() error {
 
    mux.HandleFunc("/status", getJSON(controller, (*Controller).Status))
 
+   mux.HandleFunc("/subscribe", func(w http.ResponseWriter, r *http.Request) {
+      conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{ InsecureSkipVerify: true })
+      if err != nil { log.Printf("ws accept error: %v", err); return }
+
+      ctx, cancel := context.WithCancel(rootContext)
+      defer cancel()
+      ctx = conn.CloseRead(ctx)
+
+      sendChannel := make(chan *ControllerStatus, 1)
+      listener := ControllerListener(func(status *ControllerStatus) {
+         select {
+            case sendChannel <- status:
+            default:
+               select { case <-sendChannel: default: }
+               select { case sendChannel <- status: default: }
+         }
+      })
+
+      err = controller.SubmitAddListener(&listener)
+      if err != nil {
+         log.Printf("could not add ControllerListener for ws client %q: %v", r.RemoteAddr, err)
+         conn.Close(websocket.StatusInternalError, err.Error()); return
+      }
+      defer func() {
+         done := make(chan struct{})
+         go func() {
+            defer close(done)
+            err := controller.SubmitRemoveListener(&listener)
+            if err != nil { log.Printf("could not remove ControllerListener for ws client %q: %v", r.RemoteAddr, err) }
+         }()
+         select { case <-done: case <-time.After(time.Second): }
+      }()
+
+      // writer
+      for {
+         select {
+            case <-ctx.Done():
+               conn.Close(websocket.StatusNormalClosure, "")
+               return
+            case status := <-sendChannel:
+               wctx, cancel := context.WithTimeout(ctx, config.WebsocketWriteTimeout)
+               err := wsjson.Write(wctx, conn, status); cancel()
+               if err != nil {
+                  log.Printf("ws write error: %v", err)
+                  conn.Close(websocket.StatusInternalError, err.Error()); return
+               }
+         }
+      }
+   })
+
    mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
       w.WriteHeader(http.StatusOK)
       _, err := w.Write([]byte("ok\n"))
@@ -233,7 +291,7 @@ func run() error {
    }()
 
    // Start the HTTP server loop
-   addr := fmt.Sprintf("127.0.0.1:%s", config.ControllerHTTPPort)
+   addr := fmt.Sprintf(":%s", config.ControllerHTTPPort)
 
    srv := &http.Server{ Addr: addr, Handler: mux }
    go func() {

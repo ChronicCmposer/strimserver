@@ -33,7 +33,7 @@ def launch_instance(instance_type=None, no_spot=False):
         )
 
         # close aws_proc stdout in parent so jq gets EOF
-        aws_proc.stdout.close() 
+        aws_proc.stdout.close()
 
         # wait for jq to finish (and aws if it hasn’t already)
         jq_proc.communicate()
@@ -46,7 +46,7 @@ def launch_instance(instance_type=None, no_spot=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--type', default='g4dn.xlarge', help='Specify EC2 instance type')
+    parser.add_argument('--type', default='g6.xlarge', help='Specify EC2 instance type')
     parser.add_argument('--no-spot', action='store_true', help='Specify EC2 instance type')
     args = parser.parse_args()
 

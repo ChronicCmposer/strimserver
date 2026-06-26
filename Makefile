@@ -1,44 +1,47 @@
-CORE_DIR := core
-CONTROLLER_DIR := core/controller
-AWS_DEPLOY_DIR := deploy/aws
-LOCAL_ENCODER_DIR := tools/local-encoder
-BANDWIDTH_TEST_DIR := tools/bandwidth-test
-SRT_TEST_DIR := tools/srt-test
-OPENSSH_DIR := tools/openssh
+CORE_DIR 				:=core
+CONTROLLER_DIR 		:=core/controller
+AWS_DEPLOY_DIR 		:=deploy/aws
+LOCAL_ENCODER_DIR 	:=tools/local-encoder
+BANDWIDTH_TEST_DIR 	:=tools/bandwidth-test
+SRT_TEST_DIR 			:=tools/srt-test
+OPENSSH_DIR 			:=tools/openssh
 
 
-S3_BUCKET										?= s3://<bucket-name>
-OUTPUT_PATH									?= $(HOME)/local-dev/strimserver
-CONTROLLER_IMAGE_NAME				?= docker.io/library/strimserver-controller:latest
-FFMPEG_IMAGE_NAME				?= docker.io/library/ffmpeg:latest
-MEDIAMTX_IMAGE_NAME				?= docker.io/library/mediamtx:latest
-LIBSRT_IMAGE_NAME						?= docker.io/library/libsrt:latest
-IPERF3_IMAGE_NAME						?= docker.io/library/iperf3:latest
-CONTROLLER_IMAGE_FILE_NAME			?= controller-container.tar
-FFMPEG_IMAGE_FILE_NAME			?= ffmpeg-container.tar
-MEDIAMTX_IMAGE_FILE_NAME			?= mediamtx-container.tar
-LIBSRT_IMAGE_FILE_NAME				?= libsrt-container.tar
-IPERF3_IMAGE_FILE_NAME				?= iperf3-container.tar
-STRIMSERVER_DEPLOYMENT_FILE_NAME ?= strimserver-deployment.tar
-IPERF3_DEPLOYMENT_FILE_NAME		?= iperf3-deployment.tar
-CONTROLLER_CONTAINER_OUTPUT		?= $(OUTPUT_PATH)/$(CONTROLLER_IMAGE_FILE_NAME)
-FFMPEG_CONTAINER_OUTPUT		?= $(OUTPUT_PATH)/$(FFMPEG_IMAGE_FILE_NAME)
-MEDIAMTX_CONTAINER_OUTPUT		?= $(OUTPUT_PATH)/$(MEDIAMTX_IMAGE_FILE_NAME)
-STRIMSERVER_CONTAINER_OUTPUT		:= $(OUTPUT_PATH)/$(STRIMSERVER_IMAGE_FILE_NAME)
-OFFLINE_SEGMENT_FILE_NAME			:= strimserver-offline-2160p60.mp4
-OFFLINE_SEGMENT_OUTPUT				:= $(OUTPUT_PATH)/$(OFFLINE_SEGMENT_FILE_NAME)
-OPENSSH_RPM_FILE_NAME				:= openssh-experimental.rpm
-OPENSSH_RPM_OUTPUT					:= $(OUTPUT_PATH)/$(OPENSSH_RPM_FILE_NAME)
-LIBSRT_CONTAINER_OUTPUT				:= $(OUTPUT_PATH)/$(LIBSRT_IMAGE_FILE_NAME)
-IPERF3_CONTAINER_OUTPUT				:= $(OUTPUT_PATH)/$(IPERF3_IMAGE_FILE_NAME)
-STRIMSERVER_DEPLOYMENT_TAR			:= $(OUTPUT_PATH)/$(STRIMSERVER_DEPLOYMENT_FILE_NAME)
-IPERF3_DEPLOYMENT_TAR				:= $(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
+S3_BUCKET	?=s3://<bucket-name>
+OUTPUT_PATH	?=$(HOME)/local-dev/strimserver
+
+CONTROLLER_IMAGE_NAME 	?=docker.io/library/strimserver-controller:latest
+FFMPEG_IMAGE_NAME			?=docker.io/library/ffmpeg:latest
+MEDIAMTX_IMAGE_NAME		?=docker.io/library/mediamtx:latest
+LIBSRT_IMAGE_NAME			?=docker.io/library/libsrt:latest
+IPERF3_IMAGE_NAME			?=docker.io/library/iperf3:latest
+
+CONTROLLER_IMAGE_FILE_NAME	?=controller-container.tar
+FFMPEG_IMAGE_FILE_NAME		?=ffmpeg-container.tar
+MEDIAMTX_IMAGE_FILE_NAME	?=mediamtx-container.tar
+LIBSRT_IMAGE_FILE_NAME		?=libsrt-container.tar
+IPERF3_IMAGE_FILE_NAME		?=iperf3-container.tar
+OFFLINE_SEGMENT_FILE_NAME	:=strimserver-offline-2160p60.mp4
+OPENSSH_RPM_FILE_NAME		:=openssh-experimental.rpm
+
+STRIMSERVER_DEPLOYMENT_FILE_NAME ?=strimserver-deployment.tar
+IPERF3_DEPLOYMENT_FILE_NAME		?=iperf3-deployment.tar
+
+CONTROLLER_CONTAINER_OUTPUT	?=$(OUTPUT_PATH)/$(CONTROLLER_IMAGE_FILE_NAME)
+FFMPEG_CONTAINER_OUTPUT			?=$(OUTPUT_PATH)/$(FFMPEG_IMAGE_FILE_NAME)
+MEDIAMTX_CONTAINER_OUTPUT		?=$(OUTPUT_PATH)/$(MEDIAMTX_IMAGE_FILE_NAME)
+OFFLINE_SEGMENT_OUTPUT			:=$(OUTPUT_PATH)/$(OFFLINE_SEGMENT_FILE_NAME)
+OPENSSH_RPM_OUTPUT				:=$(OUTPUT_PATH)/$(OPENSSH_RPM_FILE_NAME)
+LIBSRT_CONTAINER_OUTPUT			:=$(OUTPUT_PATH)/$(LIBSRT_IMAGE_FILE_NAME)
+IPERF3_CONTAINER_OUTPUT			:=$(OUTPUT_PATH)/$(IPERF3_IMAGE_FILE_NAME)
+STRIMSERVER_DEPLOYMENT_TAR		:=$(OUTPUT_PATH)/$(STRIMSERVER_DEPLOYMENT_FILE_NAME)
+IPERF3_DEPLOYMENT_TAR			:=$(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
 
 
 -include feature-toggles.env
 
-ENABLE_EXPERIMENTAL_OPENSSH		?= false
-ENABLE_LINT								?= true
+ENABLE_EXPERIMENTAL_OPENSSH	?=false
+ENABLE_LINT							?=true
 
 .DEFAULT_GOAL := publish-strimserver
 
@@ -57,12 +60,15 @@ goroot:
 		&& GOROOT_BOOTSTRAP=$(GOROOT_BOOTSTRAP) GOROOT_FINAL=$(PROJECT_GO_ROOT) ./make.bash -v
 
 controller: \
-	core/controller/dockerfile
+	core/controller/Dockerfile \
+	$(wildcard core/controller/*.go) \
+	core/controller/go.mod \
+	core/controller/go.sum
 	sudo buildctl build \
 		--frontend=dockerfile.v0 \
 		--opt platform=linux/amd64 \
-		--local context=core/controller \
-		--local dockerfile=core/controller \
+		--local context="$(CONTROLLER_DIR)" \
+		--local dockerfile="$(CONTROLLER_DIR)" \
 		--opt filename=./Dockerfile \
 		--opt build-arg:CACHEBUST=$$(date +%s%3N) \
 		--opt target=build \
@@ -70,21 +76,7 @@ controller: \
 
 
 test-controller: \
-	core/controller/dockerfile
-	sudo buildctl build \
-		--frontend=dockerfile.v0 \
-		--opt platform=linux/amd64 \
-		--local context=core/controller \
-		--local dockerfile=core/controller \
-		--opt filename=./Dockerfile \
-		--opt build-arg:CACHEBUST=$$(date +%s%3N) \
-		--opt build-arg:ENABLE_LINT=$(ENABLE_LINT) \
-		--opt target=test \
-		--progress=plain
-
-$(CONTROLLER_CONTAINER_OUTPUT): \
 	core/controller/Dockerfile \
-	core/controller/entrypoint.sh \
 	$(wildcard core/controller/*.go) \
 	core/controller/go.mod \
 	core/controller/go.sum
@@ -95,35 +87,43 @@ $(CONTROLLER_CONTAINER_OUTPUT): \
 		--local dockerfile=$(CONTROLLER_DIR) \
 		--opt filename=./Dockerfile \
 		--opt build-arg:CACHEBUST=$$(date +%s%3N) \
-		--opt target=runtime \
-		--progress=plain \
-		--output type=oci,name=$(CONTROLLER_IMAGE_NAME),dest=$@
+		--opt build-arg:ENABLE_LINT=$(ENABLE_LINT) \
+		--opt target=test \
+		--progress=plain
 
+BUILDCTL		?= sudo buildctl
+CACHEBUST		= --opt build-arg:CACHEBUST=$$(date +%s%3N)
 
-$(FFMPEG_CONTAINER_OUTPUT): \
-	$(CORE_DIR)/Dockerfile
-	sudo buildctl --addr tcp://127.0.0.1:1234 build \
+# $(call buildctl_oci, CONTEXT, IMAGE_NAME, EXTRA_OPTS)
+define buildctl_oci
+	$(BUILDCTL) build \
 		--frontend=dockerfile.v0 \
 		--opt platform=linux/amd64 \
-		--local context=$(CORE_DIR) \
-		--local dockerfile=$(CORE_DIR) \
+		--local context=$(1) \
+		--local dockerfile=$(1) \
 		--opt filename=./Dockerfile \
-		--opt target=ffmpeg \
 		--progress=plain \
-		--output type=oci,name=$(FFMPEG_IMAGE_NAME),dest=$@
+		$(3) \
+		--output type=oci,name=$(2),dest=$@
+endef
+
+$(CONTROLLER_CONTAINER_OUTPUT): \
+	core/controller/Dockerfile \
+	core/controller/entrypoint.sh \
+	$(wildcard core/controller/*.go) \
+	core/controller/go.mod \
+	core/controller/go.sum
+	$(call buildctl_oci,$(CONTROLLER_DIR),$(CONTROLLER_IMAGE_NAME),--opt target=runtime $(CACHEBUST))
+
+$(FFMPEG_CONTAINER_OUTPUT): BUILDCTL := sudo buildctl --addr tcp://127.0.0.1:1234
+$(FFMPEG_CONTAINER_OUTPUT): \
+	$(CORE_DIR)/Dockerfile
+	$(call buildctl_oci,$(CORE_DIR),$(FFMPEG_IMAGE_NAME),--opt target=ffmpeg)
 
 $(MEDIAMTX_CONTAINER_OUTPUT): \
 	$(CORE_DIR)/Dockerfile \
 	$(CORE_DIR)/entrypoint.mediamtx.sh
-	sudo buildctl build \
-		--frontend=dockerfile.v0 \
-		--opt platform=linux/amd64 \
-		--local context=$(CORE_DIR) \
-		--local dockerfile=$(CORE_DIR) \
-		--opt filename=./Dockerfile \
-		--opt target=mediamtx \
-		--progress=plain \
-		--output type=oci,name=$(MEDIAMTX_IMAGE_NAME),dest=$@
+	$(call buildctl_oci,$(CORE_DIR),$(MEDIAMTX_IMAGE_NAME),--opt target=mediamtx)
 
 $(OPENSSH_RPM_OUTPUT): \
 	$(OPENSSH_DIR)/Dockerfile
@@ -139,25 +139,11 @@ $(OPENSSH_RPM_OUTPUT): \
 
 $(LIBSRT_CONTAINER_OUTPUT): \
 	$(SRT_TEST_DIR)/Dockerfile
-	sudo buildctl build \
-		--frontend=dockerfile.v0 \
-		--opt platform=linux/amd64 \
-		--local context=$(SRT_TEST_DIR) \
-		--local dockerfile=$(SRT_TEST_DIR) \
-		--opt filename=./Dockerfile \
-		--progress=plain \
-		--output type=oci,name=$(LIBSRT_IMAGE_NAME),dest=$@
+	$(call buildctl_oci,$(SRT_TEST_DIR),$(LIBSRT_IMAGE_NAME),)
 
 $(IPERF3_CONTAINER_OUTPUT): \
 	$(BANDWIDTH_TEST_DIR)/Dockerfile
-	sudo buildctl build \
-		--frontend=dockerfile.v0 \
-		--opt platform=linux/amd64 \
-		--local context=$(BANDWIDTH_TEST_DIR) \
-		--local dockerfile=$(BANDWIDTH_TEST_DIR) \
-		--opt filename=./Dockerfile \
-		--progress=plain \
-		--output type=oci,name=$(IPERF3_IMAGE_NAME),dest=$@
+	$(call buildctl_oci,$(BANDWIDTH_TEST_DIR),$(IPERF3_IMAGE_NAME),)
 
 core/strimserver.env:
 	$(error Missing core/strimserver.env. Copy core/strimserver.env.example and fill in secrets)
@@ -176,8 +162,8 @@ STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_FILES := \
 	$(OFFLINE_SEGMENT_FILE_NAME)
 
 ifeq ($(ENABLE_EXPERIMENTAL_OPENSSH),"true")
-STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_DEPS += $(OPENSSH_RPM_OUTPUT)
-STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_FILES += $(OPENSSH_RPM_FILE_NAME)
+STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_DEPS 	+= $(OPENSSH_RPM_OUTPUT)
+STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_FILES 	+= $(OPENSSH_RPM_FILE_NAME)
 endif
 
 $(STRIMSERVER_DEPLOYMENT_TAR): \

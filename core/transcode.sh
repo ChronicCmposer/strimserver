@@ -35,6 +35,8 @@ set +a
 #
 # ‘trace, 56’
 : "${FFMPEG_LOG_LEVEL:?FFMPEG_LOG_LEVEL is not set}"
+: "${FFMPEG_NICE:?FFMPEG_NICE is not set}"
+
 
 : "${STRIMSERVER_RTSP_PORT:?STRIMSERVER_RTSP_PORT is not set}"
 
@@ -205,34 +207,6 @@ scale_and_egress() {
      "$TWITCH_RTMP_URL"
 }
 
-# symlink cuda libs if needed
-
-case "${FFMPEG_CUDA_SYMLINKS:-false}" in
-   1|true|TRUE|True|yes|YES|y|Y|on|ON|On)
-      : "${NVIDIA_DRIVER_VERSION_MAJOR:?NVIDIA_DRIVER_VERSION_MAJOR required when FFMPEG_CUDA_SYMLINKS=true}"
-      cd /usr/lib64 \
-         && ln -sf libcuda.so.$NVIDIA_DRIVER_VERSION_MAJOR* libcuda.so.1 \
-         && ln -sf libnvcuvid.so.$NVIDIA_DRIVER_VERSION_MAJOR* libnvcuvid.so.1 \
-         && ln -sf libnvidia-ptxjitcompiler.so.$NVIDIA_DRIVER_VERSION_MAJOR* libnvidia-ptxjitcompiler.so.1 \
-         && ln -sf libnvidia-encode.so.$NVIDIA_DRIVER_VERSION_MAJOR* libnvidia-encode.so.1 \
-         && cd
-      ;;
-   *) : ;;
-esac
-
-
-# =============================================================================
-# Entrypoint dispatch
-#
-# transcode.sh is the ffmpeg container's entrypoint and is only ever EXECUTED
-# (never sourced). The controller starts the container with process args:
-#
-#     /opt/strimserver/bin/transcode.sh <stage>
-#
-# (containerd oci.WithProcessArgs). The chosen stage exec()s ffmpeg, which then
-# becomes the container's main process; the controller owns the lifecycle and
-# captures stdout/stderr to the task's log file.
-# =============================================================================
 STAGE="${1:?usage: transcode.sh <normalize|scale_and_egress>}"
 
 case "$STAGE" in
