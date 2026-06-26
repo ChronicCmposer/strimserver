@@ -66,6 +66,7 @@ type StageTarget struct {
    Prerequisite   func(c *Controller) error
 }
 
+type ControllerListener func(*ControllerStatus)
 
 func concat[V any](seqs ...iter.Seq[V]) iter.Seq[V] {
     return func(yield func(V) bool) {
@@ -91,6 +92,7 @@ type Controller struct {
    stages            map[StageName]*Stage
    pathEventRoutes   map[PathEvent]StageTarget
    commandRoutes     map[ControlCommand]StageTarget
+   listeners         []*ControllerListener
    now               func() time.Time
    inflightTimeout   time.Duration
    actions           chan func(*Controller)
@@ -160,10 +162,11 @@ func NewController(
 
    if len(errs) > 0 { return nil, errors.Join(errs...) }
 
-   actions := make(chan func(*Controller), actionsBufferSize)
+   actions     := make(chan func(*Controller), actionsBufferSize)
+   listeners   := make([]*ControllerListener, 0, 1)
 
    return &Controller{
-      ctx: ctx, paths: paths, stages: stages,
+      ctx: ctx, paths: paths, stages: stages, listeners: listeners,
       pathEventRoutes: pathEventRoutes, commandRoutes: commandRoutes,
       now: now, inflightTimeout: inflightTimeout, actions: actions,
    }, nil
@@ -191,7 +194,15 @@ func (c *Controller) SubmitControl(cmd ControlCommand) error {
    return submit(c, func(c *Controller) error { return c.handleControl(cmd) })
 }
 
-func (c *Controller) Status() ControllerStatus {
+func (c *Controller) SubmitAddListener(l *ControllerListener) error {
+   return submit(c, func(c *Controller) error { return c.handleAddListener(l) })
+}
+
+func (c *Controller) SubmitRemoveListener(l *ControllerListener) error {
+   return submit(c, func(c *Controller) error { return c.handleRemoveListener(l) })
+}
+
+func (c *Controller) Status() *ControllerStatus {
    return submit(c, (*Controller).handleStatus)
 }
 
@@ -226,9 +237,30 @@ func (c *Controller) handleStageEvent(e StageEvent) error {
 
    log.Printf("stage event %+v", e)
 
+   changed := stage.Status.Actual != e.State
    stage.Status.Actual = e.State
    stage.InFlightSince = time.Time{}
+   if changed { c.notifyListeners() }
    return nil
+}
+
+func (c *Controller) handleAddListener(l *ControllerListener) error {
+   if l == nil { return fmt.Errorf("listener must not be nil") }
+   c.listeners = append(c.listeners, l)
+   f := *l; f(c.handleStatus()); return nil
+}
+
+func (c *Controller) handleRemoveListener(l *ControllerListener) error {
+   for i, existing := range c.listeners {
+      if existing == l { c.listeners = append(c.listeners[:i], c.listeners[i+1:]...); return nil }
+   }
+   return fmt.Errorf("listener not registered")
+}
+
+func (c *Controller) notifyListeners() {
+   if len(c.listeners) == 0 { return }
+   controllerStatus := c.handleStatus()
+   for _, l := range c.listeners { f := *l; f(controllerStatus) }
 }
 
 func (c *Controller) applyDesiredStageTarget(target StageTarget) error {
@@ -245,6 +277,7 @@ func (c *Controller) applyDesiredStageTarget(target StageTarget) error {
    }
 
    stage.Status.Desired = target.State
+   c.notifyListeners()
    return nil
 }
 
@@ -283,11 +316,11 @@ func (c *Controller) planReconcile(stage *Stage) (target StageState, timedOut bo
    return stage.Status.Desired, true
 }
 
-func (c *Controller) handleStatus() ControllerStatus {
+func (c *Controller) handleStatus() *ControllerStatus {
    outPaths := maps.Clone(c.paths)
    outStages := make(map[StageName]StageStatus, len(c.stages))
    for name, stage := range c.stages { outStages[name] = stage.Status }
-   return ControllerStatus{ Paths: outPaths, Stages: outStages }
+   return &ControllerStatus{ Paths: outPaths, Stages: outStages }
 }
 
 func (c *Controller) WaitForOps() { c.ops.Wait() }
@@ -306,6 +339,7 @@ func (c *Controller) Teardown() {
          stage.Status.Desired, stage.Status.Actual = Stopped, Stopped
          stage.InFlightSince = time.Time{}
       }
+      c.notifyListeners()
       return struct{}{}
    })
 }

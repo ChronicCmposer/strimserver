@@ -6,6 +6,8 @@ import (
    "fmt"
    "log"
    "reflect"
+   "syscall"
+   "time"
 
    containerd "github.com/containerd/containerd/v2/client"
    "github.com/containerd/containerd/v2/pkg/cdi"
@@ -20,11 +22,13 @@ import (
 type ContainerFactory struct {
    client      *containerd.Client
    stageNames  map[string]StageName
+   gracefulStopTimeout  time.Duration
 }
 
 func NewContainerFactory(
    client *containerd.Client,
    stageNames map[string]StageName,
+   gracefulStopTimeout time.Duration,
 ) (*ContainerFactory, error) {
    var errs []error
    if client == nil { errs = append(errs, fmt.Errorf("containerd client cannot be nil")) }
@@ -32,84 +36,85 @@ func NewContainerFactory(
       if stageName == "" { errs = append(errs, fmt.Errorf("empty stage name for container id %q", id)) }
    }
    if len(errs) > 0 { return nil, errors.Join(errs...) }
-   return &ContainerFactory{client: client, stageNames: stageNames}, nil
+   return &ContainerFactory{
+      client: client, stageNames: stageNames,
+      gracefulStopTimeout: gracefulStopTimeout,
+   }, nil
 }
+
+type Mount struct {
+   Src, Dst string
+   ReadWrite bool
+}
+
+func toOCIMounts(mounts []Mount) []specs.Mount {
+   out := make([]specs.Mount, 0, len(mounts))
+   rw, ro := []string{"rbind", "rw"}, []string{"rbind", "ro"}
+   for _, mount := range mounts {
+      opts := ro; if mount.ReadWrite { opts = rw }
+      out = append(out, specs.Mount{
+         Type:          "bind",
+         Source:        mount.Src,
+         Destination:   mount.Dst,
+         Options:       opts,
+      })
+   }
+   return out
+}
+
+func (f *ContainerFactory) buildContainer(
+   ctx context.Context, id, snapshotID, imageName string,
+   mounts []Mount, extra ...oci.SpecOpts,
+) (containerd.Container, error) {
+   image, err := f.client.GetImage(ctx, imageName)
+   if err != nil { return nil, fmt.Errorf("error obtaining reference to oci image %q: %w", imageName, err) }
+
+   opts := []oci.SpecOpts{
+      oci.WithImageConfig(image),
+      oci.WithHostNamespace(specs.NetworkNamespace),
+      oci.WithAddedCapabilities([]string{"CAP_SYS_NICE"}),
+      oci.WithMounts(toOCIMounts(mounts)),
+   }
+   opts = append(opts, extra...)
+
+   container, err := f.client.NewContainer(ctx, id,
+      containerd.WithNewSnapshot(snapshotID, image),
+      containerd.WithNewSpec(opts...),
+   )
+   if err != nil { return nil, fmt.Errorf("could not create container with id %q: %w", id, err) }
+   return container, nil
+}
+
 
 func (f *ContainerFactory) CreateFFmpegContainer(
    ctx context.Context, id, snapshotID, imageName string, argv ...string,
 ) (containerd.Container, error) {
-   image, err := f.client.GetImage(ctx, imageName)
-   if err != nil { return nil, fmt.Errorf("error obtaining reference to oci image %q: %w", imageName, err) }
-
-   snapshot := containerd.WithNewSnapshot(snapshotID, image)
-
-   rw := []string{"rbind", "rw"}
-   const Bind = "bind"
-   mapping := map[string]string {
-      "/mnt/nvme/config/strimserver.env":          "/strimserver.env",
-      "/mnt/nvme/bin/transcode.sh":                "/transcode.sh",
-      "/run/systemd/resolve/resolv.conf":   "/etc/resolv.conf",
-      "/tmp":                                      "/tmp",
+   mounts := []Mount {
+      { Src: "/mnt/nvme/config/strimserver.env",   Dst: "/strimserver.env" },
+      { Src: "/mnt/nvme/bin/transcode.sh",         Dst: "/transcode.sh" },
+      { Src: "/run/systemd/resolve/resolv.conf",   Dst: "/etc/resolv.conf" },
+      { Src: "/tmp",                               Dst: "/tmp", ReadWrite: true },
    }
-
-
-   mounts := make([]specs.Mount, 0, len(mapping))
-
-   for src, dest := range mapping {
-      mounts = append(mounts, specs.Mount{Type: Bind, Source: src, Destination: dest, Options: rw})
-   }
-
-   spec := containerd.WithNewSpec(
-      oci.WithImageConfig(image),
-      oci.WithHostNamespace(specs.NetworkNamespace),
-      oci.WithAddedCapabilities([]string{"CAP_SYS_NICE"}),
-      oci.WithMounts(mounts),
+   container, err := f.buildContainer(ctx, id, snapshotID, imageName, mounts,
       oci.WithProcessArgs(argv...),
-      cdi.WithCDIDevices("nvidia.com/gpu=0"),
-   )
-
-   container, err := f.client.NewContainer(ctx, id, snapshot, spec)
+      cdi.WithCDIDevices("nvidia.com/gpu=0"))
    if err != nil { return nil, fmt.Errorf("could not create ffmpeg container with id %q: %w", id, err) }
-
    return container, nil
-
 }
 
 func (f *ContainerFactory) CreateMediaMTXContainer(
-   ctx context.Context, id, snapshotID, imageName string, argv ...string,
+   ctx context.Context, id, snapshotID, imageName string,
 ) (containerd.Container, error) {
-   image, err := f.client.GetImage(ctx, imageName)
-   if err != nil { return nil, fmt.Errorf("error obtaining reference to oci image %q: %w", imageName, err) }
-
-   snapshot := containerd.WithNewSnapshot(snapshotID, image)
-
-   rw := []string{"rbind", "rw"}
-   const Bind = "bind"
-   mapping := map[string]string {
-      "/mnt/nvme/config/strimserver.env":          "/strimserver.env",
-      "/mnt/nvme/config/mediamtx.yaml.template":   "/mediamtx.yaml.template",
-      "/mnt/nvme/bin/notify.sh":                   "/notify.sh",
-      "/mnt/nvme/srt-passphrase":                  "/run/secrets/srt-passphrase",
-      "/mnt/nvme/video-files":                     "/video-files",
-      "/tmp":                                      "/tmp",
+   mounts := []Mount {
+      { Src: "/mnt/nvme/config/strimserver.env",          Dst: "/strimserver.env" },
+      { Src: "/mnt/nvme/config/mediamtx.yaml.template",   Dst: "/mediamtx.yaml.template" },
+      { Src: "/mnt/nvme/bin/notify.sh",                   Dst: "/notify.sh" },
+      { Src: "/mnt/nvme/srt-passphrase",                  Dst: "/run/secrets/srt-passphrase" },
+      { Src: "/mnt/nvme/video-files",                     Dst: "/video-files", ReadWrite: true },
+      { Src: "/tmp",                                      Dst: "/tmp",         ReadWrite: true },
    }
-
-   mounts := make([]specs.Mount, 0, len(mapping))
-
-   for src, dest := range mapping {
-      mounts = append(mounts, specs.Mount{Type: Bind, Source: src, Destination: dest, Options: rw})
-   }
-
-   spec := containerd.WithNewSpec(
-      oci.WithImageConfig(image),
-      oci.WithHostNamespace(specs.NetworkNamespace),
-      oci.WithAddedCapabilities([]string{"CAP_SYS_NICE"}),
-      oci.WithMounts(mounts),
-   )
-
-   container, err := f.client.NewContainer(ctx, id, snapshot, spec)
+   container, err := f.buildContainer(ctx, id, snapshotID, imageName, mounts)
    if err != nil { return nil, fmt.Errorf("could not create mediamtx container with id %q: %w", id, err) }
-
    return container, nil
 }
 
@@ -151,9 +156,44 @@ func (f *ContainerFactory) CreateContainerOps(
 
       // prerequisite - valid task
       deleteTask := func(task containerd.Task) error {
-         exitStatus, err := task.Delete(ctx, containerd.WithProcessKill)
-         if err == nil { log.Printf("deleted %q task, exit status: %+v", name, exitStatus); return nil }
-         return fmt.Errorf("could not delete %q task: %w", name, err)
+         // Subscribe to the exit event BEFORE signalling; a fast-exiting task
+         // can fire its exit before we start waiting otherwise.
+         exitCh, err := task.Wait(ctx)
+         if err != nil {
+            if errdefs.IsNotFound(err) { return nil } // already gone
+            return fmt.Errorf("could not wait on %q task: %w", name, err)
+         }
+
+         if err := task.Kill(ctx, syscall.SIGTERM); err != nil && !errdefs.IsNotFound(err) {
+            return fmt.Errorf("could not signal %q task: %w", name, err)
+         }
+
+         select {
+            case status := <-exitCh:
+               code, _, _ := status.Result()
+               log.Printf("%q task exited gracefully, exit code: %d", name, code)
+               if _, err := task.Delete(ctx); err != nil && !errdefs.IsNotFound(err) {
+                  return fmt.Errorf("could not delete %q task after graceful exit: %w", name, err)
+               }
+               return nil
+
+            case <-time.After(f.gracefulStopTimeout):
+               log.Printf("%q task did not exit within %s, forcing kill", name, f.gracefulStopTimeout)
+               if _, err := task.Delete(ctx, containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
+                  return fmt.Errorf("could not force-delete %q task: %w", name, err)
+               }
+               return nil
+
+            case <-ctx.Done():
+               // Stop context cancelled mid-wait; ensure the task is reaped anyway
+               // (use WithoutCancel so the force-delete itself can complete) so the
+               // subsequent container.Delete won't fail on a lingering task.
+               log.Printf("%q stop context cancelled, forcing kill", name)
+               if _, err := task.Delete(context.WithoutCancel(ctx), containerd.WithProcessKill); err != nil && !errdefs.IsNotFound(err) {
+                  return fmt.Errorf("could not force-delete %q task on cancel: %w", name, err)
+               }
+               return nil
+         }
       }
 
       err = deleteTask(task)
