@@ -1,7 +1,5 @@
 import { Endpoints } from "./config";
-
-export type ControlAction    = "start" | "stop";
-export type ControlComponent = "scale_and_egress";
+import type { ControlComponent, ControlAction } from "./types";
 
 export type ControlResult =
    | { kind: "ok" }
