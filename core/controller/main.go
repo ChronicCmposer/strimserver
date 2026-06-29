@@ -160,8 +160,6 @@ func run() error {
    pathEventRoutes := map[PathEvent]StageTarget {
       { Path: PathIngress0,    Status: Ready     }: { Stage: StageNormalize,        State: Running },
       { Path: PathIngress0,    Status: NotReady  }: { Stage: StageNormalize,        State: Stopped },
-      // { Path: Normalized,  Status: Ready     }: { Stage: ScaleAndEgress,   State: Running },
-      // { Path: Normalized,  Status: NotReady  }: { Stage: ScaleAndEgress,   State: Stopped },
    }
 
    commandRoutes := map[ControlCommand]StageTarget {
