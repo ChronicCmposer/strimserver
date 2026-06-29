@@ -43,9 +43,20 @@ IPERF3_DEPLOYMENT_TAR			:=$(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
 ENABLE_EXPERIMENTAL_OPENSSH	?=false
 ENABLE_LINT							?=true
 
+GENERATED := core/strimserver.env.example \
+				tools/streamdeck-plugin/src/client/types.generated.ts
+
 .DEFAULT_GOAL := publish-strimserver
 
-.PHONY := controller test-controller goroot
+.PHONY := controller test-controller goroot generate check-generated
+
+generate:
+	cd core/controller && go run . -print-env-example > ../strimserver.env.example
+	cd core/controller && go run . -print-ts-types > ../../tools/streamdeck-plugin/src/client/types.generated.ts
+
+check-generated: generate
+	@git diff --exit-code -- $(GENERATED) \
+		|| { echo "generated files are stale - run 'make generate'"; exit 1; }
 
 goroot:
 	@test -n "$(PROJECT_GO_VERSION_TAG)" || { echo "PROJECT_GO_VERSION_TAG required"; exit 1; }
@@ -94,7 +105,7 @@ test-controller: \
 BUILDCTL		?= sudo buildctl
 CACHEBUST		= --opt build-arg:CACHEBUST=$$(date +%s%3N)
 
-# $(call buildctl_oci, CONTEXT, IMAGE_NAME, EXTRA_OPTS)
+# $(call buildctl_oci,CONTEXT,IMAGE_NAME,EXTRA_OPTS)
 define buildctl_oci
 	$(BUILDCTL) build \
 		--frontend=dockerfile.v0 \

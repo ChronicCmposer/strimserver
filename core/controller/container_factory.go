@@ -20,25 +20,28 @@ import (
 
 
 type ContainerFactory struct {
-   client      *containerd.Client
-   stageNames  map[string]StageName
+   client               *containerd.Client
+   stageNames           map[string]StageName
    gracefulStopTimeout  time.Duration
+   layout               Layout
 }
 
 func NewContainerFactory(
    client *containerd.Client,
    stageNames map[string]StageName,
    gracefulStopTimeout time.Duration,
+   layout Layout,
 ) (*ContainerFactory, error) {
    var errs []error
    if client == nil { errs = append(errs, fmt.Errorf("containerd client cannot be nil")) }
    for id, stageName := range stageNames {
       if stageName == "" { errs = append(errs, fmt.Errorf("empty stage name for container id %q", id)) }
    }
+   err := layout.validate(); if err != nil { errs = append(errs, err) }
    if len(errs) > 0 { return nil, errors.Join(errs...) }
    return &ContainerFactory{
       client: client, stageNames: stageNames,
-      gracefulStopTimeout: gracefulStopTimeout,
+      gracefulStopTimeout: gracefulStopTimeout, layout: layout,
    }, nil
 }
 
@@ -90,10 +93,10 @@ func (f *ContainerFactory) CreateFFmpegContainer(
    ctx context.Context, id, snapshotID, imageName string, argv ...string,
 ) (containerd.Container, error) {
    mounts := []Mount {
-      { Src: "/mnt/nvme/config/strimserver.env",   Dst: "/strimserver.env" },
-      { Src: "/mnt/nvme/bin/transcode.sh",         Dst: "/transcode.sh" },
-      { Src: "/run/systemd/resolve/resolv.conf",   Dst: "/etc/resolv.conf" },
-      { Src: "/tmp",                               Dst: "/tmp", ReadWrite: true },
+      { Src: f.layout.Env,          Dst: ctrEnv },
+      { Src: f.layout.Transcode,    Dst: ctrTranscode },
+      { Src: f.layout.ResolvConf,   Dst: ctrResolvConf },
+      { Src: f.layout.Tmp,          Dst: ctrTmp, ReadWrite: true },
    }
    container, err := f.buildContainer(ctx, id, snapshotID, imageName, mounts,
       oci.WithProcessArgs(argv...),
@@ -106,12 +109,12 @@ func (f *ContainerFactory) CreateMediaMTXContainer(
    ctx context.Context, id, snapshotID, imageName string,
 ) (containerd.Container, error) {
    mounts := []Mount {
-      { Src: "/mnt/nvme/config/strimserver.env",          Dst: "/strimserver.env" },
-      { Src: "/mnt/nvme/config/mediamtx.yaml.template",   Dst: "/mediamtx.yaml.template" },
-      { Src: "/mnt/nvme/bin/notify.sh",                   Dst: "/notify.sh" },
-      { Src: "/mnt/nvme/srt-passphrase",                  Dst: "/run/secrets/srt-passphrase" },
-      { Src: "/mnt/nvme/video-files",                     Dst: "/video-files", ReadWrite: true },
-      { Src: "/tmp",                                      Dst: "/tmp",         ReadWrite: true },
+      { Src: f.layout.Env,          Dst: ctrEnv },
+      { Src: f.layout.MediaMTXTmpl, Dst: ctrMediaMTXTmpl },
+      { Src: f.layout.Notify,       Dst: ctrNotify },
+      { Src: f.layout.SrtPass,      Dst: ctrSrtSecret },
+      { Src: f.layout.VideoDir,     Dst: ctrVideoDir, ReadWrite: true },
+      { Src: f.layout.Tmp,          Dst: ctrTmp,      ReadWrite: true },
    }
    container, err := f.buildContainer(ctx, id, snapshotID, imageName, mounts)
    if err != nil { return nil, fmt.Errorf("could not create mediamtx container with id %q: %w", id, err) }
@@ -229,7 +232,7 @@ func (f *ContainerFactory) CreateStageOps(containerConfig ContainerConfig) map[S
    createFunc := func(ctx context.Context) (containerd.Container, string, error) {
       container, err := f.CreateFFmpegContainer(
          ctx, containerConfig.ContainerID, containerConfig.SnapshotID, containerConfig.ImageName,
-         "/transcode.sh", string(stageName))
+         ctrTranscode, string(stageName))
       return container, containerConfig.Logfile, err
    }
 

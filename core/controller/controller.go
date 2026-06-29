@@ -28,6 +28,9 @@ const (
    NoTarget StageState = ""
 )
 
+type ControlComponent string
+type ControlAction    string
+
 
 type StageStatus struct {
    Desired  StageState `json:"desired"`
@@ -56,8 +59,8 @@ type StageEvent struct {
 }
 
 type ControlCommand struct {
-   Component   string `json:"component"`
-   Action      string `json:"action"`
+   Component   ControlComponent `json:"component"`
+   Action      ControlAction    `json:"action"`
 }
 
 type StageTarget struct {
