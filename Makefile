@@ -13,13 +13,11 @@ OUTPUT_PATH	?=$(HOME)/local-dev/strimserver
 CONTROLLER_IMAGE_NAME 	?=docker.io/library/strimserver-controller:latest
 FFMPEG_IMAGE_NAME			?=docker.io/library/ffmpeg:latest
 MEDIAMTX_IMAGE_NAME		?=docker.io/library/mediamtx:latest
-LIBSRT_IMAGE_NAME			?=docker.io/library/libsrt:latest
 IPERF3_IMAGE_NAME			?=docker.io/library/iperf3:latest
 
 CONTROLLER_IMAGE_FILE_NAME	?=controller-container.tar
 FFMPEG_IMAGE_FILE_NAME		?=ffmpeg-container.tar
 MEDIAMTX_IMAGE_FILE_NAME	?=mediamtx-container.tar
-LIBSRT_IMAGE_FILE_NAME		?=libsrt-container.tar
 IPERF3_IMAGE_FILE_NAME		?=iperf3-container.tar
 OFFLINE_SEGMENT_FILE_NAME	:=strimserver-offline-2160p60.mp4
 OPENSSH_RPM_FILE_NAME		:=openssh-experimental.rpm
@@ -32,9 +30,9 @@ FFMPEG_CONTAINER_OUTPUT			?=$(OUTPUT_PATH)/$(FFMPEG_IMAGE_FILE_NAME)
 MEDIAMTX_CONTAINER_OUTPUT		?=$(OUTPUT_PATH)/$(MEDIAMTX_IMAGE_FILE_NAME)
 OFFLINE_SEGMENT_OUTPUT			:=$(OUTPUT_PATH)/$(OFFLINE_SEGMENT_FILE_NAME)
 OPENSSH_RPM_OUTPUT				:=$(OUTPUT_PATH)/$(OPENSSH_RPM_FILE_NAME)
-LIBSRT_CONTAINER_OUTPUT			:=$(OUTPUT_PATH)/$(LIBSRT_IMAGE_FILE_NAME)
 IPERF3_CONTAINER_OUTPUT			:=$(OUTPUT_PATH)/$(IPERF3_IMAGE_FILE_NAME)
 STRIMSERVER_DEPLOYMENT_TAR		:=$(OUTPUT_PATH)/$(STRIMSERVER_DEPLOYMENT_FILE_NAME)
+STRIMSERVER_DEPLOYMENT_SHA256	:=$(STRIMSERVER_DEPLOYMENT_TAR).sha256
 IPERF3_DEPLOYMENT_TAR			:=$(OUTPUT_PATH)/$(IPERF3_DEPLOYMENT_FILE_NAME)
 
 
@@ -46,9 +44,11 @@ ENABLE_LINT							?=true
 GENERATED := core/strimserver.env.example \
 				tools/streamdeck-plugin/src/client/types.generated.ts
 
-.DEFAULT_GOAL := publish-strimserver
+.DEFAULT_GOAL := package
 
-.PHONY := controller test-controller goroot generate check-generated
+.PHONY := controller test-controller goroot generate check-generated package release \
+				check-no-twitch-key
+
 
 generate:
 	cd core/controller && go run . -print-env-example > ../strimserver.env.example
@@ -102,6 +102,32 @@ test-controller: \
 		--opt target=test \
 		--progress=plain
 
+package:
+	@$(MAKE) check-no-twitch-key
+	@$(MAKE) $(STRIMSERVER_DEPLOYMENT_TAR) $(STRIMSERVER_DEPLOYMENT_SHA256)
+	@echo "Packaged: $(STRIMSERVER_DEPLOYMENT_TAR)"
+	@cat $(STRIMSERVER_DEPLOYMENT_SHA256)
+
+# Attach the bundle + checksum to an existing tag's GitHub Release.
+# Requires the GitHub CLI (`gh auth login`).
+GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null)
+release: package
+	@test -n "$(GIT_TAG)" || { echo "Set GIT_TAG (e.g. make release GIT_TAG=v1.0.0)"; exit 1; }
+	gh release upload "$(GIT_TAG)" \
+		"$(STRIMSERVER_DEPLOYMENT_TAR)" \
+		"$(STRIMSERVER_DEPLOYMENT_SHA256)" \
+		--clobber
+
+check-no-twitch-key: core/strimserver.env
+	@key="$$(set -a; . core/strimserver.env; set +a; printf '%s' "$$TWITCH_STREAM_KEY")"; \
+	if [ -n "$$key" ]; then \
+		echo "ERROR: TWITCH_STREAM_KEY is set in core/strimserver.env."; \
+		echo "Redistributable bundles must ship an EMPTY key (injected at deploy time)."; \
+		echo "Empty it for 'make package'/'make release', or use 'make publish-strimserver'"; \
+		echo "for a private, single-tenant S3 build that bakes your own key."; \
+		exit 1; \
+	fi
+
 BUILDCTL		?= sudo buildctl
 CACHEBUST		= --opt build-arg:CACHEBUST=$$(date +%s%3N)
 
@@ -147,10 +173,6 @@ $(OPENSSH_RPM_OUTPUT): \
 		--opt target=artifact \
 		--progress=plain \
 		--output type=local,dest=$(OUTPUT_PATH)
-
-$(LIBSRT_CONTAINER_OUTPUT): \
-	$(SRT_TEST_DIR)/Dockerfile
-	$(call buildctl_oci,$(SRT_TEST_DIR),$(LIBSRT_IMAGE_NAME),)
 
 $(IPERF3_CONTAINER_OUTPUT): \
 	$(BANDWIDTH_TEST_DIR)/Dockerfile
@@ -205,6 +227,10 @@ $(STRIMSERVER_DEPLOYMENT_TAR): \
 		core/notify.sh \
 		-C $(OUTPUT_PATH) $(STRIMSERVER_DEPLOYMENT_OUTPUT_PATH_FILES)
 
+$(STRIMSERVER_DEPLOYMENT_SHA256): $(STRIMSERVER_DEPLOYMENT_TAR)
+	cd $(OUTPUT_PATH) && sha256sum $(STRIMSERVER_DEPLOYMENT_FILE_NAME) \
+		> $(STRIMSERVER_DEPLOYMENT_FILE_NAME).sha256
+
 $(IPERF3_DEPLOYMENT_TAR): \
 	$(IPERF3_CONTAINER_OUTPUT) \
 	$(BANDWIDTH_TEST_DIR)/iperf-deploy.sh \
@@ -223,13 +249,9 @@ $(IPERF3_DEPLOYMENT_TAR): \
 		$(BANDWIDTH_TEST_DIR)/iperf3.env \
 		-C $(OUTPUT_PATH) $(IPERF3_IMAGE_FILE_NAME)
 
-build-libsrt: $(LIBSRT_CONTAINER_OUTPUT)
-	@echo "We built $(LIBSRT_CONTAINER_OUTPUT) EZ Clap"
-
 publish-strimserver: $(STRIMSERVER_DEPLOYMENT_TAR)
 	@echo "We built $(STRIMSERVER_DEPLOYMENT_TAR) EZ Clap"
 	aws s3 cp $(STRIMSERVER_DEPLOYMENT_TAR) $(S3_BUCKET)/$(STRIMSERVER_DEPLOYMENT_FILE_NAME)
-	rm -rf $(STRIMSERVER_DEPLOYMENT_TAR)
 
 publish-iperf3: $(IPERF3_DEPLOYMENT_TAR)
 	@echo "We built $(IPERF3_DEPLOYMENT_TAR) EZ Clap"
