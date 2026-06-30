@@ -1,30 +1,177 @@
 # strimserver
 
-`strimserver` is a GPU-accelerated live-stream relay and transcoding appliance for running a cloud-side streaming endpoint. It accepts an encrypted SRT contribution feed, routes the feed through MediaMTX, normalizes video/audio timing and format with FFmpeg, records the normalized stream, and publishes a Twitch-compatible RTMP egress stream.
+`strimserver` is a GPU-accelerated live-stream relay and
+transcoding appliance for running a cloud-side streaming
+endpoint. It accepts an encrypted SRT contribution feed,
+routes it through MediaMTX, normalizes video/audio timing
+and format with FFmpeg, records the normalized stream, and
+publishes a Twitch-compatible RTMP egress stream.
 
-The project is designed around a local encoder plus an AWS GPU instance. A local OBS/FFmpeg workflow sends MPEG-TS over SRT to the EC2 host; the EC2 host uses NVIDIA CUDA/NVENC/NVDEC to normalize the input into low-latency HEVC Main10, scale it to an egress resolution, encode H.264/AAC, and forward the result to Twitch. Deployment scripts package the container image, configuration, transcode scripts, systemd service, and offline fallback media into an S3-hosted deployment bundle.
+A small Go **controller** (`strimserver-controller`)
+orchestrates the whole pipeline. Rather than baking
+everything into one container, the controller drives the
+containerd API directly to create, start, stop, and
+supervise the individual pipeline stages, reconciling their
+actual state toward a desired state and exposing an
+HTTP/WebSocket API for status and control.
+
+The project is designed around a local encoder plus an AWS
+GPU instance. A local OBS/FFmpeg workflow sends MPEG-TS over
+SRT to the EC2 host; the EC2 host uses NVIDIA
+CUDA/NVENC/NVDEC to normalize the input into low-latency
+HEVC Main10, scale it to an egress resolution, encode
+H.264/AAC, and forward the result to Twitch. Deployment
+scripts package the container images, configuration,
+transcode scripts, systemd service, and offline fallback
+media into a deployment bundle that can be attached to a
+GitHub release, uploaded to S3, or used directly as a local
+file.
+
+## Architecture
+
+> **strimserver depends directly on
+> [containerd](https://github.com/containerd/containerd) and
+> [BuildKit](https://github.com/moby/buildkit).** There is
+> no Docker, Kubernetes, or higher-level orchestrator in the
+> loop. The controller links the `containerd/v2` client
+> library and drives the containerd API directly to create,
+> snapshot, start, stop, and supervise stage containers;
+> images are built with `buildctl` against a BuildKit
+> daemon. Both are hard requirements on the build host and
+> on the EC2 runtime host.
+
+The runtime is split across three independent OCI images,
+all managed by the controller:
+
+| Image | Source target | Role |
+| --- | --- | --- |
+| `strimserver-controller:latest` | `core/controller/Dockerfile` (`runtime`) | Go control plane: drives containerd, reconciles stages, serves the HTTP/WebSocket API |
+| `mediamtx:latest` | `core/Dockerfile` (`--target mediamtx`) | MediaMTX media server: SRT ingest, RTSP routing, Unix MPEG-TS source, recording |
+| `ffmpeg:latest` | `core/Dockerfile` (`--target ffmpeg`) | FFmpeg + NVIDIA HW accel; the same image backs both ffmpeg stages |
+
+The controller supervises **three pipeline stages**, each a
+container whose desired/actual state it reconciles:
+
+- `mediamtx` — the MediaMTX server (the `ffmpeg` image is *not* used here).
+- `normalize` — the `ffmpeg` image running `transcode.sh normalize`.
+- `scale_and_egress` — the `ffmpeg` image running `transcode.sh scale_and_egress`.
+
+Both runtime images for the media plane are built `FROM
+scratch` (busybox + a minimal set of copied shared
+libraries); Debian and the CUDA toolchain appear only in
+intermediate build stages. NVIDIA driver libraries and the
+GPU are injected into the ffmpeg stages at runtime via CDI
+(`nvidia.com/gpu`), not baked into the image.
+
+### NVIDIA GPU access via CDI
+
+The ffmpeg images deliberately ship **without** any NVIDIA
+driver libraries. Instead, the GPU is attached at
+container-creation time using the **Container Device
+Interface (CDI)** — a runtime-agnostic specification
+(originally modeled on CNI) that lets a device vendor
+describe, in a JSON/YAML spec under `/etc/cdi` or
+`/var/run/cdi`, exactly which device nodes, host driver
+libraries/sonames, and environment edits a container needs
+in order to use a device. The NVIDIA container toolkit
+generates that spec from the host's installed driver, and
+containerd applies it when the controller requests
+`nvidia.com/gpu=0`. This keeps the image
+driver-version-agnostic, smaller, and decoupled from
+whatever driver the DLAMI happens to ship. For more on CDI,
+see the specification at
+<https://github.com/cncf-tags/container-device-interface>.
+
+### Controller API and behavior
+
+The controller listens on `CONTROLLER_HTTP_PORT` (default
+`4000`) and exposes:
+
+- `POST /event` — path-readiness events
+  (`ingress0`/`normalized` becoming `ready`/`not-ready`),
+  posted by MediaMTX hooks through `notify.sh`.
+- `POST /control` — start/stop commands for controllable
+  components (currently `scale_and_egress`).
+- `GET /status` — current paths and per-stage desired/actual
+  state as JSON.
+- `GET /subscribe` — WebSocket stream of controller status,
+  consumed by the Stream Deck plugin.
+- `GET /healthz` — liveness probe.
+
+Internally the controller serializes all state changes
+through a single actions channel, learns actual stage state
+from containerd `TaskStart`/`TaskExit` events, runs a
+periodic reconcile ticker, re-issues stage operations that
+exceed an in-flight timeout, and tears down running stages
+gracefully on shutdown.
 
 ## Features and capabilities
 
-- Encrypted SRT ingest on a configurable port, defaulting to `9000`.
-- MediaMTX-based stream routing with separate `ingress0` and `normalized` paths.
-- RTSP readback inside the container for FFmpeg processing, defaulting to port `8554`.
-- Always-available fallback playback for `ingress0` using `strimserver-offline-2160p60.mp4` when the live source is not ready.
-- Two-stage FFmpeg processing pipeline:
-  - `normalize`: reads `ingress0`, forces 60 fps constant frame-rate timing, uploads frames to CUDA, encodes HEVC Main10 with `hevc_nvenc`, resamples audio to 48 kHz stereo, and writes MPEG-TS to a Unix socket.
-  - `scale_and_egress`: reads `normalized`, decodes HEVC on CUDA, scales to the configured output height, encodes H.264 with `h264_nvenc`, encodes AAC audio with `libfdk_aac`, and pushes RTMP/FLV to Twitch.
-- Low-latency FFmpeg settings, including small probe/analyze windows, no B-frames, NVENC ultra-low-latency tuning, constant bitrate control, direct I/O flags, and short GOPs.
-- Configurable normalized and egress video bitrate, maxrate, minrate, buffer size, audio bitrate, output height, Twitch ingest server, and Twitch stream key.
-- Optional Twitch bandwidth-test mode via the `BANDWIDTH_TEST` environment variable.
-- MPEG-TS recording of the normalized stream through MediaMTX, with 10-second recording parts, one-hour segments, 50 MB max part size, and no automatic deletion by default.
-- Runtime configuration rendering with `envsubst` from `core/mediamtx.yaml.template` and `core/strimserver.env`.
-- Docker/containerd runtime with host networking, GPU access, `CAP_SYS_NICE`, elevated process priority, and bind-mounted config, logs, secrets, scripts, and video files.
-- AWS deployment packaging through `make publish-strimserver`, producing a deployment tarball and uploading it to S3.
-- EC2 setup automation for formatting and mounting NVMe ephemeral storage at `/mnt/nvme`, installing the systemd unit, importing the OCI image into containerd, generating the SRT passphrase, and preparing config/log/video directories.
-- Local encoder helper scripts for configuring `/etc/hosts`, writing the SRT passphrase into a local env file, and streaming an OBS-provided FIFO to the EC2 ingest endpoint.
-- Offline “be right back” screen generation helpers for 1080p60, 1440p60, and 2160p60 HEVC files.
-- Optional `iperf3` bandwidth-test container and deployment scripts.
-- Optional Haivision SRT build/test container for validating SRT dependencies.
+- Encrypted SRT ingest on a configurable port, defaulting to
+  `9000`.
+- MediaMTX-based stream routing with separate `ingress0` and
+  `normalized` paths.
+- RTSP readback inside the media plane for FFmpeg
+  processing, defaulting to port `8554`.
+- Always-available fallback playback for `ingress0` using
+  `strimserver-offline-2160p60.mp4` when the live source is
+  not ready.
+- Controller-managed, three-stage pipeline with
+  desired/actual reconciliation:
+  - `normalize`: reads `ingress0`, forces 60 fps constant
+    frame-rate timing, uploads frames to CUDA, encodes HEVC
+    Main10 with `hevc_nvenc`, resamples audio to 48 kHz
+    stereo, and writes MPEG-TS to a Unix socket.
+  - `scale_and_egress`: reads `normalized`, decodes HEVC on
+    CUDA, scales to the configured output height, encodes
+    H.264 with `h264_nvenc`, encodes AAC audio with
+    `libfdk_aac`, and pushes RTMP/FLV to Twitch.
+- HTTP/WebSocket control surface for live status and manual
+  egress start/stop, including a `/healthz` endpoint and
+  path-readiness eventing.
+- Stream Deck plugin providing a "Toggle Egress" button
+  backed by the controller's status stream.
+- Low-latency FFmpeg settings, including small probe/analyze
+  windows, no B-frames, NVENC ultra-low-latency tuning,
+  constant bitrate control, direct I/O flags, and short
+  GOPs.
+- Configurable normalized and egress video bitrate, maxrate,
+  minrate, buffer size, audio bitrate, output height, Twitch
+  ingest server, and Twitch stream key.
+- Optional Twitch bandwidth-test mode via the
+  `BANDWIDTH_TEST` environment variable.
+- MPEG-TS recording of the normalized stream through
+  MediaMTX, with 10-second recording parts, one-hour
+  segments, 50 MB max part size, and no automatic deletion
+  by default.
+- Runtime configuration rendering with `envsubst` from
+  `core/mediamtx.yaml.template` and `core/strimserver.env`.
+- containerd runtime: the controller container runs with
+  host networking and `CAP_SYS_ADMIN`; the stage containers
+  it creates run with host networking, `CAP_SYS_NICE`,
+  elevated scheduling priority, GPU access via CDI (ffmpeg
+  stages), and bind-mounted config, scripts, secrets, and
+  video files.
+- Deployment packaging through `make package` (build a
+  redistributable bundle plus SHA-256 checksum locally),
+  `make release` (attach the bundle and checksum to a GitHub
+  release via the GitHub CLI), and `make publish-strimserver`
+  (build and upload a single-tenant bundle to S3).
+- EC2 setup automation for formatting and mounting NVMe
+  ephemeral storage at `/mnt/nvme`, installing the systemd
+  unit, importing the OCI images into containerd, generating
+  the SRT passphrase, and preparing config/log/video
+  directories.
+- Local encoder helper scripts for configuring `/etc/hosts`,
+  writing the SRT passphrase into a local env file, and
+  streaming an OBS-provided Unix socket to the EC2 ingest
+  endpoint.
+- Offline "be right back" screen generation helpers for
+  1080p60, 1440p60, and 2160p60 HEVC files.
+- Optional `iperf3` bandwidth-test container and deployment
+  scripts.
+- Optional experimental OpenSSH RPM build, gated by
+  `ENABLE_EXPERIMENTAL_OPENSSH` in `feature-toggles.env`.
 
 ## Build dependencies and versions
 
@@ -33,27 +180,66 @@ The project is designed around a local encoder plus an AWS GPU instance. A local
 | Component | Version / source | Where used |
 | --- | --- | --- |
 | NVIDIA CUDA build image | `nvidia/cuda:13.0.2-devel-ubuntu24.04` | FFmpeg build stage in `core/Dockerfile` |
-| FFmpeg | Git branch `release/8.0` | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
-| FFmpeg nv-codec-headers | `n13.0.19.0` | NVIDIA codec integration for FFmpeg |
-| Runtime base image | `debian:trixie-20260202-slim` | Final strimserver container runtime |
-| MediaMTX | `v1.17.0`, Linux amd64 release tarball | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
-| OBS Studio | `32.1.2` Ubuntu 24.04 `.deb` URL declared in `core/Dockerfile` | Runtime package included in the container image |
-| `libfdk-aac` | `libfdk-aac-dev` in build stage; `libfdk-aac2t64` in runtime stage | AAC encode support through FFmpeg |
-| iperf3 | `3.19.1-r1` | Bandwidth-test container |
-| Fish shell | Declared as `4.0.2-r0`; installed from distro package repositories | Shell utilities and deployment helpers |
-| gettext / `envsubst` | Declared as `0.24.1-r1`; `gettext-base` installed from distro package repositories | MediaMTX template rendering |
+| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | Git branch `release/8.0` | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
+| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.0` | NVIDIA codec integration for FFmpeg |
+| FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Compiled SASS target in `core/Dockerfile`; see the EC2 note below |
+| Intermediate Debian image | `debian:trixie-20260518-slim` | `mediamtx-fetch` / `libs` stages in `core/Dockerfile` and the `libs` stage in `core/controller/Dockerfile` (build-time only; runtime images are `FROM scratch`) |
+| Go toolchain | `golang:1.26.4-alpine3.24` | Controller build and test stages (`core/controller/Dockerfile`); module declares `go 1.26.4` |
+| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.17.0`, Linux amd64 release tarball | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
+| `libfdk-aac` | `libfdk-aac-dev` in build stage; `libfdk-aac2t64` in runtime-libs stage | AAC encode support through FFmpeg |
+| busybox / `gettext-base` (`envsubst`) | Debian packages copied into the scratch images | Shell + tools for the scratch runtime images and MediaMTX template rendering |
+| iperf3 | `3.19.1-r1` | Optional bandwidth-test container |
+| [Fish shell](https://github.com/fish-shell/fish-shell) | `4.3.1` `linux-x86_64` release tarball (SHA-256 verified) | Downloaded and installed on the EC2 host by `fish-deploy.sh` (not from distro repositories); used for the operator login shell and deployment helpers |
+
+> Note: the FFmpeg build currently compiles for `sm_75`
+> (Turing, e.g. the T4 in `g4dn` instances). To run the
+> ffmpeg stages on a different GPU family — for example the
+> L4 (`sm_89`) in `g6` instances — adjust the `--nvccflags`
+> `-gencode` target in `core/Dockerfile`, or run on a
+> matching instance type.
+
+> **Architecture: x86_64 only.** Every image is built
+> exclusively for the `linux/amd64` (x86_64) architecture,
+> and the deployment target is the **AMD EPYC 7R13**
+> processor used in current-generation AWS GPU instances.
+> The scratch images copy shared libraries from
+> `x86_64-linux-gnu` paths, the Fish and MediaMTX binaries
+> are `linux-x86_64`/`linux_amd64` releases, and BuildKit
+> builds the `linux/amd64` platform. There is no
+> `arm64`/`aarch64` support today; building for ARM (e.g.
+> AWS Graviton with NVIDIA, or the `g5g` family) or other
+> architectures would require parameterizing the build
+> platform, the FFmpeg `-gencode` target, the library copy
+> paths, and the upstream binary URLs (see *Possible future
+> enhancements*).
 
 ### Host build and deployment tools
 
-These tools are required by the repository but are not pinned by the source tree:
+These tools are required by the repository but are not
+pinned by the source tree:
 
 - GNU Make.
-- BuildKit / `buildctl`. The strimserver build target expects a BuildKit daemon reachable at `tcp://127.0.0.1:1234`.
-- AWS CLI with credentials authorized to read and write the configured S3 bucket and launch/manage EC2 instances.
+- **containerd** and **BuildKit / `buildctl`** — direct,
+  non-optional dependencies. Images are built with
+  `buildctl`; the `ffmpeg` image target builds against a
+  BuildKit daemon at `tcp://127.0.0.1:1234` (intended for a
+  remote/tunneled `buildkitd`; see
+  `tools/buildkit-scripts/`), while the controller and
+  mediamtx targets use the default `buildctl` address. The
+  EC2 runtime host runs containerd, which the controller
+  drives directly.
+- Go (1.26.x) on the build host for `make generate` / `make
+  check-generated` and the `controller` / `test-controller`
+  targets.
+- Node.js (>= 24) for building the Stream Deck plugin.
+- AWS CLI with credentials authorized to read and write the
+  configured S3 bucket and launch/manage EC2 instances.
 - `jq`, used by AWS helper scripts.
-- Python 3, used by EC2 launch/setup/termination helpers.
-- `tar`, `sudo`, OpenSSH client, and standard POSIX shell tooling.
-- NVIDIA-capable build/runtime environment for validating GPU FFmpeg behavior.
+- Python 3, used by EC2 launch/setup helpers.
+- `tar`, `sudo`, OpenSSH client, and standard POSIX shell
+  tooling.
+- An NVIDIA-capable build environment (CUDA toolchain) is
+  required to **build** the GPU-enabled FFmpeg image.
 
 ## Build instructions
 
@@ -64,11 +250,30 @@ git clone https://github.com/ChronicCmposer/strimserver.git
 cd strimserver
 ```
 
-Create the runtime configuration file and fill in the Twitch and bitrate settings:
+Create the runtime configuration file and fill in the
+bitrate and media settings:
 
 ```bash
 cp core/strimserver.env.example core/strimserver.env
 $EDITOR core/strimserver.env
+```
+
+Leave `TWITCH_STREAM_KEY` **empty** for any bundle you intend
+to redistribute (via `make package` / `make release`): the
+key is a secret injected at deploy time by
+`setup_strimserver` / `deploy.sh`, not baked into the bundle,
+and `make package` / `make release` refuse to build if it is
+non-empty. A private, single-tenant S3 build (`make
+publish-strimserver`) may bake your own key instead.
+
+`core/strimserver.env.example` is generated from the
+controller's environment spec. If you change that spec,
+regenerate the example (and the Stream Deck wire types)
+with:
+
+```bash
+make generate          # rewrites the .env.example and types.generated.ts
+make check-generated   # fails if those generated files are stale in git
 ```
 
 Prepare a local artifact output directory:
@@ -78,7 +283,9 @@ export OUTPUT_PATH="$HOME/local-dev/strimserver"
 mkdir -p "$OUTPUT_PATH"
 ```
 
-Create or provide the offline fallback segment expected by the deployment bundle. The default Makefile expects this file at `$OUTPUT_PATH/strimserver-offline-2160p60.mp4`:
+Create or provide the offline fallback segment expected by
+the deployment bundle. The default Makefile expects this
+file at `$OUTPUT_PATH/strimserver-offline-2160p60.mp4`:
 
 ```bash
 # Option A: generate the default 2160p60 fallback clip on a machine with a compatible FFmpeg setup.
@@ -90,79 +297,200 @@ cp ~/Downloads/strimserver-offline-2160p60.mp4 "$OUTPUT_PATH/"
 cp /path/to/strimserver-offline-2160p60.mp4 "$OUTPUT_PATH/"
 ```
 
-Start or connect to a BuildKit daemon. For the default strimserver build, `buildctl` must be able to reach `tcp://127.0.0.1:1234`. The helper scripts in `tools/buildkit-scripts/` can be used to deploy and tunnel to a remote BuildKit daemon if desired.
+Start or connect to a BuildKit daemon. The `ffmpeg` image
+build expects `buildctl` to reach `tcp://127.0.0.1:1234`;
+the helper scripts in `tools/buildkit-scripts/` can deploy
+and tunnel to a remote BuildKit daemon if desired.
 
-Configure the S3 bucket where deployment artifacts will be published:
+Build the deployment bundle. There are three ways to produce
+and publish `strimserver-deployment.tar`, depending on how
+you want consumers to fetch it:
 
 ```bash
+# A) Build a redistributable bundle + SHA-256 locally (no upload).
+#    Output: $OUTPUT_PATH/strimserver-deployment.tar(.sha256)
+make package
+
+# B) Build, then attach the bundle + checksum to an existing GitHub
+#    release. Requires the GitHub CLI (`gh auth login`) and a pushed tag.
+make release GIT_TAG=v1.0.0
+
+# C) Build and upload a single-tenant bundle to S3 (the default goal).
 export S3_BUCKET="s3://your-bucket-name"
-```
-
-Build and publish the strimserver deployment bundle:
-
-```bash
 make publish-strimserver
 ```
 
-The default target builds an OCI image named `docker.io/library/strimserver:latest`, writes `strimserver-container.tar` under `$OUTPUT_PATH`, packages the container image together with config/scripts/service files and the offline segment, uploads `strimserver-deployment.tar` to `$S3_BUCKET`, and removes the local deployment tarball after upload.
+All three build the same three OCI images —
+`strimserver-controller:latest`, `ffmpeg:latest`, and
+`mediamtx:latest` — writing `controller-container.tar`,
+`ffmpeg-container.tar`, and `mediamtx-container.tar` under
+`$OUTPUT_PATH`, then package those images together with the
+configuration, scripts, systemd service, feature toggles,
+and the offline segment into `strimserver-deployment.tar`.
+`make package` and `make release` also write a `.sha256`
+checksum next to the tar (consumers verify it via
+`DEPLOYMENT_SHA256`; see *AWS EC2 deployment target*) and
+require `TWITCH_STREAM_KEY` to be empty in
+`core/strimserver.env`; `make publish-strimserver` does not,
+and bakes whatever key is present. When
+`ENABLE_EXPERIMENTAL_OPENSSH="true"` in `feature-toggles.env`,
+the experimental OpenSSH RPM is built and added to the
+bundle.
 
-Optional build targets:
+Thanks to the `FROM scratch` images (no base OS, no bundled
+NVIDIA driver — the driver is injected at runtime via CDI)
+and statically/minimally linked binaries, **the entire
+`strimserver-deployment.tar` bundle — including the offline
+fallback clip — is under 50 MB.** This keeps download/transfer and
+EC2 setup fast and makes the bundle cheap to rebuild and
+redeploy.
+
+The deployment bundle contains:
+
+- `controller-container.tar`, `ffmpeg-container.tar`, `mediamtx-container.tar`
+- `strimserver-offline-2160p60.mp4`
+- `deploy.sh`, `fish-deploy.sh`, `imdslib.sh`, `prompt_login.fish`
+- `strimserver.service`
+- `strimserver.env`, `mediamtx.yaml.template`, `transcode.sh`, `notify.sh`
+- `feature-toggles.env`
+- `openssh-experimental.rpm` (only when the OpenSSH toggle is enabled)
+
+Other useful targets:
 
 ```bash
-# Build the Haivision SRT test image.
-make build-libsrt
-
-# Build and publish the iperf3 bandwidth-test deployment bundle.
-make publish-iperf3
+make controller        # build the controller image (build target only)
+make test-controller   # run go test (+ optional golangci-lint) in a build container
+make generate          # regenerate strimserver.env.example + Stream Deck wire types
+make check-generated   # fail if those generated files are stale in git
+make publish-iperf3    # build and publish the iperf3 bandwidth-test bundle to S3
 ```
 
 ## AWS EC2 deployment target
 
-The intended deployment target is an AWS EC2 `g6.2xlarge` instance running the latest Amazon Linux 2023 Deep Learning AMI (DLAMI), with the instance's NVMe ephemeral storage mounted at `/mnt/nvme`.
+The intended deployment target is an AWS EC2 GPU instance
+running the latest Amazon Linux 2023 Deep Learning AMI
+(DLAMI), with the instance's NVMe ephemeral storage mounted
+at `/mnt/nvme`. The `launch` helper defaults to `g6.xlarge`;
+pick an instance whose GPU matches the FFmpeg `-gencode`
+target (see the build note above) or adjust the target
+accordingly.
 
 Expected target characteristics:
 
-- Instance type: `g6.2xlarge`.
 - AMI family: latest Amazon Linux 2023 DLAMI.
-- GPU/container runtime: NVIDIA driver and container tooling supplied by the DLAMI.
-- Storage: NVMe ephemeral device formatted as `ext4` and mounted at `/mnt/nvme` by `deploy/aws/setup_strimserver`.
-- Runtime: containerd with its root and state directories moved under `/mnt/nvme`.
+- GPU/container runtime: NVIDIA driver and container tooling
+  supplied by the DLAMI.
+- Storage: NVMe ephemeral device formatted as `ext4` and
+  mounted at `/mnt/nvme` by `deploy/aws/setup_strimserver`.
+- Runtime: containerd with its root and state directories
+  moved under `/mnt/nvme`.
 - Network access:
   - inbound SSH from the operator machine;
-  - inbound SRT ingest, default UDP port `9000`, from the local encoder;
-  - outbound access to S3 for deployment artifact retrieval;
+  - inbound SRT ingest, default UDP port `9000`, from the
+    local encoder;
+  - inbound controller HTTP/WebSocket, default TCP port
+    `4000`, from the operator machine (used by `/control`,
+    `/status`, and the Stream Deck `/subscribe` stream);
+  - outbound access to wherever the bundle is hosted (a
+    GitHub release over HTTPS, or S3) for artifact
+    retrieval;
   - outbound RTMP to the configured Twitch ingest server.
-- IAM permissions sufficient to read the deployment bundle from S3. The machine used for build/publish also needs permission to write that bundle to S3.
+- IAM permissions to read the deployment bundle from S3
+  **only when** it is delivered via an `s3://` source; an
+  HTTPS release asset or a locally uploaded file needs no
+  instance IAM for retrieval. The machine used for `make
+  publish-strimserver` needs S3 write permission; `make
+  package` / `make release` do not.
 
-The EC2 launch helper currently references project-specific launch template names. Use it with the requested target instance type, or adapt the launch templates to use the latest Amazon Linux 2023 DLAMI and the security/IAM settings above:
+Durable infrastructure — a security group and an IAM
+instance profile, with an optional self-contained
+VPC/subnet/internet gateway — is provisioned once from the
+CloudFormation template at
+`deploy/aws/strimserver-infra.yaml`. The `launch` helper
+reads that stack's outputs and creates instances
+imperatively with `ec2 run-instances`; there is **no EC2
+launch template**. `terminate` tears down instances by their
+`Project` tag.
+
+Deploy (or update) the infrastructure stack first.
+`deploy/aws/deploy-template` shows the call; at minimum
+supply your operator CIDR (set `DeploymentBucketName` only
+when you deliver the bundle from S3 — omit it for an HTTPS
+release asset or a local file):
+
+```bash
+OPERATOR_CIDR="203.0.113.4/32" \
+S3_BUCKET_NAME="" \
+deploy/aws/deploy-template
+```
+
+Then configure `.env` and launch. `launch` resolves the
+security group, instance profile, and (when the stack
+manages networking) the public subnet from the stack
+outputs, forces a public IP, enforces IMDSv2, and uses a
+spot instance by default (`--no-spot` for on-demand):
 
 ```bash
 cp deploy/aws/.env.example deploy/aws/.env
-$EDITOR deploy/aws/.env
+$EDITOR deploy/aws/.env          # set KEY_NAME, DEPLOYMENT_SRC, TWITCH_STREAM_KEY, etc.
 set -a
 . deploy/aws/.env
 set +a
 
-# Launch through the configured launch template, overriding the instance type.
-deploy/aws/launch --type g6.2xlarge
+# Launch, overriding the instance type. --wait prints the public IP + next steps.
+deploy/aws/launch --type g6.xlarge --wait
 ```
 
-After the instance is reachable over SSH, run the setup script from the local machine:
+`DEPLOYMENT_SRC` in `.env` selects where the box fetches the
+bundle from: an `https://` URL (e.g. a GitHub release asset
+— no AWS credentials needed), an `s3://` URI (the instance
+role needs S3 read), or a local path (uploaded over scp).
+Set `DEPLOYMENT_SHA256` to verify the download against the
+checksum produced by `make package` / `make release`. Your
+Twitch stream key is supplied here via `TWITCH_STREAM_KEY`
+(or `TWITCH_STREAM_KEY_FILE`) and transferred to the
+instance as a `0600` file at deploy time — it is never baked
+into the bundle.
+
+After the instance is reachable over SSH, run the setup
+script from the local machine:
 
 ```bash
 deploy/aws/setup_strimserver
 ```
 
-`setup_strimserver` will display the remote block devices and prompt for the NVMe device to format. The default is `/dev/nvme1n1`. This is destructive to the selected device.
+`setup_strimserver` will display the remote block devices
+and prompt for the NVMe device to format. The default is
+`/dev/nvme1n1`. This is destructive to the selected device.
+It then places the deployment bundle on the box (HTTPS
+download, S3 pull, or scp upload, per `DEPLOYMENT_SRC`),
+unpacks it, and runs `deploy.sh`, which stages config/bin/video-file directories
+under `/mnt/nvme`, configures and restarts containerd,
+installs the systemd unit, **imports all three OCI images**
+(`controller-container.tar`, `ffmpeg-container.tar`,
+`mediamtx-container.tar`) into the `strimserver` containerd
+namespace, generates the SRT passphrase, and creates the
+logs and video-files directories.
 
-When setup completes, it prints the generated SRT passphrase and a suggested local encoder configuration command. Start and stop the systemd service with:
+When setup completes, it prints the generated SRT passphrase
+and a suggested local encoder configuration command. Start
+and stop the systemd service with:
 
 ```bash
 deploy/aws/start_strimserver
 deploy/aws/stop_strimserver
 ```
 
-The service runs the imported `docker.io/library/strimserver:latest` image through `ctr`, with host networking, GPU access, elevated scheduling priority, and bind mounts rooted in `/mnt/nvme`.
+The systemd unit runs the imported
+`docker.io/library/strimserver-controller:latest` image
+through `ctr` in the `strimserver` namespace, with host
+networking and `CAP_SYS_ADMIN`, and bind-mounts the
+containerd socket, `/tmp`, the containerd root under
+`/mnt/nvme`, the CDI directory, `/dev`, and
+`strimserver.env`. The controller then creates and
+supervises the `mediamtx`, `normalize`, and
+`scale_and_egress` stage containers, attaching the GPU to
+the ffmpeg stages via CDI.
 
 ## Local encoder setup
 
@@ -174,13 +502,24 @@ $EDITOR ~/.strimserver-local-encoder.env
 export LOCAL_ENCODER_ENV="$HOME/.strimserver-local-encoder.env"
 ```
 
-Make sure the env file contains a valid `FFMPEG_CMD`, `INPUT_FIFO`, `SRT_PASSPHRASE`, and `FFMPEG_NICE` value. The local encoder script validates `FFMPEG_NICE`; add it to the env file if it is not already present.
+Make sure the env file contains valid `FFMPEG_CMD`,
+`INPUT_SOCKET`, `SRT_PASSPHRASE`, and `FFMPEG_NICE` values,
+along with the SRT tuning and bitrate settings shown in the
+example (`SRT_LATENCY_US`, `SRT_INPUT_BW_BYTES_PER_SEC`,
+`SRT_PB_KEY_LEN`, `VIDEO_BITRATE`, `AUDIO_BITRATE`, and so
+on). The local encoder script validates these and fails fast
+if any are missing.
 
-Use the command printed by the EC2 deploy script to set the remote host and generated passphrase:
+Use the command printed by the EC2 deploy script to set the
+remote host and generated passphrase:
 
 ```bash
 configure-local-encoder.zsh --strimserver-host <public-ip> --passphrase <generated-passphrase>
 ```
+
+This invokes `set-strimserver-host.zsh` (updates
+`/etc/hosts`) and `set-srt-passphrase.zsh` (writes the
+passphrase into the local env file).
 
 Run the local encoder:
 
@@ -188,50 +527,150 @@ Run the local encoder:
 tools/local-encoder/local-encoder.zsh
 ```
 
-The local encoder reads the configured OBS FIFO, copies video and audio without local re-encoding, wraps them as MPEG-TS, and publishes to `srt://<host>:9000` with `streamid=publish:ingress0`.
+The local encoder reads the OBS-provided Unix socket at
+`INPUT_SOCKET` (for example `obs.nut.sock`), copies video
+and audio without local re-encoding, wraps them as MPEG-TS,
+and publishes to `srt://<host>:9000` in caller mode with
+`streamid=publish:ingress0`.
+
+## Stream Deck control
+
+`tools/streamdeck-plugin/` is a TypeScript Stream Deck
+plugin (`@elgato/streamdeck` v2, Node >= 24, built with
+Rollup) that adds a **Toggle Egress** action. The action
+subscribes to the controller's WebSocket status stream and
+sends start/stop control commands, reflecting live stage
+state on the button. By default it targets
+`http://strimserver:4000`, overridable via the
+`STRIMSERVER_URL` environment variable; the port must match
+`CONTROLLER_HTTP_PORT`. The plugin's wire types in
+`src/client/types.generated.ts` are produced by `make
+generate` from the controller's Go definitions.
 
 ## Possible future enhancements
 
-- Add first-class support for additional egress targets beyond Twitch, such as YouTube, Kick, custom RTMP endpoints, HLS, or SRT output.
-- Add multi-destination simulcast with per-platform bitrate, resolution, and codec profiles.
-- Add health checks, readiness checks, and automatic restart/backoff policies for FFmpeg subprocess failures.
-- Add structured metrics and dashboards for ingest bitrate, dropped frames, encoder load, GPU utilization, RTMP reconnects, SRT latency, and recording status.
-- Add alerting for missing ingest, failed Twitch egress, failed recordings, or full NVMe storage.
-- Add automatic cleanup/retention policies for recorded segments, with configurable upload/archive to S3.
-- Align the MediaMTX recording path with the deployed NVMe video-file mount, or make the recording output path configurable from `strimserver.env`.
-- Add a local `docker compose` or containerd development profile for non-AWS smoke tests.
-- Add automated CI for shell linting, Dockerfile builds, and basic FFmpeg/MediaMTX configuration validation.
-- Add integration tests that emulate SRT ingest and verify normalized stream creation, recording, and RTMP egress behavior.
-- Add explicit version pinning for host tooling and distro-installed runtime packages.
-- Add support for newer/alternate NVIDIA architectures by parameterizing the FFmpeg CUDA `-gencode` target.
-- Add safer secret handling for Twitch stream keys and SRT passphrases through AWS Secrets Manager or SSM Parameter Store.
-- Add a documented path for updating MediaMTX, FFmpeg, CUDA, OBS, and nv-codec-headers versions together.
-- Add Terraform, CloudFormation, or CDK infrastructure for reproducible EC2, IAM, S3, security group, and launch template setup.
+- Wire up the automatic `normalized → scale_and_egress`
+  route so egress can start without manual control, with the
+  existing readiness prerequisite.
+- Add first-class support for additional egress targets
+  beyond Twitch, such as YouTube, Kick, custom RTMP
+  endpoints, HLS, or SRT output.
+- Add multi-destination simulcast with per-platform bitrate,
+  resolution, and codec profiles.
+- Record a separate VOD audio track alongside the live mix
+  (e.g. a music-free or alternately-mixed AAC track) so
+  archives/VODs can avoid muted segments and copyright
+  strikes without affecting the live broadcast.
+- Extend the controller's reconciliation with
+  restart/backoff policies for repeated stage failures,
+  building on the existing in-flight timeouts and `/healthz`
+  probe.
+- Add structured metrics and dashboards for ingest bitrate,
+  dropped frames, encoder load, GPU utilization, RTMP
+  reconnects, SRT latency, and recording status.
+- Add alerting for missing ingest, failed Twitch egress,
+  failed recordings, or full NVMe storage.
+- Add automatic cleanup/retention policies for recorded
+  segments, with configurable upload/archive to S3.
+- Make the MediaMTX recording path configurable from
+  `strimserver.env`.
+- Add a local `docker compose` or containerd development
+  profile for non-AWS smoke tests.
+- Add automated CI for shell linting, Dockerfile builds,
+  controller tests/lint, and `make check-generated`.
+- Add integration tests that emulate SRT ingest and verify
+  normalized stream creation, recording, and RTMP egress
+  behavior.
+- Add explicit version pinning for host tooling and
+  distro-installed runtime packages.
+- Parameterize the FFmpeg CUDA `-gencode` target to support
+  additional NVIDIA architectures (e.g. `sm_89` for `g6`).
+- Support building for `arm64`/`aarch64` (e.g. AWS Graviton
+  with NVIDIA, such as the `g5g` family) and other
+  architectures by parameterizing the BuildKit target
+  platform, the library copy paths, the `-gencode` target,
+  and the upstream binary download URLs (MediaMTX, Fish,
+  etc.).
+- Add safer secret handling for Twitch stream keys and SRT
+  passphrases through AWS Secrets Manager or SSM Parameter
+  Store.
+- Add a documented path for updating MediaMTX, FFmpeg, CUDA,
+  nv-codec-headers, and Go versions together.
+- Extend the existing CloudFormation infrastructure
+  (`deploy/aws/strimserver-infra.yaml`, which already
+  provisions the security group, IAM instance profile, and
+  optional VPC/subnet) toward a fuller end-to-end provision —
+  or provide equivalent Terraform/CDK — covering S3, the
+  instance lifecycle, and on-box configuration.
+- Provide a packaged deployment for orchestrated
+  environments — e.g. a Helm chart running the stages as
+  Kubernetes pods with the NVIDIA device plugin / CDI.
 
 ## Contributing
 
-Contributions are accepted through pull requests on GitHub: https://github.com/ChronicCmposer/strimserver
+Contributions are accepted through pull requests on GitHub:
+https://github.com/ChronicCmposer/strimserver
 
 Recommended workflow:
 
 1. Fork the repository on GitHub.
 2. Create a feature branch from the default branch:
 
-   ```bash
-   git checkout -b feature/your-change
-   ```
+   ```bash git checkout -b feature/your-change ```
 
 3. Make the change with focused commits.
-4. Test the affected path. Examples include building the strimserver image, running shell scripts with a safe test configuration, validating the SRT test image, or testing EC2 deployment changes against a disposable instance.
-5. Update documentation when behavior, configuration, deployment steps, or defaults change.
-6. Open a pull request against `ChronicCmposer/strimserver` with:
+4. Test the affected path. Examples include building the
+   controller/ffmpeg/mediamtx images, running `make
+   test-controller` and `make check-generated`, running
+   shell scripts with a safe test configuration, validating
+   the SRT test image, or testing EC2 deployment changes
+   against a disposable instance.
+5. Update documentation when behavior, configuration,
+   deployment steps, or defaults change.
+6. Open a pull request against `ChronicCmposer/strimserver`
+with:
    - a summary of the change;
    - the motivation for the change;
    - the test/build/deployment commands that were run;
    - any compatibility or migration notes.
 
-Avoid committing secrets, Twitch stream keys, generated SRT passphrases, local `.env` files, deployment artifacts, container tarballs, or recorded video files.
+Avoid committing secrets, Twitch stream keys, generated SRT
+passphrases, local `.env` files, deployment artifacts,
+container tarballs, or recorded video files.
+
+## Related projects
+
+Core dependencies:
+
+- [MediaMTX](https://github.com/bluenviron/mediamtx) — the
+  media server used for SRT ingest, RTSP routing, the Unix
+  MPEG-TS source, and recording.
+- [FFmpeg](https://github.com/FFmpeg/FFmpeg) — built from
+  source (`release/8.0`) for the normalize and scale/egress
+  stages.
+- [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers)
+  — NVIDIA codec headers enabling NVENC/NVDEC/CUVID in the
+  FFmpeg build.
+- [containerd](https://github.com/containerd/containerd) —
+  the container runtime the controller drives directly via
+  the `containerd/v2` client.
+- [BuildKit](https://github.com/moby/buildkit) — used
+  through `buildctl` to build the OCI images.
+- [Container Device Interface
+  (CDI)](https://github.com/cncf-tags/container-device-interface)
+  — the specification used to inject the NVIDIA GPU and
+  driver libraries into the ffmpeg stages at runtime.
+
+Related / prior art:
+
+- [OHMEED/stable-streaming](https://github.com/OHMEED/stable-streaming)
+  — an all-in-one IRL streaming solution (Go backend + React
+  frontend) covering multi-destination streaming,
+  bitrate-based automatic scene switching, and real-time
+  monitoring. A useful reference point for the broader
+  "self-hosted streaming relay" problem space.
 
 ## License
 
-This project is licensed under the MIT License. See `LICENSE` for details.
+This project is licensed under the MIT License. See
+`LICENSE` for details.

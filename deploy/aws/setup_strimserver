@@ -2,79 +2,144 @@
 import os
 import subprocess
 import sys
+from urllib.parse import urlparse
 
-# def run_ssh_commands(hostname, username, commands):
+
 def ssh_run(hostname, username, port, cmd, capture=False):
     ssh_cmd = os.environ.get("SSH_CMD", "ssh")
-    # for cmd in commands:
-    full_cmd = (
-        ssh_cmd.split() + [
-            "-t",  # allocate a TTY so sudo can run without prompting
-            f"{username}@{hostname}",
-            "-p",
-            f"{port}",
-            cmd
-        ]
-    )
+    full_cmd = ssh_cmd.split() + ["-t", f"{username}@{hostname}", "-p", f"{port}", cmd]
     print(f"\n>>> Running: {cmd}")
     try:
-        result = subprocess.run(
-            full_cmd,
-            text=True,
-            check=True,
-            capture_output=capture
-        )
+        result = subprocess.run(full_cmd, text=True, check=True, capture_output=capture)
     except FileNotFoundError:
         print("Error: ssh client not found. Make sure OpenSSH is installed.", file=sys.stderr)
         sys.exit(1)
-
     print(f"[exit status: {result.returncode}]")
-    # if result.stdout:
-    #     print("--- STDOUT ---")
-    #     print(result.stdout.strip())
-    # if result.stderr:
-    #     print("--- STDERR ---")
-    #     print(result.stderr.strip())
-
     return result
+
 
 def run_ssh_commands(hostname, username, port, commands):
     for cmd in commands:
         ssh_run(hostname, username, port, cmd, capture=False)
 
+
+def scp_to_remote(local_path, hostname, username, port, remote_path):
+    scp_cmd = os.environ.get("SCP_CMD", "scp")
+    # scp uses -P (uppercase) for the port, unlike ssh's -p.
+    full_cmd = scp_cmd.split() + ["-P", f"{port}", local_path, f"{username}@{hostname}:{remote_path}"]
+    print(f"\n>>> Uploading: {local_path} -> {username}@{hostname}:{remote_path}")
+    try:
+        subprocess.run(full_cmd, text=True, check=True)
+    except FileNotFoundError:
+        print("Error: scp client not found. Make sure OpenSSH is installed.", file=sys.stderr)
+        sys.exit(1)
+
+
+def resolve_source():
+    """Where the deployment tar comes from.
+
+    Precedence:
+      1. DEPLOYMENT_SRC -- s3://..., https://..., http://..., or a local path
+      2. legacy $S3_BUCKET/$DEPLOYMENT
+    """
+    deployment = os.environ.get("DEPLOYMENT", "strimserver-deployment.tar")
+    src = os.environ.get("DEPLOYMENT_SRC", "").strip()
+    if not src:
+        bucket = os.environ.get("S3_BUCKET", "").strip()
+        if not bucket or "<bucket-name>" in bucket:
+            sys.exit(
+                "No deployment source. Set DEPLOYMENT_SRC to an s3:// URI, an "
+                "https:// URL (e.g. a GitHub release asset), or a local file path."
+            )
+        src = f"{bucket}/{deployment}"
+    return src, deployment
+
+def resolve_twitch_key():
+    """Operator-supplied Twitch stream key (secret), or None.
+
+    Precedence: TWITCH_STREAM_KEY env, then TWITCH_STREAM_KEY_FILE contents.
+    """
+    key = os.environ.get("TWITCH_STREAM_KEY", "").strip()
+    if key:
+        return key
+    key_file = os.environ.get("TWITCH_STREAM_KEY_FILE", "").strip()
+    if key_file:
+        path = os.path.expanduser(key_file)
+        if not os.path.isfile(path):
+            sys.exit(f"TWITCH_STREAM_KEY_FILE not found: {path}")
+        with open(path) as fh:
+            return fh.read().strip()
+    return None
+
+
+def transfer_twitch_key(key, hostname, username, port):
+    """Write the key to a local 0600 temp file, scp it to the box, then scrub locally."""
+    import stat
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="twitch-key-")
+    try:
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+        with os.fdopen(fd, "w") as fh:
+            fh.write(key + "\n")
+        scp_to_remote(tmp, hostname, username, port, "/mnt/nvme/twitch-stream-key")
+    finally:
+        os.remove(tmp)
+    ssh_run(hostname, username, port, "chmod 600 /mnt/nvme/twitch-stream-key")
+
 if __name__ == "__main__":
-    HOST = os.environ.get("SSH_HOST", default="strimserver")
-    USER = os.environ.get("SSH_USER", default="ec2-user")
-    PORT = 22
-    S3_BUCKET = os.environ.get("S3_BUCKET", default="s3://<bucket-name>")
-    DEPLOYMENT = os.environ.get("DEPLOYMENT", default="strimserver-deployment.tar")
+    HOST = os.environ.get("SSH_HOST", "strimserver")
+    USER = os.environ.get("SSH_USER", "ec2-user")
+    PORT = int(os.environ.get("SSH_PORT", "22"))
+    SHA256 = os.environ.get("DEPLOYMENT_SHA256", "").strip()
+
+    SRC, DEPLOYMENT = resolve_source()
+    REMOTE_TAR = f"/mnt/nvme/{DEPLOYMENT}"
+    scheme = urlparse(SRC).scheme  # 's3', 'https', 'http', or '' for a local path
 
     # select nvme drive
     r = ssh_run(HOST, USER, PORT, "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT", capture=True)
     print("\nRemote disks:\n")
     print(r.stdout)
-    dev = input("Enter the device to format [/dev/nvme1n1]: ").strip()
-    dev = dev or "/dev/nvme1n1" # default value
+    dev = input("Enter the device to format [/dev/nvme1n1]: ").strip() or "/dev/nvme1n1"
     if not dev.startswith("/dev/"):
-         dev = "/dev/" + dev
+        dev = "/dev/" + dev
 
-
-    CMDS = [
-
-        # nvme ephemeral storage
+    # 1) format + mount nvme, make it writable by the deploy user
+    run_ssh_commands(HOST, USER, PORT, [
         f"sudo mkfs.ext4 -F {dev}",
         "sudo mkdir -p /mnt/nvme",
         f"sudo mount {dev} /mnt/nvme",
-        "sudo chown ec2-user:ec2-user /mnt/nvme",
-        
-        # A1111 insecure extensions var
-        # f"printf \"A1111_INSECURE_EXTENSIONS={A1111_INSECURE_EXTENSIONS}\n\n\"| sudo tee /mnt/nvme/A1111-env",
-        f"aws s3 cp {S3_BUCKET}/{DEPLOYMENT} /mnt/nvme/",
+        f"sudo chown {USER}:{USER} /mnt/nvme",
+    ])
+
+    # 2) place the deployment tar at REMOTE_TAR, by source type
+    if scheme == "s3":
+        ssh_run(HOST, USER, PORT, f"aws s3 cp {SRC} {REMOTE_TAR}")
+    elif scheme in ("http", "https"):
+        ssh_run(HOST, USER, PORT, f"curl -fSL -o {REMOTE_TAR} {SRC}")
+    else:  # local path -> upload from the operator machine
+        local_path = os.path.expanduser(SRC)
+        if not os.path.isfile(local_path):
+            sys.exit(f"Local deployment file not found: {local_path}")
+        scp_to_remote(local_path, HOST, USER, PORT, REMOTE_TAR)
+
+    # 2b) optional integrity check (works for all source types)
+    if SHA256:
+        ssh_run(HOST, USER, PORT, f"echo '{SHA256}  {REMOTE_TAR}' | sha256sum --check -")
+
+    # 2c) transfer the operator's Twitch stream key (secret), if provided
+    twitch_key = resolve_twitch_key()
+    if twitch_key:
+        transfer_twitch_key(twitch_key, HOST, USER, PORT)
+    else:
+        print("\nNote: no TWITCH_STREAM_KEY provided; deploying without an egress key.\n"
+              "Ingest/normalize/offline will work; set the key later for Twitch egress.\n")
+
+    # 3) extract + hand off to deploy.sh
+    run_ssh_commands(HOST, USER, PORT, [
         f"cd /mnt/nvme && tar -xvf {DEPLOYMENT}",
-        f"cd /mnt/nvme && rm -rf {DEPLOYMENT}",
+        f"cd /mnt/nvme && rm -f {DEPLOYMENT}",
         "cd /mnt/nvme && chmod +x deploy.sh",
         "cd /mnt/nvme && ./deploy.sh",
+    ])
 
-    ]
-
-    run_ssh_commands(HOST, USER, PORT, CMDS)

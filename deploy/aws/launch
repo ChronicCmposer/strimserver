@@ -1,53 +1,223 @@
 #!/usr/bin/env python3
-import subprocess
+"""Launch an ephemeral strimserver GPU instance with run-instances.
+
+No EC2 launch template required. Durable infrastructure (security group + IAM
+instance profile) comes from the CloudFormation stack in
+deploy/aws/strimserver-infra.yaml; this script reads that stack's
+outputs. Any output can be overridden with an env var (handy for Terraform or
+manual setups).
+
+Networking: works in accounts with NO default VPC. If SUBNET_ID is unset, a
+subnet is auto-selected from the security group's VPC (preferring a public one,
+i.e. MapPublicIpOnLaunch=true). A public IP is always forced on the instance's
+network interface so SSH / SRT ingest / the controller port are reachable. The
+chosen subnet must still have a route to an internet gateway.
+
+Env vars (typically sourced from deploy/aws/.env):
+  CFN_STACK_NAME        CloudFormation stack name (default: strimserver)
+  PROJECT_NAME          tag:Project / Name value (default: stack output, else strimserver)
+  SECURITY_GROUP_ID     override the stack's SecurityGroupId output
+  IAM_INSTANCE_PROFILE  override the stack's InstanceProfileName output (profile NAME)
+  KEY_NAME              EC2 key pair name for SSH (required)
+  SUBNET_ID             subnet in the SG's VPC (optional; auto-selected if unset)
+  INSTANCE_TYPE         default g6.xlarge (T4 / sm_75 - matches the default FFmpeg build)
+  AMI_ID                explicit AMI id (default: resolve:ssm:<DLAMI_SSM_PARAM>)
+  DLAMI_SSM_PARAM       SSM path to the AL2023 GPU DLAMI (sensible default below)
+  AWS_REGION            optional; otherwise your CLI's configured region is used
+"""
 import argparse
+import json
+import os
+import subprocess
+import sys
 
-def launch_instance(instance_type=None, no_spot=False):
+# Public SSM parameter for the latest x86_64 Amazon Linux 2023 GPU DLAMI
+# ("Deep Learning Base OSS Nvidia Driver GPU AMI"): ships the NVIDIA driver,
+# containerd, and the NVIDIA container toolkit (CDI) strimserver needs.
+DEFAULT_DLAMI_SSM_PARAM = (
+    "/aws/service/deeplearning/ami/x86_64/"
+    "base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
+)
 
-    if no_spot:
-        launch_template_name = "sd-experiment-no-spot"
+
+def aws(args, capture=True):
+    region = os.environ.get("AWS_REGION", "").strip()
+    cmd = ["aws"] + (["--region", region] if region else []) + args
+    return subprocess.run(cmd, text=True, check=True, capture_output=capture)
+
+
+def stack_output(stack_name, key):
+    try:
+        r = aws([
+            "cloudformation", "describe-stacks",
+            "--stack-name", stack_name,
+            "--query", f"Stacks[0].Outputs[?OutputKey=='{key}'].OutputValue",
+            "--output", "text",
+        ])
+    except subprocess.CalledProcessError:
+        return ""
+    val = (r.stdout or "").strip()
+    return "" if val == "None" else val
+
+
+def resolve_infra():
+    stack = os.environ.get("CFN_STACK_NAME", "strimserver")
+    sg = os.environ.get("SECURITY_GROUP_ID", "").strip() or stack_output(stack, "SecurityGroupId")
+    profile = os.environ.get("IAM_INSTANCE_PROFILE", "").strip() or stack_output(stack, "InstanceProfileName")
+    project = (os.environ.get("PROJECT_NAME", "").strip()
+               or stack_output(stack, "ProjectName") or "strimserver")
+    missing = [n for n, v in (("SECURITY_GROUP_ID", sg),
+                              ("IAM_INSTANCE_PROFILE", profile)) if not v]
+    if missing:
+        sys.exit(
+            "Could not resolve " + ", ".join(missing) + ".\n"
+            f"Deploy the CloudFormation stack '{stack}' "
+            "(deploy/aws/strimserver-infra.yaml), or set these env vars."
+        )
+    return sg, profile, project
+
+
+def sg_vpc_id(sg_id):
+    r = aws(["ec2", "describe-security-groups", "--group-ids", sg_id,
+             "--query", "SecurityGroups[0].VpcId", "--output", "text"])
+    val = (r.stdout or "").strip()
+    return "" if val == "None" else val
+
+
+def resolve_subnet(sg_id):
+    """Return a subnet id in the SG's VPC. Prefer a public subnet; warn otherwise.
+
+    Honors SUBNET_ID if set. Works without a default VPC.
+    """
+    subnet = os.environ.get("SUBNET_ID", "").strip()
+    if subnet:
+        return subnet
+
+    # If the stack created its own networking (CreateNetwork=true), it exports the
+    # public subnet id - use it directly rather than discovering.
+    stack = os.environ.get("CFN_STACK_NAME", "strimserver")
+    managed = stack_output(stack, "SubnetId")
+    if managed:
+        print(f"using managed subnet {managed} from stack '{stack}'")
+        return managed
+
+    vpc = sg_vpc_id(sg_id)
+    if not vpc:
+        sys.exit("Could not determine the security group's VPC; set SUBNET_ID explicitly.")
+
+    r = aws(["ec2", "describe-subnets",
+             "--filters", f"Name=vpc-id,Values={vpc}",
+             "--query", "Subnets[].[SubnetId,MapPublicIpOnLaunch,AvailabilityZone]",
+             "--output", "text"])
+    rows = [line.split("\t") for line in (r.stdout or "").strip().splitlines() if line.strip()]
+    if not rows:
+        sys.exit(
+            f"No subnets found in VPC {vpc}. Create a public subnet (with a route "
+            f"to an internet gateway) and set SUBNET_ID, or re-run with one."
+        )
+
+    public = [row for row in rows if len(row) > 1 and row[1].lower() == "true"]
+    if public:
+        chosen = public[0][0]
+        print(f"auto-selected public subnet {chosen} (VPC {vpc})")
     else:
-        launch_template_name = "sd-exp-deployment"
+        chosen = rows[0][0]
+        print(f"WARNING: no public subnet (MapPublicIpOnLaunch=true) in VPC {vpc}; "
+              f"using {chosen}.\n"
+              f"         SSH / SRT ingest / controller port need a subnet with a "
+              f"route to an internet gateway.\n"
+              f"         Set SUBNET_ID to a public subnet if launch succeeds but the "
+              f"instance is unreachable.")
+    return chosen
 
-    command = [
-        "aws", "ec2", "run-instances",
-        "--launch-template", f"LaunchTemplateName={launch_template_name}"
+
+def launch_instance(instance_type, use_spot, wait):
+    sg, profile, project = resolve_infra()
+
+    key_name = os.environ.get("KEY_NAME", "").strip()
+    if not key_name:
+        sys.exit("KEY_NAME is required (an EC2 key pair name for SSH access).")
+
+    subnet = resolve_subnet(sg)
+
+    ami = os.environ.get("AMI_ID", "").strip()
+    if not ami:
+        ssm_param = os.environ.get("DLAMI_SSM_PARAM", DEFAULT_DLAMI_SSM_PARAM)
+        ami = f"resolve:ssm:{ssm_param}"
+
+    # Fold subnet + security group + public-IP request into a single primary NIC.
+    # AWS forbids combining --associate-public-ip-address (or this NIC form) with
+    # top-level --subnet-id / --security-group-ids, so they live here instead.
+    nic = (f"DeviceIndex=0,SubnetId={subnet},Groups={sg},"
+           f"AssociatePublicIpAddress=true")
+
+    cmd = [
+        "ec2", "run-instances",
+        "--image-id", ami,
+        "--instance-type", instance_type,
+        "--count", "1",
+        "--key-name", key_name,
+        "--iam-instance-profile", f"Name={profile}",
+        # Enforce IMDSv2 (imdslib.sh requests a token).
+        "--metadata-options", "HttpTokens=required,HttpEndpoint=enabled",
+        "--network-interfaces", nic,
+        "--tag-specifications",
+        f"ResourceType=instance,Tags=[{{Key=Project,Value={project}}},{{Key=Name,Value={project}}}]",
     ]
 
-    if instance_type:
-        command.extend(["--instance-type", instance_type])
+    if use_spot:
+        # Instance-store NVMe can't be stopped/hibernated, so interruption must terminate.
+        cmd += ["--instance-market-options", json.dumps({
+            "MarketType": "spot",
+            "SpotOptions": {
+                "SpotInstanceType": "one-time",
+                "InstanceInterruptionBehavior": "terminate",
+            },
+        })]
 
-    try:        # start the aws process, capturing its stdout
-        aws_proc = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+    cmd += ["--query", "Instances[0].InstanceId", "--output", "text"]
 
-        # pipe that stdout into jq
-        jq_proc = subprocess.Popen(
-            ["jq", "."],
-            stdin=aws_proc.stdout,
-            text=True
-        )
-
-        # close aws_proc stdout in parent so jq gets EOF
-        aws_proc.stdout.close() 
-
-        # wait for jq to finish (and aws if it hasn’t already)
-        jq_proc.communicate()
-        rc = aws_proc.wait()
-        if rc != 0:
-            err = aws_proc.stderr.read().strip()
-            print(f"An error occurred: {err}")
+    try:
+        r = aws(cmd)
     except subprocess.CalledProcessError as e:
-        print(f"An error occurred: {e.stderr}")
+        sys.exit(f"run-instances failed: {(e.stderr or '').strip()}")
+
+    instance_id = (r.stdout or "").strip()
+    print(f"launched: {instance_id}  ({instance_type}, {'spot' if use_spot else 'on-demand'})")
+
+    if not wait:
+        print("Tip: pass --wait to block until running and print the public IP + next steps.")
+        return
+
+    print("waiting for running state...")
+    aws(["ec2", "wait", "instance-running", "--instance-ids", instance_id], capture=False)
+    r = aws([
+        "ec2", "describe-instances", "--instance-ids", instance_id,
+        "--query", "Reservations[0].Instances[0].PublicIpAddress", "--output", "text",
+    ])
+    public_ip = (r.stdout or "").strip()
+    if not public_ip or public_ip == "None":
+        print("\nInstance is running but has no public IP. The chosen subnet is "
+              "likely private (no internet gateway route). Set SUBNET_ID to a "
+              "public subnet and relaunch.")
+        return
+    print(f"\npublic ip: {public_ip}\n")
+    print("next steps:")
+    print(f"  SSH_HOST={public_ip} deploy/aws/setup_strimserver")
+    print(f"  # or add '{public_ip} strimserver' to /etc/hosts, then run deploy/aws/setup_strimserver\n")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--type', default='g4dn.xlarge', help='Specify EC2 instance type')
-    parser.add_argument('--no-spot', action='store_true', help='Specify EC2 instance type')
+    parser = argparse.ArgumentParser(
+        description="Launch a strimserver GPU instance (no launch template).")
+    parser.add_argument(
+        "--type", default=os.environ.get("INSTANCE_TYPE", "g6.xlarge"),
+        help="EC2 instance type (default g6.xlarge: T4/sm_75, matches the default FFmpeg build)")
+    parser.add_argument("--no-spot", action="store_true",
+                        help="Use an on-demand instance instead of spot.")
+    parser.add_argument("--wait", action="store_true",
+                        help="Wait for running state and print the public IP + next steps.")
     args = parser.parse_args()
 
-    launch_instance(instance_type=args.type, no_spot=args.no_spot)
+    launch_instance(instance_type=args.type, use_spot=not args.no_spot, wait=args.wait)
+

@@ -1,0 +1,343 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  strimserver durable infrastructure: a security group and an IAM instance
+  profile for ephemeral GPU streaming instances, with an OPTIONAL self-contained
+  networking layer (VPC + public subnet + internet gateway). Instances are
+  created and terminated imperatively by deploy/aws/launch and
+  deploy/aws/terminate, which read this stack's outputs. No EC2 launch template
+  is created or required.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: strimserver
+    Description: >
+      Name/tag prefix. launch tags instances with Project=<ProjectName> and
+      terminate matches on that tag. Keep it stable across launch/terminate.
+    AllowedPattern: "[A-Za-z0-9-]+"
+
+  CreateNetwork:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      true  -> create a dedicated VPC + public subnet + internet gateway for
+               strimserver (use this if you have no default VPC or no suitable
+               public subnet). VpcId is ignored.
+      false -> use the existing VpcId you supply.
+
+  VpcId:
+    Type: String
+    Default: ""
+    Description: >
+      Existing VPC id for the security group when CreateNetwork=false. Leave
+      empty when CreateNetwork=true. Required if CreateNetwork=false.
+    AllowedPattern: '^(vpc-[0-9a-f]+)?$'
+    ConstraintDescription: Must be a vpc-... id, or empty when CreateNetwork=true.
+
+  VpcCidr:
+    Type: String
+    Default: "10.0.0.0/16"
+    Description: CIDR for the created VPC (only used when CreateNetwork=true).
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+
+  SubnetCidr:
+    Type: String
+    Default: "10.0.0.0/24"
+    Description: CIDR for the created public subnet (only used when CreateNetwork=true).
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+
+  OperatorCidr:
+    Type: String
+    Description: >
+      CIDR allowed to reach SSH (22) and the controller HTTP/WebSocket port.
+      Use your operator machine's public IP as a /32 (e.g. 203.0.113.4/32).
+      Avoid 0.0.0.0/0 here.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Must be a valid IPv4 CIDR, e.g. 203.0.113.4/32
+
+  IngestCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >
+      CIDR allowed to reach the SRT ingest UDP port. Encoder IPs are often
+      dynamic and SRT is passphrase-encrypted, so the default is open; tighten
+      to your encoder's IP if it is static.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+
+  ControllerPort:
+    Type: Number
+    Default: 4000
+    MinValue: 1
+    MaxValue: 65535
+    Description: Must match CONTROLLER_HTTP_PORT in strimserver.env.
+
+  SrtPort:
+    Type: Number
+    Default: 9000
+    MinValue: 1
+    MaxValue: 65535
+    Description: Must match STRIMSERVER_SRT_PORT in strimserver.env.
+
+  DeploymentBucketName:
+    Type: String
+    Default: ""
+    Description: >
+      Optional S3 bucket name (no s3:// prefix) holding
+      strimserver-deployment.tar. If set, the instance role is granted read
+      access. Leave empty when deploying via an https:// release asset or a
+      local file (see DEPLOYMENT_SRC).
+
+  EnableSessionManager:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Attach AmazonSSMManagedInstanceCore so the instance is reachable through
+      SSM Session Manager as a fallback if SSH is misconfigured.
+
+  EnableExperimentalSsh:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Open the experimental OpenSSH port (from OperatorCidr). Set this to true
+      only when the deployment bundle is built/deployed with
+      ENABLE_EXPERIMENTAL_OPENSSH=true (feature-toggles.env); otherwise the port
+      is opened but nothing listens on it.
+
+  ExperimentalSshPort:
+    Type: Number
+    Default: 2222
+    MinValue: 1
+    MaxValue: 65535
+    Description: >
+      Port the experimental sshd binds (must match 'Port' in
+      tools/openssh/sshd_config; default 2222). Only used when
+      EnableExperimentalSsh=true.
+
+# Guard: if you are not creating a network, you must supply an existing VPC.
+Rules:
+  RequireVpcWhenNotCreating:
+    RuleCondition:
+      Fn::Equals: [!Ref CreateNetwork, "false"]
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Equals: [!Ref VpcId, ""]
+        AssertDescription: >
+          VpcId is required when CreateNetwork=false. Set CreateNetwork=true to
+          have the stack create a VPC for you, or provide an existing VpcId.
+
+Conditions:
+  CreateNet: !Equals [!Ref CreateNetwork, "true"]
+  HasBucket: !Not [!Equals [!Ref DeploymentBucketName, ""]]
+  UseSsm: !Equals [!Ref EnableSessionManager, "true"]
+  EnableExpSsh: !Equals [!Ref EnableExperimentalSsh, "true"]
+
+Resources:
+  # ----------------------------------------------------------------------------
+  # Optional networking (created only when CreateNetwork=true)
+  # ----------------------------------------------------------------------------
+  ManagedVpc:
+    Type: AWS::EC2::VPC
+    Condition: CreateNet
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  ManagedIgw:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreateNet
+    Properties:
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  ManagedIgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateNet
+    Properties:
+      VpcId: !Ref ManagedVpc
+      InternetGatewayId: !Ref ManagedIgw
+
+  ManagedSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: CreateNet
+    Properties:
+      VpcId: !Ref ManagedVpc
+      CidrBlock: !Ref SubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-subnet"
+
+  ManagedRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateNet
+    Properties:
+      VpcId: !Ref ManagedVpc
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-rt"
+
+  ManagedDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateNet
+    DependsOn: ManagedIgwAttachment
+    Properties:
+      RouteTableId: !Ref ManagedRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ManagedIgw
+
+  ManagedSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateNet
+    Properties:
+      SubnetId: !Ref ManagedSubnet
+      RouteTableId: !Ref ManagedRouteTable
+
+  # ----------------------------------------------------------------------------
+  # Security group (always) - lives in the managed VPC or your existing one
+  # ----------------------------------------------------------------------------
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} ingress/egress for GPU streaming instances"
+      VpcId: !If [CreateNet, !Ref ManagedVpc, !Ref VpcId]
+      SecurityGroupIngress:
+        - Description: SSH from operator
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref OperatorCidr
+        - Description: Controller HTTP/WebSocket from operator
+          IpProtocol: tcp
+          FromPort: !Ref ControllerPort
+          ToPort: !Ref ControllerPort
+          CidrIp: !Ref OperatorCidr
+        - Description: SRT ingest (UDP) from encoder
+          IpProtocol: udp
+          FromPort: !Ref SrtPort
+          ToPort: !Ref SrtPort
+          CidrIp: !Ref IngestCidr
+      SecurityGroupEgress:
+        # Allow-all egress is required for: S3 bundle pull, RTMP to Twitch,
+        # dnf package installs during deploy, and GitHub release downloads.
+        - Description: All outbound
+          IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub "${ProjectName}-sg"
+
+  # ----------------------------------------------------------------------------
+  # IAM instance profile (always)
+  # ----------------------------------------------------------------------------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        !If
+          - UseSsm
+          - - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+          - !Ref AWS::NoValue
+      Policies:
+        !If
+          - HasBucket
+          - - PolicyName: DeploymentBucketRead
+              PolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                  - Effect: Allow
+                    Action: ["s3:GetObject"]
+                    Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}/*"
+                  - Effect: Allow
+                    Action: ["s3:ListBucket"]
+                    Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}"
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # Optional: experimental OpenSSH port (separate sshd, see tools/openssh).
+  # Added as a standalone ingress rule so it is cleanly conditional and does
+  # not collide with the inline rules on the security group above.
+  ExperimentalSshIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: EnableExpSsh
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      Description: Experimental OpenSSH from operator
+      IpProtocol: tcp
+      FromPort: !Ref ExperimentalSshPort
+      ToPort: !Ref ExperimentalSshPort
+      CidrIp: !Ref OperatorCidr
+
+Outputs:
+  SecurityGroupId:
+    Description: Read automatically by launch; folds into the instance's network interface.
+    Value: !Ref InstanceSecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-SecurityGroupId"
+
+  InstanceProfileName:
+    Description: Pass to run-instances as --iam-instance-profile Name=<this> (read automatically).
+    Value: !Ref InstanceProfile
+    Export:
+      Name: !Sub "${AWS::StackName}-InstanceProfileName"
+
+  InstanceRoleArn:
+    Description: Informational - the IAM role backing the instance profile.
+    Value: !GetAtt InstanceRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-InstanceRoleArn"
+
+  ProjectName:
+    Description: Tag value launch applies and terminate matches on.
+    Value: !Ref ProjectName
+    Export:
+      Name: !Sub "${AWS::StackName}-ProjectName"
+
+  VpcId:
+    Description: VPC the security group lives in (managed or existing).
+    Value: !If [CreateNet, !Ref ManagedVpc, !Ref VpcId]
+    Export:
+      Name: !Sub "${AWS::StackName}-VpcId"
+
+  SubnetId:
+    Condition: CreateNet
+    Description: >
+      Public subnet created for strimserver. launch reads this automatically;
+      you can also set it as SUBNET_ID in deploy/aws/.env.
+    Value: !Ref ManagedSubnet
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetId"

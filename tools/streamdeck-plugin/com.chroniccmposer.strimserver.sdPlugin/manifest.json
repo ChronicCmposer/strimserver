@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "UUID": "com.chroniccmposer.strimserver",
+  "Name": "Strimserver",
+  "Version": "0.1.0.0",
+  "Author": "chroniccmposer",
+  "Description": "Control the strimserver pipeline from a Stream Deck.",
+  "Category": "strimserver",
+  "CategoryIcon": "imgs/plugin/category",
+  "Icon": "imgs/plugin/marketplace",
+  "CodePath": "bin/plugin.js",
+  "SDKVersion": 2,
+  "Software": { "MinimumVersion": "6.6" },
+  "Nodejs": { "Version": "24", "Debug": "enabled" },
+  "OS": [{ "Platform": "mac", "MinimumVersion": "13" }],
+  "Actions": [
+    {
+      "Name": "Toggle Egress",
+      "UUID": "com.chroniccmposer.strimserver.egress",
+      "Icon": "imgs/actions/egress/icon",
+      "Tooltip": "Start/stop the Twitch egress stage.",
+      "Controllers": ["Keypad"],
+      "DisableAutomaticStates": true,
+      "States": [
+        { "Image": "imgs/actions/egress/off", "TitleAlignment": "bottom" },
+        { "Image": "imgs/actions/egress/on",  "TitleAlignment": "bottom" }
+      ]
+    }
+  ]
+}

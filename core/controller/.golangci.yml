@@ -1,0 +1,10 @@
+linters:
+  enable:
+    - errcheck      # checks for unchecked errors
+    - govet         # reports suspicious constructs
+    - staticcheck   # comprehensive static analysis
+    - unused        # finds unused code
+    - ineffassign   # detects ineffectual assignments
+    - gocritic      # opinionated checks
+    - revive        # fast, configurable, drop-in golint replacement
+

@@ -1,0 +1,25 @@
+{
+  "name": "strimserver-streamdeck",
+  "version": "0.1.0",
+  "description": "Stream Deck control for the strimserver controller",
+  "type": "module",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c -w"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@elgato/streamdeck": "^2"
+  },
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^28",
+    "@rollup/plugin-node-resolve": "^16",
+    "@rollup/plugin-typescript": "^12",
+    "@types/node": "^24.13.2",
+    "rollup": "^4",
+    "tslib": "^2",
+    "typescript": "^5"
+  }
+}

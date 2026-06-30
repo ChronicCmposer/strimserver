@@ -33,6 +33,33 @@ mkdir -p /mnt/nvme/bin
 mv /mnt/nvme/strimserver.env /mnt/nvme/config/strimserver.env
 mv /mnt/nvme/mediamtx.yaml.template /mnt/nvme/config/mediamtx.yaml.template
 mv /mnt/nvme/transcode.sh /mnt/nvme/bin/transcode.sh
+mv /mnt/nvme/notify.sh /mnt/nvme/bin/notify.sh
+
+chmod +x /mnt/nvme/bin/transcode.sh
+chmod +x /mnt/nvme/bin/notify.sh
+
+# --- inject Twitch stream key ------
+ENV_FILE=/mnt/nvme/config/strimserver.env
+KEY_FILE=/mnt/nvme/twitch-stream-key
+if [ -s "$KEY_FILE" ]; then
+   printf "injecting twitch stream key...\n"
+   TWITCH_STREAM_KEY="$(tr -d '\r\n' < "$KEY_FILE")"
+   tmp="$(mktemp)"
+   # drop any existing assignment, then append the injected one
+   grep -v '^[[:space:]]*TWITCH_STREAM_KEY=' "$ENV_FILE" > "$tmp" || true
+   printf 'TWITCH_STREAM_KEY="%s"\n' "$TWITCH_STREAM_KEY" >> "$tmp"
+   mv "$tmp" "$ENV_FILE"
+   chmod 600 "$ENV_FILE"
+   # scrub the transfer file
+   if command -v shred >/dev/null 2>&1; then shred -u "$KEY_FILE"; else rm -f "$KEY_FILE"; fi
+   printf "twitch stream key injected into %s\n" "$ENV_FILE"
+else
+   printf "\n*** WARNING: no Twitch stream key provided. ***\n"
+   printf "Ingest, normalize, and the offline fallback will work, but egress to\n"
+   printf "Twitch will fail when toggled until TWITCH_STREAM_KEY is set in\n"
+   printf "%s.\n\n" "$ENV_FILE"
+fi
+# ------------------------------------------------------------------------------
 
 # containerd
 printf "configuring containerd...\n"
@@ -52,8 +79,7 @@ printf "installing systemd service files...\n"
 SERVICE_FILES_TARGET=/usr/local/lib/systemd/system
 set -x
 
-sudo install -D -t $SERVICE_FILES_TARGET \
-	/mnt/nvme/strimserver.service
+sudo install -D -t $SERVICE_FILES_TARGET /mnt/nvme/strimserver.service
 
 rm -f /mnt/nvme/strimserver.service
 
@@ -63,9 +89,12 @@ printf "systemd service files installed!\n"
 
 # import images
 printf "importing images...\n"
+CONTAINERD_NAMESPACE="strimserver"
 set -x
-sudo ctr i import strimserver-container.tar
-rm -f strimserver-container.tar
+sudo ctr -n $CONTAINERD_NAMESPACE i import controller-container.tar
+sudo ctr -n $CONTAINERD_NAMESPACE i import ffmpeg-container.tar
+sudo ctr -n $CONTAINERD_NAMESPACE i import mediamtx-container.tar
+rm -f {controller,ffmpeg,mediamtx}-container.tar
 set +x
 printf "image import started!\n"
 
@@ -82,12 +111,23 @@ rm -f /mnt/nvme/fish-deploy.sh
 printf "installing remaining tools...\n"
 sudo dnf install -y htop
 
-if [ "$ENABLE_EXPERIMENTAL_OPENSSH" = "true" ]; then
-   sudo dnf install -y /mnt/nvme/openssh-experimental.rpm
-   rm -f /mnt/nvme/openssh-experimental.rpm
+enable_openssh="${ENABLE_EXPERIMENTAL_OPENSSH:-false}"
+enable_openssh="${enable_openssh//\"/}"   # drop double quotes
+enable_openssh="${enable_openssh//\'/}"   # drop single quotes
+enable_openssh="${enable_openssh,,}"      # lowercase (bash 4+)
 
-   sudo /usr/local/bin/ssh-keygen -A
-   sudo /usr/local/sbin/sshd
+if [ "$enable_openssh" = "true" ]; then
+   if [ -f /mnt/nvme/openssh-experimental.rpm ]; then
+      sudo dnf install -y /mnt/nvme/openssh-experimental.rpm
+      rm -f /mnt/nvme/openssh-experimental.rpm
+
+      sudo /usr/local/bin/ssh-keygen -A
+      sudo /usr/local/sbin/sshd
+   else
+      printf "\n*** WARNING: ENABLE_EXPERIMENTAL_OPENSSH is true but\n"
+      printf "openssh-experimental.rpm is not in this bundle; skipping.\n"
+      printf "Rebuild with the toggle enabled so the RPM gets packaged. ***\n\n"
+   fi
 fi
 
 # put other package installations here

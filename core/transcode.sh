@@ -1,10 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
 set -xeuo pipefail
-FFMPEG="/usr/local/bin/ffmpeg"
+FFMPEG="/ffmpeg"
 
 set -a
-. /opt/strimserver/config/strimserver.env
+. /strimserver.env
 set +a
 
 # loglevel is a string or a number containing one of the following values:
@@ -35,6 +35,8 @@ set +a
 #
 # ‘trace, 56’
 : "${FFMPEG_LOG_LEVEL:?FFMPEG_LOG_LEVEL is not set}"
+: "${FFMPEG_NICE:?FFMPEG_NICE is not set}"
+
 
 : "${STRIMSERVER_RTSP_PORT:?STRIMSERVER_RTSP_PORT is not set}"
 
@@ -45,7 +47,7 @@ set +a
 INGRESS0_PATH="ingress0"
 NORMALIZED_PATH="normalized"
 
-RTSP_READ_URL_TEMPLATE="rtsp://localhost:$STRIMSERVER_RTSP_PORT/%s"
+RTSP_READ_URL_TEMPLATE="rtsp://127.0.0.1:$STRIMSERVER_RTSP_PORT/%s"
 
 INGRESS0_READ_URL="$(printf "$RTSP_READ_URL_TEMPLATE" "$INGRESS0_PATH")"
 
@@ -71,7 +73,7 @@ normalize() {
 
    AUDIO_FILTER="aresample=out_sample_rate=48000:out_sample_fmt=s16:out_chlayout=stereo"
 
-   exec "$FFMPEG" \
+   exec nice -n "$FFMPEG_NICE" "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -noauto_conversion_filters \
      -init_hw_device cuda=strim_gpu:0 \
@@ -117,7 +119,6 @@ normalize() {
      -avioflags direct \
      -f mpegts \
      "$OUTPUT_SOCKET_URL"
-
 }
 
 
@@ -126,11 +127,18 @@ scale_and_egress() {
    : "${TWITCH_INGEST_SERVER:?TWITCH_INGEST_SERVER is not set (e.g. ingest.global-contribute.live-video.net)}"
    : "${TWITCH_STREAM_KEY:?TWITCH_STREAM_KEY is not set - you should get this from twitch...}"
    : "${BANDWIDTH_TEST:?BANDWIDTH_TEST is not set}"
-   
-   case "${BANDWIDTH_TEST,,}" in
-     1|true|yes|y|on)   BW_PARAM="?bandwidthtest=true" ;;
-     0|false|no|n|off|"") BW_PARAM="" ;;
-     *) echo "Invalid BANDWIDTH_TEST: '$BANDWIDTH_TEST' (use true/false)"; exit 2 ;;
+
+   case "${BANDWIDTH_TEST:-}" in
+     1|true|TRUE|True|yes|YES|Yes|y|Y|on|ON|On)
+       BW_PARAM="?bandwidthtest=true"
+       ;;
+     0|false|FALSE|False|no|NO|No|n|N|off|OFF|Off|"")
+       BW_PARAM=""
+       ;;
+     *)
+       echo "Invalid BANDWIDTH_TEST: '${BANDWIDTH_TEST:-}' (use true/false)"
+       exit 2
+       ;;
    esac
 
    INPUT_RTSP_URL="$NORMALIZED_READ_URL"
@@ -151,7 +159,7 @@ scale_and_egress() {
 
    AUDIO_FILTER="aresample=out_sample_rate=48000:out_sample_fmt=s16:out_chlayout=stereo"
 
-   exec "$FFMPEG" \
+   exec nice -n "$FFMPEG_NICE" "$FFMPEG" \
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -noauto_conversion_filters \
      -init_hw_device cuda=strim_gpu:0 \
@@ -197,11 +205,12 @@ scale_and_egress() {
      -avioflags direct \
      -f flv \
      "$TWITCH_RTMP_URL"
-
 }
 
+STAGE="${1:?usage: transcode.sh <normalize|scale_and_egress>}"
 
-log_prefix() {
-  local tag="$1"
-  tee -a "/opt/strimserver/logs/ffmpeg-$tag.log"
-}
+case "$STAGE" in
+   normalize|scale_and_egress) "$STAGE" ;;
+   *) echo "transcode.sh: unknown stage '$STAGE' (want: normalize|scale_and_egress)" >&2; exit 64 ;;
+esac
+
