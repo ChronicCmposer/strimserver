@@ -257,8 +257,8 @@ func envSpec() []EnvVar {
       },
       {
          Name: "TWITCH_STREAM_KEY", Group: GroupTwitch, Required: true,
-         Example: "live_xxxxxxxxxxxxxxxx",
-         Comment: "get this from Twitch; treat as a secret",
+         Example: "",
+         Comment: "secret; leave EMPTY in bundled builds - injected at deploy time by deploy.sh",
       },
       {
          Name: "BANDWIDTH_TEST", Group: GroupTwitch, Required: true, Example: "false",

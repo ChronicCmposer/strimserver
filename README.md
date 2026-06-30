@@ -23,7 +23,9 @@ HEVC Main10, scale it to an egress resolution, encode
 H.264/AAC, and forward the result to Twitch. Deployment
 scripts package the container images, configuration,
 transcode scripts, systemd service, and offline fallback
-media into an S3-hosted deployment bundle.
+media into a deployment bundle that can be attached to a
+GitHub release, uploaded to S3, or used directly as a local
+file.
 
 ## Architecture
 
@@ -150,9 +152,11 @@ gracefully on shutdown.
   elevated scheduling priority, GPU access via CDI (ffmpeg
   stages), and bind-mounted config, scripts, secrets, and
   video files.
-- AWS deployment packaging through `make
-  publish-strimserver`, producing a deployment tarball and
-  uploading it to S3.
+- Deployment packaging through `make package` (build a
+  redistributable bundle plus SHA-256 checksum locally),
+  `make release` (attach the bundle and checksum to a GitHub
+  release via the GitHub CLI), and `make publish-strimserver`
+  (build and upload a single-tenant bundle to S3).
 - EC2 setup automation for formatting and mounting NVMe
   ephemeral storage at `/mnt/nvme`, installing the systemd
   unit, importing the OCI images into containerd, generating
@@ -166,8 +170,6 @@ gracefully on shutdown.
   1080p60, 1440p60, and 2160p60 HEVC files.
 - Optional `iperf3` bandwidth-test container and deployment
   scripts.
-- Optional Haivision SRT build/test container for validating
-  SRT dependencies.
 - Optional experimental OpenSSH RPM build, gated by
   `ENABLE_EXPERIMENTAL_OPENSSH` in `feature-toggles.env`.
 
@@ -248,13 +250,21 @@ git clone https://github.com/ChronicCmposer/strimserver.git
 cd strimserver
 ```
 
-Create the runtime configuration file and fill in the Twitch
-and bitrate settings:
+Create the runtime configuration file and fill in the
+bitrate and media settings:
 
 ```bash
 cp core/strimserver.env.example core/strimserver.env
 $EDITOR core/strimserver.env
 ```
+
+Leave `TWITCH_STREAM_KEY` **empty** for any bundle you intend
+to redistribute (via `make package` / `make release`): the
+key is a secret injected at deploy time by
+`setup_strimserver` / `deploy.sh`, not baked into the bundle,
+and `make package` / `make release` refuse to build if it is
+non-empty. A private, single-tenant S3 build (`make
+publish-strimserver`) may bake your own key instead.
 
 `core/strimserver.env.example` is generated from the
 controller's environment spec. If you change that spec,
@@ -292,37 +302,46 @@ build expects `buildctl` to reach `tcp://127.0.0.1:1234`;
 the helper scripts in `tools/buildkit-scripts/` can deploy
 and tunnel to a remote BuildKit daemon if desired.
 
-Configure the S3 bucket where deployment artifacts will be
-published:
+Build the deployment bundle. There are three ways to produce
+and publish `strimserver-deployment.tar`, depending on how
+you want consumers to fetch it:
 
 ```bash
+# A) Build a redistributable bundle + SHA-256 locally (no upload).
+#    Output: $OUTPUT_PATH/strimserver-deployment.tar(.sha256)
+make package
+
+# B) Build, then attach the bundle + checksum to an existing GitHub
+#    release. Requires the GitHub CLI (`gh auth login`) and a pushed tag.
+make release GIT_TAG=v1.0.0
+
+# C) Build and upload a single-tenant bundle to S3 (the default goal).
 export S3_BUCKET="s3://your-bucket-name"
-```
-
-Build and publish the strimserver deployment bundle:
-
-```bash
 make publish-strimserver
 ```
 
-The default target builds three OCI images —
+All three build the same three OCI images —
 `strimserver-controller:latest`, `ffmpeg:latest`, and
 `mediamtx:latest` — writing `controller-container.tar`,
 `ffmpeg-container.tar`, and `mediamtx-container.tar` under
-`$OUTPUT_PATH`. It then packages those images together with
-the configuration, scripts, systemd service, feature
-toggles, and the offline segment into
-`strimserver-deployment.tar`, uploads it to `$S3_BUCKET`,
-and removes the local deployment tarball after upload. When
-`ENABLE_EXPERIMENTAL_OPENSSH="true"` in
-`feature-toggles.env`, the experimental OpenSSH RPM is built
-and added to the bundle.
+`$OUTPUT_PATH`, then package those images together with the
+configuration, scripts, systemd service, feature toggles,
+and the offline segment into `strimserver-deployment.tar`.
+`make package` and `make release` also write a `.sha256`
+checksum next to the tar (consumers verify it via
+`DEPLOYMENT_SHA256`; see *AWS EC2 deployment target*) and
+require `TWITCH_STREAM_KEY` to be empty in
+`core/strimserver.env`; `make publish-strimserver` does not,
+and bakes whatever key is present. When
+`ENABLE_EXPERIMENTAL_OPENSSH="true"` in `feature-toggles.env`,
+the experimental OpenSSH RPM is built and added to the
+bundle.
 
 Thanks to the `FROM scratch` images (no base OS, no bundled
 NVIDIA driver — the driver is injected at runtime via CDI)
 and statically/minimally linked binaries, **the entire
 `strimserver-deployment.tar` bundle — including the offline
-fallback clip — is under 50 MB.** This keeps S3 transfer and
+fallback clip — is under 50 MB.** This keeps download/transfer and
 EC2 setup fast and makes the bundle cheap to rebuild and
 redeploy.
 
@@ -339,10 +358,11 @@ The deployment bundle contains:
 Other useful targets:
 
 ```bash
-make controller        # build the controller image (build target)
+make controller        # build the controller image (build target only)
 make test-controller   # run go test (+ optional golangci-lint) in a build container
-make build-libsrt      # build the Haivision SRT test image
-make publish-iperf3    # build and publish the iperf3 bandwidth-test bundle
+make generate          # regenerate strimserver.env.example + Stream Deck wire types
+make check-generated   # fail if those generated files are stale in git
+make publish-iperf3    # build and publish the iperf3 bandwidth-test bundle to S3
 ```
 
 ## AWS EC2 deployment target
@@ -371,28 +391,66 @@ Expected target characteristics:
   - inbound controller HTTP/WebSocket, default TCP port
     `4000`, from the operator machine (used by `/control`,
     `/status`, and the Stream Deck `/subscribe` stream);
-  - outbound access to S3 for deployment artifact retrieval;
+  - outbound access to wherever the bundle is hosted (a
+    GitHub release over HTTPS, or S3) for artifact
+    retrieval;
   - outbound RTMP to the configured Twitch ingest server.
-- IAM permissions sufficient to read the deployment bundle
-  from S3. The machine used for build/publish also needs
-  permission to write that bundle to S3.
+- IAM permissions to read the deployment bundle from S3
+  **only when** it is delivered via an `s3://` source; an
+  HTTPS release asset or a locally uploaded file needs no
+  instance IAM for retrieval. The machine used for `make
+  publish-strimserver` needs S3 write permission; `make
+  package` / `make release` do not.
 
-The EC2 launch helper currently references project-specific
-launch template names. Use it with the requested target
-instance type, or adapt the launch templates to use the
-latest Amazon Linux 2023 DLAMI and the security/IAM settings
-above:
+Durable infrastructure — a security group and an IAM
+instance profile, with an optional self-contained
+VPC/subnet/internet gateway — is provisioned once from the
+CloudFormation template at
+`deploy/aws/strimserver-infra.yaml`. The `launch` helper
+reads that stack's outputs and creates instances
+imperatively with `ec2 run-instances`; there is **no EC2
+launch template**. `terminate` tears down instances by their
+`Project` tag.
+
+Deploy (or update) the infrastructure stack first.
+`deploy/aws/deploy-template` shows the call; at minimum
+supply your operator CIDR (set `DeploymentBucketName` only
+when you deliver the bundle from S3 — omit it for an HTTPS
+release asset or a local file):
+
+```bash
+OPERATOR_CIDR="203.0.113.4/32" \
+S3_BUCKET_NAME="" \
+deploy/aws/deploy-template
+```
+
+Then configure `.env` and launch. `launch` resolves the
+security group, instance profile, and (when the stack
+manages networking) the public subnet from the stack
+outputs, forces a public IP, enforces IMDSv2, and uses a
+spot instance by default (`--no-spot` for on-demand):
 
 ```bash
 cp deploy/aws/.env.example deploy/aws/.env
-$EDITOR deploy/aws/.env
+$EDITOR deploy/aws/.env          # set KEY_NAME, DEPLOYMENT_SRC, TWITCH_STREAM_KEY, etc.
 set -a
 . deploy/aws/.env
 set +a
 
-# Launch through the configured launch template, overriding the instance type.
-deploy/aws/launch --type g6.xlarge
+# Launch, overriding the instance type. --wait prints the public IP + next steps.
+deploy/aws/launch --type g6.xlarge --wait
 ```
+
+`DEPLOYMENT_SRC` in `.env` selects where the box fetches the
+bundle from: an `https://` URL (e.g. a GitHub release asset
+— no AWS credentials needed), an `s3://` URI (the instance
+role needs S3 read), or a local path (uploaded over scp).
+Set `DEPLOYMENT_SHA256` to verify the download against the
+checksum produced by `make package` / `make release`. Your
+Twitch stream key is supplied here via `TWITCH_STREAM_KEY`
+(or `TWITCH_STREAM_KEY_FILE`) and transferred to the
+instance as a `0600` file at deploy time — it is never baked
+into the bundle.
 
 After the instance is reachable over SSH, run the setup
 script from the local machine:
@@ -404,8 +462,9 @@ deploy/aws/setup_strimserver
 `setup_strimserver` will display the remote block devices
 and prompt for the NVMe device to format. The default is
 `/dev/nvme1n1`. This is destructive to the selected device.
-It then downloads and unpacks the deployment bundle and runs
-`deploy.sh`, which stages config/bin/video-file directories
+It then places the deployment bundle on the box (HTTPS
+download, S3 pull, or scp upload, per `DEPLOYMENT_SRC`),
+unpacks it, and runs `deploy.sh`, which stages config/bin/video-file directories
 under `/mnt/nvme`, configures and restarts containerd,
 installs the systemd unit, **imports all three OCI images**
 (`controller-container.tar`, `ffmpeg-container.tar`,
@@ -537,14 +596,15 @@ generate` from the controller's Go definitions.
   Store.
 - Add a documented path for updating MediaMTX, FFmpeg, CUDA,
   nv-codec-headers, and Go versions together.
-- Add Terraform, CloudFormation, or CDK infrastructure for
-  reproducible EC2, IAM, S3, security group, and launch
-  template setup.
+- Extend the existing CloudFormation infrastructure
+  (`deploy/aws/strimserver-infra.yaml`, which already
+  provisions the security group, IAM instance profile, and
+  optional VPC/subnet) toward a fuller end-to-end provision —
+  or provide equivalent Terraform/CDK — covering S3, the
+  instance lifecycle, and on-box configuration.
 - Provide a packaged deployment for orchestrated
-  environments — e.g. a Helm chart (running the stages as
-  Kubernetes pods with the NVIDIA device plugin / CDI) or a
-  CloudFormation template that provisions and configures the
-  full stack end to end.
+  environments — e.g. a Helm chart running the stages as
+  Kubernetes pods with the NVIDIA device plugin / CDI.
 
 ## Contributing
 
