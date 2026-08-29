@@ -21,5 +21,8 @@
     "rollup": "^4",
     "tslib": "^2",
     "typescript": "^5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": []
   }
 }

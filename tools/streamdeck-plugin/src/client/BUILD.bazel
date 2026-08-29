@@ -1,6 +1,22 @@
+load("@aspect_bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 
 exports_files(["types.generated.ts"])
+
+# This directory has its own BUILD.bazel (for :write_ts_types below), which
+# makes it a separate Bazel package -- glob(["src/**/*.ts"]) in the parent
+# tools/streamdeck-plugin package does not cross into it. Rollup's own
+# module graph does reach in here (src/plugin.ts -> src/actions/* -> these
+# files), so the parent's js_run_binary needs an explicit cross-package
+# reference to compile successfully. js_run_binary's default
+# copy_srcs_to_bin additionally requires srcs to live in its own package, so
+# this does the copy here instead (as suggested by the resulting error's own
+# buildozer recipe) and the parent depends on the already-copied output.
+copy_to_bin(
+    name = "srcs",
+    srcs = glob(["*.ts"]),
+    visibility = ["//tools/streamdeck-plugin:__subpackages__"],
+)
 
 # Regenerated from the controller's wire types; see //core/controller:generate.
 write_source_files(

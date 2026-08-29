@@ -1,0 +1,57 @@
+load("@aspect_bazel_lib//lib:directory_path.bzl", "directory_path")
+load("@aspect_rules_js//js:defs.bzl", "js_binary", "js_run_binary")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+exports_files([
+    ".nvmrc",
+    "package-lock.json",
+])
+
+npm_link_all_packages(name = "node_modules")
+
+# Replaces `npm run build` (rollup -c). The plan named this an
+# npm_package_bin, but that macro doesn't exist in aspect_rules_js 3.4.1 --
+# it was removed in the 2.x/3.x line in favor of js_run_binary (a thin
+# wrapper over bazel_lib's run_binary for a js_binary-shaped tool), which is
+# the currently-documented way to run a linked npm package's bin script as
+# a build step.
+# rollup's own package.json declares `"bin": {"rollup": "dist/bin/rollup"}`
+# (verified directly in the fetched package) -- npm_link_all_packages left
+# this package's `bins` empty (a pnpm_lock-vs-npm-lockfile metadata gap, not
+# something to route around further), so this reaches directly into the
+# linked package's directory output for the real entry point instead of
+# relying on an auto-generated bin alias.
+directory_path(
+    name = "rollup_bin_entry_point",
+    directory = ":node_modules/rollup/dir",
+    path = "dist/bin/rollup",
+)
+
+js_binary(
+    name = "rollup_bin",
+    entry_point = ":rollup_bin_entry_point",
+)
+
+js_run_binary(
+    name = "build",
+    tool = ":rollup_bin",
+    srcs = [
+        "rollup.config.mjs",
+        "tsconfig.json",
+        ":node_modules/@elgato/streamdeck",
+        ":node_modules/@rollup/plugin-commonjs",
+        ":node_modules/@rollup/plugin-node-resolve",
+        ":node_modules/@rollup/plugin-typescript",
+        ":node_modules/@types/node",
+        ":node_modules/tslib",
+        ":node_modules/typescript",
+        "//tools/streamdeck-plugin/src/client:srcs",
+    ] + glob(["src/**/*.ts"]),
+    outs = [
+        "com.chroniccmposer.strimserver.sdPlugin/bin/plugin.js",
+        "com.chroniccmposer.strimserver.sdPlugin/bin/plugin.js.map",
+    ],
+    args = ["-c"],
+    chdir = "tools/streamdeck-plugin",
+    mnemonic = "Rollup",
+)
