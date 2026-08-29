@@ -1,0 +1,130 @@
+# gazelle:prefix strimserver-controller
+
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/bazel:go_bin.bzl", "go_bin")
+
+exports_files(["go.mod", "go.sum"])
+
+go_library(
+    name = "controller_lib",
+    srcs = [
+        "container_factory.go",
+        "controller.go",
+        "envspec.go",
+        "main.go",
+        "names.go",
+        "paths.go",
+    ],
+    importpath = "strimserver-controller",
+    visibility = ["//visibility:private"],
+    deps = [
+        "@com_github_coder_websocket//:websocket",
+        "@com_github_coder_websocket//wsjson",
+        "@com_github_containerd_containerd_api//events",
+        "@com_github_containerd_containerd_v2//client",
+        "@com_github_containerd_containerd_v2//pkg/cdi",
+        "@com_github_containerd_containerd_v2//pkg/cio",
+        "@com_github_containerd_containerd_v2//pkg/namespaces",
+        "@com_github_containerd_containerd_v2//pkg/oci",
+        "@com_github_containerd_errdefs//:errdefs",
+        "@com_github_containerd_typeurl_v2//:typeurl",
+        "@com_github_opencontainers_runtime_spec//specs-go",
+    ],
+)
+
+# Matches core/controller/Dockerfile's
+# `CGO_ENABLED=0 GOOS=linux go build -v -trimpath -ldflags='-s -w'`.
+# -trimpath is a rules_go default; pure=on matches CGO_ENABLED=0 (verified:
+# no `import "C"` and no os/user anywhere in this package).
+go_binary(
+    name = "strimserver-controller",
+    embed = [":controller_lib"],
+    goarch = "amd64",
+    goos = "linux",
+    gc_linkopts = [
+        "-s",
+        "-w",
+    ],
+    pure = "on",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "controller_test",
+    srcs = ["controller_test.go"],
+    embed = [":controller_lib"],
+)
+
+# --- Codegen: strimserver.env.example + the Stream Deck wire types ----------
+# Replaces `make generate` / `make check-generated` (Makefile:53-59). Unlike
+# the make target, `generate_test` never writes to the source tree to check
+# it, and it's wired into the default `bazel test //...` set.
+
+genrule(
+    name = "env_example_gen",
+    outs = ["strimserver.env.example.gen"],
+    cmd = "$(location :strimserver-controller) -print-env-example > $@",
+    tools = [":strimserver-controller"],
+    visibility = ["//core:__pkg__"],
+)
+
+genrule(
+    name = "ts_types_gen",
+    outs = ["types.generated.ts.gen"],
+    cmd = "$(location :strimserver-controller) -print-ts-types > $@",
+    tools = [":strimserver-controller"],
+    visibility = ["//tools/streamdeck-plugin/src/client:__pkg__"],
+)
+
+# write_source_files requires each destination file to live in the same
+# package as the target that writes it, so the actual writes are declared
+# next to their destinations (//core:write_env_example and
+# //tools/streamdeck-plugin/src/client:write_ts_types) and chained here.
+write_source_files(
+    name = "generate",
+    additional_update_targets = [
+        "//core:write_env_example",
+        "//tools/streamdeck-plugin/src/client:write_ts_types",
+    ],
+)
+
+test_suite(
+    name = "generate_test",
+    tests = [
+        "//core:write_env_example_test",
+        "//tools/streamdeck-plugin/src/client:write_ts_types_test",
+    ],
+)
+
+# --- Lint --------------------------------------------------------------
+# golangci-lint pinned as a downloaded, checksummed Bazel tool (see
+# @golangci_lint_linux_amd64 in MODULE.bazel) instead of `go install`ed over
+# the network on every lint-enabled image build (core/controller/Dockerfile:29).
+
+go_bin(name = "go_bin")
+
+sh_test(
+    name = "lint",
+    srcs = ["lint.sh"],
+    args = [
+        "$(location @golangci_lint_linux_amd64//:golangci-lint)",
+        "$(location :go_bin)",
+        "$(location :.golangci.yml)",
+    ],
+    data = [
+        "@golangci_lint_linux_amd64//:golangci-lint",
+        ":go_bin",
+        ".golangci.yml",
+        "container_factory.go",
+        "controller.go",
+        "controller_test.go",
+        "envspec.go",
+        "go.mod",
+        "go.sum",
+        "main.go",
+        "names.go",
+        "paths.go",
+    ],
+)

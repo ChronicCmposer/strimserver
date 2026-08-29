@@ -1,6 +1,6 @@
 #!/bin/sh
 
-set -xeuo
+set -xeu
 
 set -a
 . /strimserver.env

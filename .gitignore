@@ -4,3 +4,6 @@ tools/local-encoder/local-encoder.env
 go
 deploy/aws/twitch-stream-key
 deploy/aws/*.key
+
+# Bazel output symlinks (point outside the repo; nothing here to commit).
+/bazel-*

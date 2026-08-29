@@ -26,7 +26,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
    set -x && go version \
    && echo "cachebust=$CACHEBUST" \
    && cd /opt/strimserver-controller \
-   && if [ "$ENABLE_LINT" = "true" ]; then go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8; fi \
+   && if [ "$ENABLE_LINT" = "true" ]; then go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2; fi \
    && if [ "$ENABLE_LINT" = "true" ]; then golangci-lint run; fi \
    && go test -v .
 

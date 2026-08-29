@@ -1,0 +1,7 @@
+# strimserver only ever ships linux/amd64 (see README: "Architecture: x86_64 only").
+build --platforms=//tools/bazel:linux_amd64
+
+test --test_output=errors
+test --test_summary=terse
+
+common --noenable_workspace

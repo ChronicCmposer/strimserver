@@ -58,7 +58,7 @@ RUN set -x \
    && make -C /opt/nv-codec-headers install PREFIX=/usr \
    && git clone --depth 1 --branch "$FFMPEG_VERSION" "$FFMPEG_REPO" /opt/ffmpeg-src \
    && cd /opt/ffmpeg-src \
-   && set -xeuo \
+   && set -xeu \
    && which nvcc && nvcc --version && gcc --version && echo $PATH \
    && echo "$(pwd)" && ls -la . \
    && ./configure \
@@ -125,7 +125,7 @@ RUN set -x \
       --enable-filter=setpts \
       --enable-filter=format \
       --enable-filter=scale \
-      --enable-filter=aresample || true \
+      --enable-filter=aresample \
    && make -C /opt/ffmpeg-src -j$(nproc) \
    && cd /opt/ffmpeg-src \
    && ls -la \

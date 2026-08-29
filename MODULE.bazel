@@ -1,0 +1,74 @@
+"""strimserver: five OCI images + a Stream Deck plugin, built with Bazel."""
+
+module(
+    name = "strimserver",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
+bazel_dep(name = "rules_shell", version = "0.8.0")
+
+# --- Go controller -----------------------------------------------------------
+bazel_dep(name = "rules_go", version = "0.63.0")
+bazel_dep(name = "gazelle", version = "0.53.0")
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
+
+# aspect_bazel_lib's own MODULE.bazel unconditionally registers a bats-core
+# toolchain (used by lib:bats.bzl, which nothing here uses) fetched from
+# GitHub's codeload /archive/ endpoint. That endpoint 403s from this sandbox
+# (unlike normal releases/download assets, which work fine), and eager
+# toolchain registration means it's fetched even though it's unused. Patch it
+# out rather than let an unused toolchain block every build.
+single_version_override(
+    module_name = "aspect_bazel_lib",
+    version = "2.22.5",
+    patches = ["//tools/bazel/patches:aspect_bazel_lib_no_bats.patch"],
+    patch_strip = 1,
+)
+
+# aspect_bazel_lib depends on its own renamed successor module, which
+# registers the same bats-core toolchain independently -- patch it out too.
+single_version_override(
+    module_name = "bazel_lib",
+    version = "3.0.0",
+    patches = ["//tools/bazel/patches:bazel_lib_no_bats.patch"],
+    patch_strip = 1,
+)
+
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.from_file(go_mod = "//core/controller:go.mod")
+
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+go_deps.from_file(go_mod = "//core/controller:go.mod")
+use_repo(
+    go_deps,
+    "com_github_coder_websocket",
+    "com_github_containerd_containerd_api",
+    "com_github_containerd_containerd_v2",
+    "com_github_containerd_errdefs",
+    "com_github_containerd_typeurl_v2",
+    "com_github_opencontainers_runtime_spec",
+)
+
+# golangci-lint pinned as a downloaded release tarball (checksummed) instead
+# of `go install`ed over the network on every lint-enabled build.
+#
+# core/controller/Dockerfile:29 (and feature-toggles.env's ENABLE_LINT path)
+# pins v1.64.8, but that predates Go 1.26 entirely: golangci-lint refuses to
+# analyze a go.mod declaring a newer Go version than it was built with, so
+# v1.64.8 cannot lint this module's `go 1.26.4` (verified: it fails with
+# "the Go language version (go1.24) ... is lower than the targeted Go version
+# (1.26.4)"). golangci-lint v1 stopped at v1.64.8; v2+ is a different module
+# path (github.com/golangci/golangci-lint/v2) with a new config schema, so
+# picking up Go 1.26 support means moving to v2 -- see the "version: 2" line
+# added to .golangci.yml alongside this pin.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "golangci_lint_linux_amd64",
+    url = "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-amd64.tar.gz",
+    sha256 = "2277d43b98ec0054280f2ac26b53268bae97682444678a59a657dd565da021d6",
+    strip_prefix = "golangci-lint-2.13.2-linux-amd64",
+    build_file_content = "exports_files([\"golangci-lint\"])",
+)

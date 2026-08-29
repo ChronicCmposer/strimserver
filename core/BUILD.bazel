@@ -1,0 +1,12 @@
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+
+exports_files(["strimserver.env.example"])
+
+# Regenerated from the controller's env spec; see //core/controller:generate.
+write_source_files(
+    name = "write_env_example",
+    visibility = ["//core/controller:__pkg__"],
+    files = {
+        "strimserver.env.example": "//core/controller:env_example_gen",
+    },
+)

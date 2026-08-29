@@ -51,14 +51,14 @@ func checkEnv() error {
 func printEnvExample(w io.Writer) {
    var last Group
    for _, v := range envSpec() {
-      if v.Group != last { fmt.Fprintf(w, "\n# --- %s ---\n", v.Group); last = v.Group }
-      if v.Comment != "" { fmt.Fprintf(w, "# %s\n", v.Comment) }
-      fmt.Fprintf(w, "%s=%q\n", v.Name, v.Example)
+      if v.Group != last { _, _ = fmt.Fprintf(w, "\n# --- %s ---\n", v.Group); last = v.Group }
+      if v.Comment != "" { _, _ = fmt.Fprintf(w, "# %s\n", v.Comment) }
+      _, _ = fmt.Fprintf(w, "%s=%q\n", v.Name, v.Example)
    }
 }
 
 func printTSTypes(w io.Writer) {
-   p := func(f string, a ...any) { fmt.Fprintf(w, f+"\n", a...) }
+   p := func(f string, a ...any) { _, _ = fmt.Fprintf(w, f+"\n", a...) }
    union := func(vals []string) string {
       q := make([]string, len(vals))
       for i, v := range vals { q[i] = strconv.Quote(v) }
@@ -126,7 +126,7 @@ func run() error {
 
    client, err := containerd.New(config.ContainerdSocket)
    if err != nil { return fmt.Errorf("could not initialize containerd client: %w", err) }
-   defer client.Close()
+   defer func() { _ = client.Close() }()
 
    // build the container factory
 
@@ -227,7 +227,7 @@ func run() error {
       err = controller.SubmitAddListener(&listener)
       if err != nil {
          log.Printf("could not add ControllerListener for ws client %q: %v", r.RemoteAddr, err)
-         conn.Close(websocket.StatusInternalError, err.Error()); return
+         _ = conn.Close(websocket.StatusInternalError, err.Error()); return
       }
       defer func() {
          done := make(chan struct{})
@@ -243,14 +243,14 @@ func run() error {
       for {
          select {
             case <-ctx.Done():
-               conn.Close(websocket.StatusNormalClosure, "")
+               _ = conn.Close(websocket.StatusNormalClosure, "")
                return
             case status := <-sendChannel:
                wctx, cancel := context.WithTimeout(ctx, config.WebsocketWriteTimeout)
                err := wsjson.Write(wctx, conn, status); cancel()
                if err != nil {
                   log.Printf("ws write error: %v", err)
-                  conn.Close(websocket.StatusInternalError, err.Error()); return
+                  _ = conn.Close(websocket.StatusInternalError, err.Error()); return
                }
          }
       }
