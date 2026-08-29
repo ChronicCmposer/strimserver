@@ -1,4 +1,10 @@
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@rules_distroless//distroless:defs.bzl", "cacerts")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+load("//tools/bazel:deb_file.bzl", "deb_file")
 
 exports_files(["strimserver.env.example"])
 
@@ -9,4 +15,175 @@ write_source_files(
     files = {
         "strimserver.env.example": "//core/controller:env_example_gen",
     },
+)
+
+# =============================================================================
+# mediamtx image (FROM scratch). Ports core/Dockerfile's `mediamtx` target
+# (lines 226-261) -- ffmpeg stays on buildctl (see Phase 4), so only the
+# mediamtx target moves here. libfdk-aac is ffmpeg-only and isn't needed.
+# =============================================================================
+
+genrule(
+    name = "mediamtx_bin_stripped",
+    srcs = ["@mediamtx_dist//:mediamtx"],
+    outs = ["mediamtx"],
+    cmd = "cp $(location @mediamtx_dist//:mediamtx) $@ && chmod +w $@ && strip $@",
+)
+
+deb_file(
+    name = "busybox_bin",
+    data = "@trixie//busybox-static/amd64:data",
+    path = "usr/bin/busybox",
+)
+
+deb_file(
+    name = "nice_bin",
+    data = "@trixie//coreutils/amd64:data",
+    path = "usr/bin/nice",
+)
+
+deb_file(
+    name = "envsubst_bin",
+    data = "@trixie//gettext-base/amd64:data",
+    path = "usr/bin/envsubst",
+)
+
+deb_file(
+    name = "ld_linux",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+)
+
+deb_file(
+    name = "libc_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libc.so.6",
+)
+
+deb_file(
+    name = "libm_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libm.so.6",
+)
+
+deb_file(
+    name = "libpthread_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libpthread.so.0",
+)
+
+deb_file(
+    name = "libresolv_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libresolv.so.2",
+)
+
+cacerts(
+    name = "cacerts",
+    package = "@trixie//ca-certificates/amd64:data",
+)
+
+pkg_files(
+    name = "mediamtx_usr_bin",
+    srcs = [
+        ":busybox_bin",
+        ":envsubst_bin",
+        ":nice_bin",
+    ],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/usr/bin",
+)
+
+pkg_files(
+    name = "mediamtx_lib64",
+    srcs = [":ld_linux"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib64",
+)
+
+pkg_files(
+    name = "mediamtx_libs",
+    srcs = [
+        ":libc_so",
+        ":libm_so",
+        ":libpthread_so",
+        ":libresolv_so",
+    ],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib/x86_64-linux-gnu",
+)
+
+pkg_files(
+    name = "mediamtx_nsswitch",
+    srcs = [":nsswitch_conf"],
+    attributes = pkg_attributes(mode = "0644"),
+    prefix = "/etc",
+    renames = {":nsswitch_conf": "nsswitch.conf"},
+)
+
+genrule(
+    name = "nsswitch_conf",
+    outs = ["nsswitch.conf.gen"],
+    cmd = "printf 'hosts: files dns\\n' > $@",
+)
+
+pkg_files(
+    name = "mediamtx_root",
+    srcs = [":mediamtx_bin_stripped"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+)
+
+pkg_files(
+    name = "mediamtx_entrypoint",
+    srcs = ["entrypoint.mediamtx.sh"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+    renames = {"entrypoint.mediamtx.sh": "entrypoint.sh"},
+)
+
+pkg_tar(
+    name = "mediamtx_files_tar",
+    srcs = [
+        ":mediamtx_entrypoint",
+        ":mediamtx_lib64",
+        ":mediamtx_libs",
+        ":mediamtx_nsswitch",
+        ":mediamtx_root",
+        ":mediamtx_usr_bin",
+    ],
+    symlinks = {
+        "/bin/sh": "/usr/bin/busybox",
+        "/usr/bin/cat": "busybox",
+        "/usr/bin/ln": "busybox",
+        "/usr/bin/mkdir": "busybox",
+        "/usr/bin/nc": "busybox",
+        "/usr/bin/rm": "busybox",
+        "/usr/bin/sh": "busybox",
+        "/usr/bin/wget": "busybox",
+    },
+)
+
+oci_image(
+    name = "mediamtx_image",
+    architecture = "amd64",
+    entrypoint = ["/entrypoint.sh"],
+    os = "linux",
+    tars = [
+        ":cacerts",
+        ":mediamtx_files_tar",
+    ],
+)
+
+oci_load(
+    name = "mediamtx_image_tarball",
+    image = ":mediamtx_image",
+    repo_tags = ["docker.io/library/mediamtx:latest"],
+)
+
+sh_test(
+    name = "mediamtx_smoke_test",
+    srcs = ["mediamtx_smoke_test.sh"],
+    args = ["$(location :mediamtx_files_tar)"],
+    data = [":mediamtx_files_tar"],
 )

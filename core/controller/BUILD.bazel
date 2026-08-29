@@ -1,6 +1,10 @@
 # gazelle:prefix strimserver-controller
 
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+load("//tools/bazel:deb_file.bzl", "deb_file")
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//tools/bazel:go_bin.bzl", "go_bin")
@@ -127,4 +131,96 @@ sh_test(
         "names.go",
         "paths.go",
     ],
+)
+
+# =============================================================================
+# controller image (FROM scratch). Ports core/controller/Dockerfile's
+# `runtime` target (lines 44-55).
+# =============================================================================
+
+deb_file(
+    name = "dash_as_sh",
+    data = "@trixie//dash/amd64:data",
+    path = "usr/bin/dash",
+    out = "sh",
+)
+
+deb_file(
+    name = "controller_ld_linux",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+)
+
+deb_file(
+    name = "controller_libc_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libc.so.6",
+)
+
+pkg_files(
+    name = "controller_bin_sh",
+    srcs = [":dash_as_sh"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/bin",
+)
+
+pkg_files(
+    name = "controller_lib64",
+    srcs = [":controller_ld_linux"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib64",
+)
+
+pkg_files(
+    name = "controller_libs",
+    srcs = [":controller_libc_so"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib/x86_64-linux-gnu",
+)
+
+pkg_files(
+    name = "controller_bin",
+    srcs = [":strimserver-controller"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+    renames = {":strimserver-controller": "strimserver-controller"},
+)
+
+pkg_files(
+    name = "controller_entrypoint",
+    srcs = ["entrypoint.sh"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+)
+
+pkg_tar(
+    name = "controller_files_tar",
+    srcs = [
+        ":controller_bin",
+        ":controller_bin_sh",
+        ":controller_entrypoint",
+        ":controller_lib64",
+        ":controller_libs",
+    ],
+)
+
+oci_image(
+    name = "controller_image",
+    architecture = "amd64",
+    entrypoint = ["/entrypoint.sh"],
+    os = "linux",
+    tars = [":controller_files_tar"],
+)
+
+oci_load(
+    name = "controller_image_tarball",
+    image = ":controller_image",
+    repo_tags = ["docker.io/library/strimserver-controller:latest"],
+)
+
+sh_test(
+    name = "image_smoke_test",
+    srcs = ["image_smoke_test.sh"],
+    args = ["$(location :controller_files_tar)"],
+    data = [":controller_files_tar"],
 )
