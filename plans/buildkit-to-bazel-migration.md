@@ -1,7 +1,21 @@
 # Migrate strimserver from Make + BuildKit to Bazel + rules_oci
 
-> **Status:** proposal, not yet started.
-> **Branch:** `feature/buildkit-to-bazel` (based on `origin/dev` @ `a97c2e4`).
+> **Status:** implemented, all 7 phases (see `MODULE.bazel` / `BUILD.bazel` /
+> `*/BUILD.bazel` throughout the tree). Runtime verification on GPU hardware
+> per the *Verification plan* below is still outstanding -- everything else in
+> that section was checked in this sandbox (no buildctl, containerd, or GPU
+> available here). Several implementation details below were superseded by
+> what was actually needed to get the graph to build; see the git history on
+> this branch for what changed and why (in particular: `oci_tarball` is
+> `oci_load` in the pinned rules_oci; the ffmpeg/openssh buildctl wrapper
+> covers iperf3 too, since `apk add` has the same RUN-in-rules_oci problem;
+> the native images use per-file `deb_file` extraction rather than whole apt
+> packages; and the Stream Deck plugin ended up on a generated
+> `pnpm-lock.yaml` instead of `npm_translate_lock`'s `npm_package_lock` path,
+> which has real bugs in the pinned aspect_rules_js release).
+> **Branch:** `claude/list-branches-local-remote-dlgvnz` (this plan was
+> written on `feature/buildkit-to-bazel`, based on `origin/dev` @ `a97c2e4`;
+> the implementation landed on the branch this task was assigned).
 > **Verification:** every code claim below — line numbers, version pins, and all
 > eight bugs — was checked against the tree at `a97c2e4` before this file was
 > written. Claims are marked *verified* where confirmed. Nothing here is
