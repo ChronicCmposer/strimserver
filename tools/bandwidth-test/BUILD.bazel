@@ -1,4 +1,5 @@
 load("//tools/bazel:buildctl.bzl", "buildctl_build")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
 # iperf3 image: `apk add` needs RUN, which rules_oci cannot express any more
 # than the FFmpeg compile or the openssh RPM build can -- same buildctl
@@ -77,4 +78,11 @@ pkg_tar(
         ":iperf3_deploy_script",
     ],
     out = "iperf3-deployment.tar",
+)
+
+sh_binary(
+    name = "publish_iperf3",
+    srcs = ["publish_iperf3.sh"],
+    data = [":iperf3_deployment_tar"],
+    args = ["$(rootpath :iperf3_deployment_tar)"],
 )

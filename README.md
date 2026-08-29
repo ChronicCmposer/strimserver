@@ -218,20 +218,26 @@ gracefully on shutdown.
 These tools are required by the repository but are not
 pinned by the source tree:
 
-- GNU Make.
-- **containerd** and **BuildKit / `buildctl`** — direct,
-  non-optional dependencies. Images are built with
-  `buildctl`; the `ffmpeg` image target builds against a
-  BuildKit daemon at `tcp://127.0.0.1:1234` (intended for a
-  remote/tunneled `buildkitd`; see
-  `tools/buildkit-scripts/`), while the controller and
-  mediamtx targets use the default `buildctl` address. The
-  EC2 runtime host runs containerd, which the controller
-  drives directly.
-- Go (1.26.x) on the build host for `make generate` / `make
-  check-generated` and the `controller` / `test-controller`
-  targets.
-- Node.js (>= 24) for building the Stream Deck plugin.
+- **Bazel** (via [Bazelisk](https://github.com/bazelbuild/bazelisk);
+  see `.bazelversion`) — the build system. It downloads and
+  pins the Go and Node.js toolchains itself (see
+  `MODULE.bazel`); you don't need either installed separately
+  just to build. `make` is kept as a thin facade over `bazel`
+  for muscle memory — see `Makefile`.
+- **containerd** and **BuildKit / `buildctl`** — still
+  required for the three images Bazel cannot express as a
+  pure OCI archive assembly, because they're defined by
+  compilation steps (`RUN` a compiler, a package manager) that
+  `rules_oci` deliberately has no equivalent for: the `ffmpeg`
+  image (compiles FFmpeg against the CUDA devel image, and
+  builds against a BuildKit daemon at `tcp://127.0.0.1:1234` —
+  intended for a remote/tunneled `buildkitd`; see
+  `tools/buildkit-scripts/`), the experimental OpenSSH RPM
+  (autoreconf/configure/make/rpmbuild), and the `iperf3`
+  bandwidth-test image (`apk add`, using the default `buildctl`
+  address). The `strimserver-controller` and `mediamtx` images
+  are built natively by Bazel and need neither. The EC2 runtime
+  host runs containerd, which the controller drives directly.
 - AWS CLI with credentials authorized to read and write the
   configured S3 bucket and launch/manage EC2 instances.
 - `jq`, used by AWS helper scripts.
@@ -276,26 +282,28 @@ make generate          # rewrites the .env.example and types.generated.ts
 make check-generated   # fails if those generated files are stale in git
 ```
 
-Prepare a local artifact output directory:
-
-```bash
-export OUTPUT_PATH="$HOME/local-dev/strimserver"
-mkdir -p "$OUTPUT_PATH"
-```
-
-Create or provide the offline fallback segment expected by
-the deployment bundle. The default Makefile expects this
-file at `$OUTPUT_PATH/strimserver-offline-2160p60.mp4`:
+Point Bazel at the offline fallback segment expected by the
+deployment bundle. Unlike the rest of the bundle's inputs,
+this file isn't checked in or fetched — wrap wherever you've
+placed it in a one-line `BUILD.bazel` and pass it as a build
+flag:
 
 ```bash
 # Option A: generate the default 2160p60 fallback clip on a machine with a compatible FFmpeg setup.
 . tools/brb-screen/bslib.sh
 generate2160p
-cp ~/Downloads/strimserver-offline-2160p60.mp4 "$OUTPUT_PATH/"
+mkdir -p local/video
+cp ~/Downloads/strimserver-offline-2160p60.mp4 local/video/
+echo 'exports_files(["strimserver-offline-2160p60.mp4"])' > local/video/BUILD.bazel
 
-# Option B: copy an already-created fallback file into place.
-cp /path/to/strimserver-offline-2160p60.mp4 "$OUTPUT_PATH/"
+# Option B: point it at an already-created fallback file the same way.
 ```
+
+Then pass `--//:offline_segment=//local/video:strimserver-offline-2160p60.mp4`
+to any `bazel build`/`bazel run` invocation below (or add it to a
+`.bazelrc.local` as `build --//:offline_segment=...` so you don't have to
+repeat it). Building without it fails with a clear message telling you to
+set the flag.
 
 Start or connect to a BuildKit daemon. The `ffmpeg` image
 build expects `buildctl` to reach `tcp://127.0.0.1:1234`;
@@ -304,46 +312,47 @@ and tunnel to a remote BuildKit daemon if desired.
 
 Build the deployment bundle. There are three ways to produce
 and publish `strimserver-deployment.tar`, depending on how
-you want consumers to fetch it:
+you want consumers to fetch it (each shown as the `make`
+facade and the underlying `bazel` command it runs):
 
 ```bash
 # A) Build a redistributable bundle + SHA-256 locally (no upload).
-#    Output: $OUTPUT_PATH/strimserver-deployment.tar(.sha256)
+#    Output: bazel-bin/strimserver-deployment.checked.tar(.sha256)
 make package
+bazel build --//:offline_segment=//local/video:strimserver-offline-2160p60.mp4 //:package
 
 # B) Build, then attach the bundle + checksum to an existing GitHub
 #    release. Requires the GitHub CLI (`gh auth login`) and a pushed tag.
 make release GIT_TAG=v1.0.0
+bazel run --//:offline_segment=... //:release   # reads GIT_TAG from the environment
 
 # C) Build and upload a single-tenant bundle to S3 (the default goal).
 export S3_BUCKET="s3://your-bucket-name"
 make publish-strimserver
+bazel run --//:offline_segment=... //:publish_strimserver   # reads S3_BUCKET from the environment
 ```
 
 All three build the same three OCI images —
 `strimserver-controller:latest`, `ffmpeg:latest`, and
-`mediamtx:latest` — writing `controller-container.tar`,
-`ffmpeg-container.tar`, and `mediamtx-container.tar` under
-`$OUTPUT_PATH`, then package those images together with the
-configuration, scripts, systemd service, feature toggles,
+`mediamtx:latest` — then package those images together with
+the configuration, scripts, systemd service, feature toggles,
 and the offline segment into `strimserver-deployment.tar`.
-`make package` and `make release` also write a `.sha256`
-checksum next to the tar (consumers verify it via
+`make package` and `make release` also produce a `.sha256`
+checksum for the tar (consumers verify it via
 `DEPLOYMENT_SHA256`; see *AWS EC2 deployment target*) and
 require `TWITCH_STREAM_KEY` to be empty in
 `core/strimserver.env`; `make publish-strimserver` does not,
 and bakes whatever key is present. When
-`ENABLE_EXPERIMENTAL_OPENSSH="true"` in `feature-toggles.env`,
+`ENABLE_EXPERIMENTAL_OPENSSH="true"` in `feature-toggles.env`
+(or `--//:enable_experimental_openssh=true` passed directly),
 the experimental OpenSSH RPM is built and added to the
 bundle.
 
 Thanks to the `FROM scratch` images (no base OS, no bundled
 NVIDIA driver — the driver is injected at runtime via CDI)
-and statically/minimally linked binaries, **the entire
-`strimserver-deployment.tar` bundle — including the offline
-fallback clip — is under 50 MB.** This keeps download/transfer and
-EC2 setup fast and makes the bundle cheap to rebuild and
-redeploy.
+and statically/minimally linked binaries, the bundle stays
+small. This keeps download/transfer and EC2 setup fast and
+makes the bundle cheap to rebuild and redeploy.
 
 The deployment bundle contains:
 
@@ -358,12 +367,17 @@ The deployment bundle contains:
 Other useful targets:
 
 ```bash
-make controller        # build the controller image (build target only)
-make test-controller   # run go test (+ optional golangci-lint) in a build container
-make generate          # regenerate strimserver.env.example + Stream Deck wire types
-make check-generated   # fail if those generated files are stale in git
-make publish-iperf3    # build and publish the iperf3 bandwidth-test bundle to S3
+make controller        # bazel build //core/controller:strimserver-controller
+make test-controller   # bazel test //core/controller:all (go test, lint, codegen staleness)
+make generate          # bazel run //core/controller:generate -- regenerate strimserver.env.example + Stream Deck wire types
+make check-generated   # bazel test //core/controller:generate_test -- fail if those files are stale in git
+make publish-iperf3    # bazel run //tools/bandwidth-test:publish_iperf3 -- build and publish the iperf3 bandwidth-test bundle to S3
 ```
+
+`bazel test //...` runs every test in the repo (controller unit tests,
+lint, generated-file staleness, and the image smoke tests that replaced
+the Dockerfiles' `RUN`-layer checks) except the three images that still
+require a real BuildKit daemon.
 
 ## AWS EC2 deployment target
 

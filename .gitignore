@@ -1,7 +1,6 @@
 .env
 core/strimserver.env
 tools/local-encoder/local-encoder.env
-go
 deploy/aws/twitch-stream-key
 deploy/aws/*.key
 
