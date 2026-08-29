@@ -1,0 +1,80 @@
+load("//tools/bazel:buildctl.bzl", "buildctl_build")
+
+# iperf3 image: `apk add` needs RUN, which rules_oci cannot express any more
+# than the FFmpeg compile or the openssh RPM build can -- same buildctl
+# hybrid as //core:ffmpeg_image_tarball and //tools/openssh:openssh_rpm.
+# Single-stage Dockerfile, so no --opt target= (matches the Makefile's
+# `$(call buildctl_oci,$(BANDWIDTH_TEST_DIR),$(IPERF3_IMAGE_NAME),)` --
+# empty third argument).
+buildctl_build(
+    name = "iperf3_image_tarball",
+    dockerfile = "Dockerfile",
+    srcs = [
+        "Dockerfile",
+        "entrypoint.sh",
+        "iperf3.env",
+    ],
+    image_name = "docker.io/library/iperf3:latest",
+    output_type = "oci_tar",
+    out = "iperf3-container.tar",
+)
+
+# --- iperf3 standalone deployment bundle (`make publish-iperf3`) -----------
+# Bug 4: the Makefile's $(IPERF3_DEPLOYMENT_TAR) requires
+# tools/bandwidth-test/{fish-deploy.sh,imdslib.sh,prompt_login.fish}, none of
+# which exist there -- they live in deploy/aws/ (verified: `make
+# publish-iperf3` fails with "No rule to make target
+# 'tools/bandwidth-test/fish-deploy.sh'"). iperf-deploy.sh's own `source
+# imdslib.sh` / `source fish-deploy.sh` lines are generic and work identically
+# against the deploy/aws/ copies (verified: those files have no
+# strimserver-specific content).
+
+load("@rules_pkg//pkg:mappings.bzl", "pkg_files", "strip_prefix")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+
+# All bundle entries land flat at the tar root, matching the Makefile's
+# `tar --transform='s#iperf-deploy\.sh$#deploy.sh#'` (no directory transform
+# is needed for the rest, since GNU tar was already invoking with each file
+# individually named on the command line -- there is no other prefix here).
+pkg_files(
+    name = "iperf3_deploy_script",
+    srcs = ["iperf-deploy.sh"],
+    renames = {"iperf-deploy.sh": "deploy.sh"},
+    strip_prefix = strip_prefix.files_only(),
+)
+
+pkg_files(
+    name = "iperf3_deploy_helpers",
+    srcs = [
+        "//deploy/aws:fish-deploy.sh",
+        "//deploy/aws:imdslib.sh",
+        "//deploy/aws:prompt_login.fish",
+    ],
+    strip_prefix = strip_prefix.files_only(),
+)
+
+pkg_files(
+    name = "iperf3_deploy_image",
+    srcs = [":iperf3_image_tarball"],
+    strip_prefix = strip_prefix.files_only(),
+)
+
+pkg_files(
+    name = "iperf3_deploy_misc",
+    srcs = [
+        "iperf3.env",
+        "iperf3.service",
+    ],
+    strip_prefix = strip_prefix.files_only(),
+)
+
+pkg_tar(
+    name = "iperf3_deployment_tar",
+    srcs = [
+        ":iperf3_deploy_helpers",
+        ":iperf3_deploy_image",
+        ":iperf3_deploy_misc",
+        ":iperf3_deploy_script",
+    ],
+    out = "iperf3-deployment.tar",
+)

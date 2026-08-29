@@ -1,1 +1,188 @@
 # strimserver root package. See plans/buildkit-to-bazel-migration.md.
+
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_files", "strip_prefix")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+# --- OpenSSH toggle ----------------------------------------------------
+# Fixes bug #3: the Makefile's `ifeq ($(ENABLE_EXPERIMENTAL_OPENSSH),"true")`
+# compares against a quoted literal, so `make ENABLE_EXPERIMENTAL_OPENSSH=true`
+# silently does nothing (only feature-toggles.env's own quoted "true" value
+# can ever match, since the in-Makefile default is unquoted). A bool_flag has
+# no string-quoting to get wrong.
+bool_flag(
+    name = "enable_experimental_openssh",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "experimental_openssh_enabled",
+    flag_values = {":enable_experimental_openssh": "True"},
+)
+
+# --- Offline fallback segment --------------------------------------------
+# The Makefile's $(OFFLINE_SEGMENT_OUTPUT) has no rule at all -- it's a bare
+# variable, a bundle prerequisite, and a tar argument, hand-placed by the
+# operator in $OUTPUT_PATH (verified: grepping the Makefile for it turns up
+# no recipe). A label_flag makes it an explicit, overridable graph input:
+# point it at a filegroup wrapping the real file, e.g.
+#   --//:offline_segment=//local/video:strimserver-offline-2160p60.mp4
+# Building without setting it fails on :offline_segment_unset's own message
+# instead of silently packaging nothing.
+label_flag(
+    name = "offline_segment",
+    build_setting_default = ":offline_segment_unset",
+)
+
+genrule(
+    name = "offline_segment_unset",
+    outs = ["offline_segment_unset.marker"],
+    cmd = """
+echo "ERROR: --//:offline_segment is not set." >&2
+echo "Point it at a target for the offline fallback clip, e.g.:" >&2
+echo "  --//:offline_segment=//local/video:strimserver-offline-2160p60.mp4" >&2
+echo "(wrap the real file in a one-line BUILD.bazel exports_files() first)." >&2
+exit 1
+""",
+    # Otherwise a plain `bazel build //...`/`bazel test //...` sweep tries to
+    # build this sentinel directly (it's a real, named, always-buildable
+    # target regardless of what the label_flag currently resolves to) and
+    # fails even when --//:offline_segment has been overridden to something
+    # real. `manual` only affects wildcard expansion, not explicit
+    # dependency edges, so the label_flag's default still resolves normally.
+    tags = ["manual"],
+)
+
+# --- No-Twitch-key gate ---------------------------------------------------
+# Gates :strimserver_deployment_tar (used by :package and :release) but NOT
+# :publish_strimserver, matching the Makefile exactly (verified: `package`'s
+# recipe calls check-no-twitch-key explicitly; `publish-strimserver` depends
+# only on the tar target, which never invoked the check itself).
+genrule(
+    name = "check_no_twitch_key",
+    srcs = ["//core:strimserver.env"],
+    outs = ["check_no_twitch_key.ok"],
+    cmd = """
+key="$$(set -a; . $(location //core:strimserver.env); set +a; printf '%s' "$$TWITCH_STREAM_KEY")"
+if [ -n "$$key" ]; then
+  echo "ERROR: TWITCH_STREAM_KEY is set in core/strimserver.env." >&2
+  echo "Redistributable bundles must ship an EMPTY key (injected at deploy time)." >&2
+  echo "Empty it for :strimserver_deployment_tar / :release, or use" >&2
+  echo ":publish_strimserver for a private, single-tenant build that bakes your own key." >&2
+  exit 1
+fi
+touch $@
+""",
+)
+
+# --- Bundle ----------------------------------------------------------------
+# pkg_tar + strip_prefix.files_only() replaces GNU tar --transform, matching
+# the Makefile's flattened layout exactly. Drops --ignore-failed-read: a
+# missing input now fails the build loudly (exactly what would have
+# surfaced bug #4 -- the broken publish-iperf3 deps -- years ago) instead of
+# silently shipping an incomplete bundle.
+
+pkg_files(
+    name = "bundle_scripts",
+    srcs = [
+        "feature-toggles.env",
+        "//deploy/aws:deploy.sh",
+        "//deploy/aws:fish-deploy.sh",
+        "//deploy/aws:imdslib.sh",
+        "//deploy/aws:prompt_login.fish",
+        "//deploy/aws:strimserver.service",
+        "//core:strimserver.env",
+        "//core:mediamtx.yaml.template",
+        "//core:transcode.sh",
+        "//core:notify.sh",
+    ],
+    strip_prefix = strip_prefix.files_only(),
+)
+
+pkg_files(
+    name = "bundle_images",
+    srcs = [
+        "//core:ffmpeg_image_tarball",
+        "//core:mediamtx_image_tar_file",
+        "//core/controller:controller_image_tar_file",
+    ],
+    renames = {
+        "//core:mediamtx_image_tar_file": "mediamtx-container.tar",
+        "//core/controller:controller_image_tar_file": "controller-container.tar",
+    },
+    strip_prefix = strip_prefix.files_only(),
+)
+
+pkg_files(
+    name = "bundle_offline_segment",
+    srcs = [":offline_segment"],
+    strip_prefix = strip_prefix.files_only(),
+)
+
+pkg_files(
+    name = "bundle_openssh_rpm",
+    srcs = select({
+        ":experimental_openssh_enabled": ["//tools/openssh:openssh_rpm"],
+        "//conditions:default": [],
+    }),
+    strip_prefix = strip_prefix.files_only(),
+)
+
+pkg_tar(
+    name = "_strimserver_deployment_tar_unchecked",
+    srcs = [
+        ":bundle_images",
+        ":bundle_offline_segment",
+        ":bundle_openssh_rpm",
+        ":bundle_scripts",
+    ],
+    out = "strimserver-deployment.tar",
+)
+
+genrule(
+    name = "strimserver_deployment_tar",
+    srcs = [
+        ":_strimserver_deployment_tar_unchecked",
+        ":check_no_twitch_key",
+    ],
+    outs = ["strimserver-deployment.checked.tar"],
+    cmd = "cp $(location :_strimserver_deployment_tar_unchecked) $@",
+)
+
+genrule(
+    name = "strimserver_deployment_sha256",
+    srcs = [":strimserver_deployment_tar"],
+    outs = ["strimserver-deployment.tar.sha256"],
+    cmd = "printf '%s  strimserver-deployment.tar\\n' " +
+          "\"$$(sha256sum $(location :strimserver_deployment_tar) | cut -d' ' -f1)\" > $@",
+)
+
+# `bazel build //:package` replaces `make package` (the Makefile's default goal).
+filegroup(
+    name = "package",
+    srcs = [
+        ":strimserver_deployment_sha256",
+        ":strimserver_deployment_tar",
+    ],
+)
+
+sh_binary(
+    name = "release",
+    srcs = ["release.sh"],
+    data = [
+        ":strimserver_deployment_sha256",
+        ":strimserver_deployment_tar",
+    ],
+    args = [
+        "$(rootpath :strimserver_deployment_tar)",
+        "$(rootpath :strimserver_deployment_sha256)",
+    ],
+)
+
+sh_binary(
+    name = "publish_strimserver",
+    srcs = ["publish_strimserver.sh"],
+    data = [":_strimserver_deployment_tar_unchecked"],
+    args = ["$(rootpath :_strimserver_deployment_tar_unchecked)"],
+)

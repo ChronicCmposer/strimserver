@@ -46,7 +46,7 @@ def _buildctl_build_impl(ctx):
         "--local context=" + context_dir,
         "--local dockerfile=" + context_dir,
         "--opt filename=./" + dockerfile.basename,
-        "--opt target=" + ctx.attr.target,
+        ("--opt target=" + ctx.attr.target) if ctx.attr.target else "",
         build_arg_opts,
         "--progress=plain",
         output_opt,
@@ -90,8 +90,8 @@ buildctl_build = rule(
                   "(unlike make, which always rebuilds these targets unconditionally).",
         ),
         "target": attr.string(
-            mandatory = True,
-            doc = "The Dockerfile stage to build (--opt target=...).",
+            doc = "The Dockerfile stage to build (--opt target=...). Omit for a " +
+                  "single-stage Dockerfile with no named stages.",
         ),
         "addr": attr.string(
             doc = "Optional buildctl daemon address, e.g. tcp://127.0.0.1:1234. " +

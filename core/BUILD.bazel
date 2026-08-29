@@ -7,7 +7,17 @@ load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("//tools/bazel:deb_file.bzl", "deb_file")
 
-exports_files(["strimserver.env.example"])
+exports_files([
+    "strimserver.env.example",
+    "mediamtx.yaml.template",
+    "transcode.sh",
+    "notify.sh",
+])
+
+# core/strimserver.env is gitignored (user-provided secrets); referencing it
+# here means //:strimserver_deployment_tar fails at analysis time naming
+# this exact path if it doesn't exist yet -- see README's Build instructions.
+exports_files(["strimserver.env"])
 
 # Regenerated from the controller's env spec; see //core/controller:generate.
 write_source_files(
@@ -207,4 +217,12 @@ buildctl_build(
     image_name = "docker.io/library/ffmpeg:latest",
     output_type = "oci_tar",
     out = "ffmpeg-container.tar",
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "mediamtx_image_tar_file",
+    srcs = [":mediamtx_image_tarball"],
+    output_group = "tarball",
+    visibility = ["//visibility:public"],
 )

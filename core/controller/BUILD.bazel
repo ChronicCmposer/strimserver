@@ -224,3 +224,13 @@ sh_test(
     args = ["$(location :controller_files_tar)"],
     data = [":controller_files_tar"],
 )
+
+# Promotes oci_load's named "tarball" output group (the raw OCI tar; the
+# default output is a runnable `docker load`-style script) into a plain
+# filegroup so //:strimserver_deployment_tar can depend on it normally.
+filegroup(
+    name = "controller_image_tar_file",
+    srcs = [":controller_image_tarball"],
+    output_group = "tarball",
+    visibility = ["//visibility:public"],
+)
