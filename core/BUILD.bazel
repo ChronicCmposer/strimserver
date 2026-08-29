@@ -1,5 +1,6 @@
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/bazel:buildctl.bzl", "buildctl_build")
 load("@rules_distroless//distroless:defs.bzl", "cacerts")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
@@ -186,4 +187,24 @@ sh_test(
     srcs = ["mediamtx_smoke_test.sh"],
     args = ["$(location :mediamtx_files_tar)"],
     data = [":mediamtx_files_tar"],
+)
+
+# =============================================================================
+# ffmpeg image: stays on buildctl (see //tools/bazel:buildctl.bzl) -- compiles
+# FFmpeg from source against the CUDA devel image, which rules_oci cannot
+# express. Byte-identical to today: same Dockerfile, same daemon (the SSH
+# tunnel from tools/buildkit-scripts/), same sm_75 build. Verified: this
+# target's `build` + `ffmpeg` stages (core/Dockerfile:27-222) COPY nothing
+# from the local build context, so `srcs` is just the Dockerfile itself.
+# =============================================================================
+
+buildctl_build(
+    name = "ffmpeg_image_tarball",
+    dockerfile = "Dockerfile",
+    srcs = ["Dockerfile"],
+    target = "ffmpeg",
+    addr = "tcp://127.0.0.1:1234",
+    image_name = "docker.io/library/ffmpeg:latest",
+    output_type = "oci_tar",
+    out = "ffmpeg-container.tar",
 )

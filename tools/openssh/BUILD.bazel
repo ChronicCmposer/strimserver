@@ -1,0 +1,17 @@
+load("//tools/bazel:buildctl.bzl", "buildctl_build")
+
+# Experimental OpenSSH RPM: stays on buildctl -- autoreconf/configure/make/
+# rpmbuild is a compilation pipeline rules_oci cannot express. Gated behind
+# ENABLE_EXPERIMENTAL_OPENSSH; see //:bundle in the root BUILD.bazel.
+buildctl_build(
+    name = "openssh_rpm",
+    dockerfile = "Dockerfile",
+    srcs = [
+        "Dockerfile",
+        "sshd_config",
+    ],
+    target = "artifact",
+    output_type = "local_file",
+    out = "openssh-experimental.rpm",
+    visibility = ["//visibility:public"],
+)
