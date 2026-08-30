@@ -1,6 +1,5 @@
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-load("//tools/bazel:buildctl.bzl", "buildctl_build")
 load("@rules_distroless//distroless:defs.bzl", "cacerts")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
@@ -30,15 +29,40 @@ write_source_files(
 
 # =============================================================================
 # mediamtx image (FROM scratch). Ports core/Dockerfile's `mediamtx` target
-# (lines 226-261) -- ffmpeg stays on buildctl (see Phase 4), so only the
-# mediamtx target moves here. libfdk-aac is ffmpeg-only and isn't needed.
+# (lines 226-261). The ffmpeg image lives right below, assembled from the
+# pinned @ffmpeg_dist artifact; libfdk-aac is ffmpeg-only and isn't needed
+# here.
 # =============================================================================
 
+# The mediamtx binary is linux/amd64. core/Dockerfile's mediamtx-fetch stage
+# stripped it inside an amd64 container; here the host `strip` is used, which
+# cannot cross-strip (e.g. an amd64 binary on an arm64 build host -- the
+# Dockerfile's binutils was amd64-native). Stripping is a pure size
+# optimization for this static Go binary, so on a cross-arch host we skip it
+# with a loud note instead of failing the whole build; the amd64 bytes are
+# otherwise identical, and the smoke test does not depend on stripping.
 genrule(
     name = "mediamtx_bin_stripped",
     srcs = ["@mediamtx_dist//:mediamtx"],
     outs = ["mediamtx"],
-    cmd = "cp $(location @mediamtx_dist//:mediamtx) $@ && chmod +w $@ && strip $@",
+    cmd = """
+set -eu
+cp $(location @mediamtx_dist//:mediamtx) $@
+chmod +w $@
+host="$$(uname -m)"
+machine="$$(readelf -h $@ | awk -F': *' '/Machine:/{print $$2}' | tr '[:upper:]' '[:lower:]')"
+stripable=0
+case "$$machine" in
+  *x86-64*)  [ "$$host" = x86_64 ] && stripable=1 ;;
+  *AArch64*) [ "$$host" = aarch64 ] && stripable=1 ;;
+  *)         stripable=1 ;;
+esac
+if [ "$$stripable" = 1 ]; then
+  strip $@
+else
+  echo "note: skipping strip of $$machine mediamtx on $$host host (no cross strip)" >&2
+fi
+""",
 )
 
 deb_file(
@@ -200,24 +224,157 @@ sh_test(
 )
 
 # =============================================================================
-# ffmpeg image: stays on buildctl (see //tools/bazel:buildctl.bzl) -- compiles
-# FFmpeg from source against the CUDA devel image, which rules_oci cannot
-# express. Byte-identical to today: same Dockerfile, same daemon (the SSH
-# tunnel from tools/buildkit-scripts/), same sm_75 build. Verified: this
-# target's `build` + `ffmpeg` stages (core/Dockerfile:27-222) COPY nothing
-# from the local build context, so `srcs` is just the Dockerfile itself.
+# ffmpeg image (FROM scratch). Ports core/Dockerfile's `ffmpeg` target (lines
+# 184-222). The binary comes from the pinned, checksummed @ffmpeg_dist
+# artifact (built out-of-band by tools/ffmpeg-dist/publish.sh); the runtime
+# debs below (libc6 set + libfdk-aac2t64) serve both images.
 # =============================================================================
 
-buildctl_build(
+deb_file(
+    name = "libdl_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libdl.so.2",
+)
+
+deb_file(
+    name = "librt_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/librt.so.1",
+)
+
+deb_file(
+    name = "libnss_dns_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libnss_dns.so.2",
+)
+
+deb_file(
+    name = "libnss_files_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libnss_files.so.2",
+)
+
+# libfdk-aac2t64 ships libfdk-aac.so.2 as a SYMLINK to libfdk-aac.so.2.0.3, and
+# deb_file (tar -xzf of a single member + cp -p) cannot copy a dangling symlink
+# (the target member is not extracted). Extract the real versioned file here and
+# recreate the soname symlink in :ffmpeg_files_tar -- matching the Debian
+# package layout (and core/Dockerfile's COPY of the symlink).
+deb_file(
+    name = "libfdk_aac_real",
+    data = "@trixie//libfdk-aac2t64/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libfdk-aac.so.2.0.3",
+)
+
+pkg_files(
+    name = "ffmpeg_usr_bin",
+    srcs = [
+        ":busybox_bin",
+        ":nice_bin",
+    ],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/usr/bin",
+)
+
+pkg_files(
+    name = "ffmpeg_lib64",
+    srcs = [":ld_linux"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib64",
+)
+
+pkg_files(
+    name = "ffmpeg_libs",
+    srcs = [
+        ":libc_so",
+        ":libm_so",
+        ":libdl_so",
+        ":libpthread_so",
+        ":librt_so",
+        ":libresolv_so",
+        ":libnss_dns_so",
+        ":libnss_files_so",
+    ],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib/x86_64-linux-gnu",
+)
+
+pkg_files(
+    name = "ffmpeg_fdk_libs",
+    srcs = [":libfdk_aac_real"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/usr/lib/x86_64-linux-gnu",
+)
+
+pkg_files(
+    name = "ffmpeg_nsswitch",
+    srcs = [":nsswitch_conf"],
+    attributes = pkg_attributes(mode = "0644"),
+    prefix = "/etc",
+    renames = {":nsswitch_conf": "nsswitch.conf"},
+)
+
+pkg_files(
+    name = "ffmpeg_root",
+    srcs = ["@ffmpeg_dist//:ffmpeg"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+)
+
+pkg_tar(
+    name = "ffmpeg_files_tar",
+    srcs = [
+        ":ffmpeg_usr_bin",
+        ":ffmpeg_lib64",
+        ":ffmpeg_libs",
+        ":ffmpeg_fdk_libs",
+        ":ffmpeg_nsswitch",
+        ":ffmpeg_root",
+    ],
+    symlinks = {
+        "/bin/sh": "/usr/bin/busybox",
+        "/usr/bin/cat": "/usr/bin/busybox",
+        "/usr/bin/ln": "/usr/bin/busybox",
+        "/usr/bin/mkdir": "/usr/bin/busybox",
+        "/usr/bin/nc": "/usr/bin/busybox",
+        "/usr/bin/rm": "/usr/bin/busybox",
+        "/usr/bin/sh": "/usr/bin/busybox",
+        "/usr/bin/wget": "/usr/bin/busybox",
+        # soname symlink for the real libfdk-aac.so.2.0.3 shipped above
+        "/usr/lib/x86_64-linux-gnu/libfdk-aac.so.2": "libfdk-aac.so.2.0.3",
+    },
+)
+
+oci_image(
+    name = "ffmpeg_image",
+    architecture = "amd64",
+    os = "linux",
+    tars = [":ffmpeg_files_tar"],
+    env = {
+        "NVIDIA_VISIBLE_DEVICES": "all",
+        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video",
+        "LD_LIBRARY_PATH": "/usr/lib64",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    },
+)
+
+oci_load(
     name = "ffmpeg_image_tarball",
-    dockerfile = "Dockerfile",
-    srcs = ["Dockerfile"],
-    target = "ffmpeg",
-    addr = "tcp://127.0.0.1:1234",
-    image_name = "docker.io/library/ffmpeg:latest",
-    output_type = "oci_tar",
-    out = "ffmpeg-container.tar",
+    repo_tags = ["docker.io/library/ffmpeg:latest"],
+    image = ":ffmpeg_image",
+)
+
+filegroup(
+    name = "ffmpeg_image_tar_file",
+    srcs = [":ffmpeg_image_tarball"],
+    output_group = "tarball",
     visibility = ["//visibility:public"],
+)
+
+sh_test(
+    name = "ffmpeg_smoke_test",
+    srcs = ["ffmpeg_smoke_test.sh"],
+    args = ["$(location :ffmpeg_files_tar)"],
+    data = [":ffmpeg_files_tar"],
 )
 
 filegroup(

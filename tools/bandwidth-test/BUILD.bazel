@@ -2,8 +2,11 @@ load("//tools/bazel:buildctl.bzl", "buildctl_build")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
 # iperf3 image: `apk add` needs RUN, which rules_oci cannot express any more
-# than the FFmpeg compile or the openssh RPM build can -- same buildctl
-# hybrid as //core:ffmpeg_image_tarball and //tools/openssh:openssh_rpm.
+# than the openssh RPM build can -- same buildctl hybrid as
+# //tools/openssh:openssh_rpm. (This comment used to cite
+# //core:ffmpeg_image_tarball too, but that buildctl target was deleted: the
+# ffmpeg image is now assembled by rules_oci from the pinned @ffmpeg_dist
+# artifact.)
 # Single-stage Dockerfile, so no --opt target= (matches the Makefile's
 # `$(call buildctl_oci,$(BANDWIDTH_TEST_DIR),$(IPERF3_IMAGE_NAME),)` --
 # empty third argument).

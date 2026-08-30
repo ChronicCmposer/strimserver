@@ -35,10 +35,13 @@ file.
 > no Docker, Kubernetes, or higher-level orchestrator in the
 > loop. The controller links the `containerd/v2` client
 > library and drives the containerd API directly to create,
-> snapshot, start, stop, and supervise stage containers;
-> images are built with `buildctl` against a BuildKit
-> daemon. Both are hard requirements on the build host and
-> on the EC2 runtime host.
+> snapshot, start, stop, and supervise stage containers.
+> containerd is a hard requirement on the EC2 runtime host,
+> which the controller drives directly. The OCI images are
+> assembled by Bazel (`rules_oci`) from pinned inputs;
+> BuildKit/`buildctl` is needed only for two optional,
+> off-path build targets (the experimental OpenSSH RPM and
+> the iperf3 bandwidth-test image).
 
 The runtime is split across three independent OCI images,
 all managed by the controller:
@@ -47,7 +50,7 @@ all managed by the controller:
 | --- | --- | --- |
 | `strimserver-controller:latest` | `core/controller/Dockerfile` (`runtime`) | Go control plane: drives containerd, reconciles stages, serves the HTTP/WebSocket API |
 | `mediamtx:latest` | `core/Dockerfile` (`--target mediamtx`) | MediaMTX media server: SRT ingest, RTSP routing, Unix MPEG-TS source, recording |
-| `ffmpeg:latest` | `core/Dockerfile` (`--target ffmpeg`) | FFmpeg + NVIDIA HW accel; the same image backs both ffmpeg stages |
+| `ffmpeg:latest` | `core/BUILD.bazel` (rules_oci) from the pinned `@ffmpeg_dist` artifact | FFmpeg + NVIDIA HW accel; the same image backs both ffmpeg stages |
 
 The controller supervises **three pipeline stages**, each a
 container whose desired/actual state it reconciles:
@@ -179,11 +182,12 @@ gracefully on shutdown.
 
 | Component | Version / source | Where used |
 | --- | --- | --- |
-| NVIDIA CUDA build image | `nvidia/cuda:13.0.2-devel-ubuntu24.04` | FFmpeg build stage in `core/Dockerfile` |
-| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | Git branch `release/8.0` | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
-| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.0` | NVIDIA codec integration for FFmpeg |
-| FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Compiled SASS target in `core/Dockerfile`; see the EC2 note below |
-| Intermediate Debian image | `debian:trixie-20260518-slim` | `mediamtx-fetch` / `libs` stages in `core/Dockerfile` and the `libs` stage in `core/controller/Dockerfile` (build-time only; runtime images are `FROM scratch`) |
+| NVIDIA CUDA redistributables | `13.0.2` (`cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm`; per-component sha256 pinned via the `redistrib_13.0.2.json` manifest) | Compile the FFmpeg artifact in `tools/ffmpeg-dist` (producer-only; not needed for a normal package build) |
+| Prebuilt FFmpeg artifact | `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz` (sha256 pinned in `MODULE.bazel` via `http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
+| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | `8.0` at commit `281c902` (tip of `release/8.0`, 2026-08-14; pinned and baked into the prebuilt artifact) | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
+| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.0` at commit `e844e5b2` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
+| FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
+| Intermediate Debian image | `debian:trixie-20260824-slim` (snapshot `20260824T082821Z`) | Base image for the artifact producer (`tools/ffmpeg-dist/Dockerfile`); the same snapshot supplies the scratch-image runtime libs via `@trixie` (rules_distroless) |
 | Go toolchain | `golang:1.26.4-alpine3.24` | Controller build and test stages (`core/controller/Dockerfile`); module declares `go 1.26.4` |
 | [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.17.0`, Linux amd64 release tarball | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
 | `libfdk-aac` | `libfdk-aac-dev` in build stage; `libfdk-aac2t64` in runtime-libs stage | AAC encode support through FFmpeg |
@@ -224,20 +228,19 @@ pinned by the source tree:
   `MODULE.bazel`); you don't need either installed separately
   just to build. `make` is kept as a thin facade over `bazel`
   for muscle memory — see `Makefile`.
-- **containerd** and **BuildKit / `buildctl`** — still
-  required for the three images Bazel cannot express as a
-  pure OCI archive assembly, because they're defined by
-  compilation steps (`RUN` a compiler, a package manager) that
-  `rules_oci` deliberately has no equivalent for: the `ffmpeg`
-  image (compiles FFmpeg against the CUDA devel image, and
-  builds against a BuildKit daemon at `tcp://127.0.0.1:1234` —
-  intended for a remote/tunneled `buildkitd`; see
-  `tools/buildkit-scripts/`), the experimental OpenSSH RPM
-  (autoreconf/configure/make/rpmbuild), and the `iperf3`
-  bandwidth-test image (`apk add`, using the default `buildctl`
-  address). The `strimserver-controller` and `mediamtx` images
-  are built natively by Bazel and need neither. The EC2 runtime
-  host runs containerd, which the controller drives directly.
+- **containerd** and **BuildKit / `buildctl`** — containerd
+  runs on the EC2 runtime host, which the controller drives
+  directly. BuildKit/`buildctl` is required only for the two
+  off-path targets Bazel cannot express as a pure OCI archive
+  assembly, because they're defined by compilation steps (`RUN`
+  a compiler, a package manager) that `rules_oci` deliberately
+  has no equivalent for: the experimental OpenSSH RPM
+  (autoreconf/configure/make/rpmbuild) and the `iperf3`
+  bandwidth-test image (`apk add`). The helper scripts in
+  `tools/buildkit-scripts/` can deploy and tunnel a BuildKit
+  daemon if one is needed. The three bundled images
+  (`strimserver-controller`, `mediamtx`, and `ffmpeg`) are all
+  assembled natively by Bazel and need neither.
 - AWS CLI with credentials authorized to read and write the
   configured S3 bucket and launch/manage EC2 instances.
 - `jq`, used by AWS helper scripts.
@@ -245,7 +248,10 @@ pinned by the source tree:
 - `tar`, `sudo`, OpenSSH client, and standard POSIX shell
   tooling.
 - An NVIDIA-capable build environment (CUDA toolchain) is
-  required to **build** the GPU-enabled FFmpeg image.
+  required only when **rebuilding** the GPU FFmpeg artifact
+  via `tools/ffmpeg-dist`; a normal `make package` /
+  `bazel build //:package` consumes the prebuilt artifact and
+  needs no CUDA toolchain.
 
 ## Build instructions
 
@@ -305,10 +311,48 @@ to any `bazel build`/`bazel run` invocation below (or add it to a
 repeat it). Building without it fails with a clear message telling you to
 set the flag.
 
-Start or connect to a BuildKit daemon. The `ffmpeg` image
-build expects `buildctl` to reach `tcp://127.0.0.1:1234`;
-the helper scripts in `tools/buildkit-scripts/` can deploy
-and tunnel to a remote BuildKit daemon if desired.
+Start or connect to a BuildKit daemon only when building one
+of the two off-path targets: the experimental OpenSSH RPM
+(`ENABLE_EXPERIMENTAL_OPENSSH="true"`) or the `iperf3`
+bandwidth-test image (`make publish-iperf3`). The main
+`make package` / `bazel build //:package` path — including
+the `ffmpeg` image, which is assembled by rules_oci from the
+pinned `@ffmpeg_dist` artifact — needs no daemon, no SSH
+tunnel, and no `sudo`.
+
+## Rebuilding the FFmpeg artifact
+
+The `ffmpeg` image's binary is a pinned, checksummed prebuilt
+artifact fetched by Bazel through `MODULE.bazel`'s
+`http_archive(name = "ffmpeg_dist", ...)`. The FFmpeg compile
+does not run in the Bazel graph — it happens out-of-band, once
+per version bump, in `tools/ffmpeg-dist/`, and **the sha256 in
+`MODULE.bazel` is the integrity guarantee**.
+
+To rebuild and publish a new artifact:
+
+```bash
+cd tools/ffmpeg-dist
+S3_BUCKET="s3://your-bucket-name" AWS_REGION="us-east-1" ./publish.sh
+```
+
+`publish.sh` builds `tools/ffmpeg-dist/Dockerfile` (with
+`docker`, falling back to `buildctl`), extracts the stripped
+`ffmpeg` binary plus its `BUILD-INFO.txt` provenance record,
+writes `ffmpeg-<ffver>-deb<date>-cuda<ver>-sm<N>-<shortsha>.tar.gz`
+(e.g. `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz`),
+uploads it to the immutable `s3://<bucket>/ffmpeg/` prefix with
+`--acl public-read`, and prints the `http_archive` stanza to paste
+into `MODULE.bazel`. `BUILD-INFO.txt` records the FFmpeg commit,
+nv-codec-headers tag, Debian snapshot, CUDA component sha256s,
+`-gencode` target, the full `configure` line, and `readelf -d`
+output, so the blob always stays reproducible.
+
+A weekly canary (`.github/workflows/ffmpeg-reproducibility.yml`)
+rebuilds the artifact on an ordinary GitHub runner and opens an
+issue if the sha256 drifts from the pin. Bucket name, region,
+and AWS profile remain open items; the `MODULE.bazel` URLs are
+placeholders until the first publish.
 
 Build the deployment bundle. There are three ways to produce
 and publish `strimserver-deployment.tar`, depending on how
@@ -334,7 +378,9 @@ bazel run --//:offline_segment=... //:publish_strimserver   # reads S3_BUCKET fr
 
 All three build the same three OCI images —
 `strimserver-controller:latest`, `ffmpeg:latest`, and
-`mediamtx:latest` — then package those images together with
+`mediamtx:latest` — all assembled natively by Bazel
+(`rules_oci`) from pinned inputs — then package those images
+together with
 the configuration, scripts, systemd service, feature toggles,
 and the offline segment into `strimserver-deployment.tar`.
 `make package` and `make release` also produce a `.sha256`
@@ -376,8 +422,11 @@ make publish-iperf3    # bazel run //tools/bandwidth-test:publish_iperf3 -- buil
 
 `bazel test //...` runs every test in the repo (controller unit tests,
 lint, generated-file staleness, and the image smoke tests that replaced
-the Dockerfiles' `RUN`-layer checks) except the three images that still
-require a real BuildKit daemon.
+the Dockerfiles' `RUN`-layer checks — including `//core:ffmpeg_smoke_test`,
+which also asserts every `DT_NEEDED` library is packaged in the image)
+except the two remaining off-path targets that still require a real
+BuildKit daemon (the experimental OpenSSH RPM and the `iperf3`
+bandwidth-test image).
 
 ## AWS EC2 deployment target
 
@@ -591,7 +640,9 @@ generate` from the controller's Go definitions.
 - Add a local `docker compose` or containerd development
   profile for non-AWS smoke tests.
 - Add automated CI for shell linting, Dockerfile builds,
-  controller tests/lint, and `make check-generated`.
+  controller tests/lint, and `make check-generated`. (The pinned
+  FFmpeg artifact already has a weekly reproducibility canary —
+  `.github/workflows/ffmpeg-reproducibility.yml`.)
 - Add integration tests that emulate SRT ingest and verify
   normalized stream creation, recording, and RTMP egress
   behavior.
@@ -659,17 +710,20 @@ Core dependencies:
 - [MediaMTX](https://github.com/bluenviron/mediamtx) — the
   media server used for SRT ingest, RTSP routing, the Unix
   MPEG-TS source, and recording.
-- [FFmpeg](https://github.com/FFmpeg/FFmpeg) — built from
-  source (`release/8.0`) for the normalize and scale/egress
-  stages.
+- [FFmpeg](https://github.com/FFmpeg/FFmpeg) — the normalize
+  and scale/egress stages run a pinned prebuilt FFmpeg 8.0
+  artifact (see *Rebuilding the FFmpeg artifact*).
 - [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers)
   — NVIDIA codec headers enabling NVENC/NVDEC/CUVID in the
   FFmpeg build.
 - [containerd](https://github.com/containerd/containerd) —
   the container runtime the controller drives directly via
   the `containerd/v2` client.
-- [BuildKit](https://github.com/moby/buildkit) — used
-  through `buildctl` to build the OCI images.
+- [BuildKit](https://github.com/moby/buildkit) — used through
+  `buildctl` only for the two off-path targets rules_oci cannot
+  express (the experimental OpenSSH RPM and the iperf3
+  bandwidth-test image); the bundled OCI images are assembled by
+  Bazel (`rules_oci`).
 - [Container Device Interface
   (CDI)](https://github.com/cncf-tags/container-device-interface)
   — the specification used to inject the NVIDIA GPU and

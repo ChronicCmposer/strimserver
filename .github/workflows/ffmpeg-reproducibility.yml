@@ -1,0 +1,75 @@
+# Tier 1 reproducibility canary for the pinned @ffmpeg_dist artifact.
+#
+# Every Monday at 03:00 UTC (and on demand via workflow_dispatch) this rebuilds
+# the ffmpeg artifact from the exact same pins and compares its sha256 against
+# the integrity pin in MODULE.bazel. Tier 1 means bit-identical: a mismatch
+# opens an issue rather than only going red, so it is actually noticed. The
+# Tier 2 fallback -- compare a semantic fingerprint instead (`ffmpeg
+# -buildconf`, the `readelf -d` NEEDED set, and the `-encoders` / `-filters`
+# lists) -- is documented in plans/ffmpeg-prebuilt-artifact.md.
+#
+# The build needs no GPU: nvcc compiles and never runs on a GPU, so the
+# github-hosted ubuntu-latest runner (amd64, with docker) is sufficient.
+name: ffmpeg-artifact-reproducibility
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rebuild the ffmpeg artifact (local only)
+        run: |
+          SKIP_UPLOAD=1 S3_BUCKET=unused ./tools/ffmpeg-dist/publish.sh 2>&1 | tee /tmp/publish.log
+
+      - name: Compare the rebuilt sha256 against the MODULE.bazel pin
+        id: compare
+        run: |
+          actual="$(awk '/==> sha256:/{print $3}' /tmp/publish.log)"
+          pinned="$(grep -A5 'name = "ffmpeg_dist"' MODULE.bazel \
+            | grep -oE 'sha256 = "[0-9a-f]{64}"' | head -n1 \
+            | sed -E 's/.*"([0-9a-f]{64})".*/\1/' || true)"
+          echo "actual=$actual"
+          echo "pinned=$pinned"
+          if [ -z "$pinned" ]; then
+            echo "error: no pinned sha256 for ffmpeg_dist found in MODULE.bazel (placeholder not yet filled?)" >&2
+            exit 1
+          fi
+          if [ "$actual" = "$pinned" ]; then
+            echo "match=true"
+            echo "match=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "match=false"
+            echo "match=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open an issue on mismatch
+        if: steps.compare.outputs.match == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifact="$(awk '/==> artifact:/{print $3}' /tmp/publish.log)"
+          actual="$(awk '/==> sha256:/{print $3}' /tmp/publish.log)"
+          pinned="$(grep -A5 'name = "ffmpeg_dist"' MODULE.bazel \
+            | grep -oE 'sha256 = "[0-9a-f]{64}"' | head -n1 \
+            | sed -E 's/.*"([0-9a-f]{64})".*/\1/' || true)"
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "ffmpeg artifact no longer bit-reproducible" \
+            --body "$(printf '%s\n' \
+              'The weekly rebuild of `@ffmpeg_dist` no longer matches the pin in MODULE.bazel.' \
+              '' \
+              "Artifact: $artifact" \
+              "Pinned sha256 (MODULE.bazel): $pinned" \
+              "Rebuilt sha256 (publish.sh): $actual" \
+              '' \
+              'This is the Tier 1 (bit-identical) canary failing. Before relaxing anything, check whether the recipe itself drifted (FFmpeg point release, nv-codec-headers tag, Debian snapshot, or CUDA redistributable).' \
+              '' \
+              'Tier 2 fallback (documented in plans/ffmpeg-prebuilt-artifact.md): compare a semantic fingerprint instead -- `ffmpeg -buildconf`, the `readelf -d` NEEDED set, and the `-encoders` / `-filters` lists. Weaker, but still catches a pin drift that silently drops libfdk_aac.')"

@@ -103,11 +103,12 @@ pkg_files(
 pkg_files(
     name = "bundle_images",
     srcs = [
-        "//core:ffmpeg_image_tarball",
+        "//core:ffmpeg_image_tar_file",
         "//core:mediamtx_image_tar_file",
         "//core/controller:controller_image_tar_file",
     ],
     renames = {
+        "//core:ffmpeg_image_tar_file": "ffmpeg-container.tar",
         "//core:mediamtx_image_tar_file": "mediamtx-container.tar",
         "//core/controller:controller_image_tar_file": "controller-container.tar",
     },

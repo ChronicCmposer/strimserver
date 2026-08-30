@@ -100,14 +100,14 @@ http_archive(
 
 # --- Debian donor packages for the FROM-scratch images ----------------------
 # Matches core/Dockerfile's and core/controller/Dockerfile's `libs` stages
-# (both `debian:trixie-20260518-slim`). Pinned to a snapshot.debian.org
+# (both `debian:trixie-20260824-slim`). Pinned to a snapshot.debian.org
 # timestamp near that image's build date instead of a rolling mirror, per
 # rules_distroless's own reproducibility guidance.
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 
 apt.sources_list(
     types = ["deb"],
-    uris = ["https://snapshot.debian.org/archive/debian/20260518T203109Z"],
+    uris = ["https://snapshot.debian.org/archive/debian/20260824T082821Z"],
     suites = ["trixie"],
     components = ["main", "contrib", "non-free", "non-free-firmware"],
     architectures = ["amd64"],
@@ -119,11 +119,14 @@ apt.install(
     packages = [
         # core/controller/Dockerfile's libs stage.
         "dash",
-        # core/Dockerfile's libs stage, mediamtx target only (ffmpeg stays on
-        # buildctl with its own unmodified Dockerfile stage -- see Phase 4).
+        # core/Dockerfile's libs stage. These runtime debs now serve BOTH
+        # FROM-scratch images: the ffmpeg image (assembled from the pinned
+        # @ffmpeg_dist artifact below -- libfdk-aac2t64 resolves because the
+        # sources_list above already declares non-free) and the mediamtx image.
         "busybox-static",
         "gettext-base",
         "ca-certificates",
+        "libfdk-aac2t64",
         # glibc (ld-linux, libc/libm/libpthread/libresolv.so) and nice (a
         # coreutils binary the base debian:trixie-slim image ships
         # pre-installed, so the Dockerfile never apt-get installs it
@@ -143,6 +146,24 @@ http_archive(
     url = "https://github.com/bluenviron/mediamtx/releases/download/v1.17.0/mediamtx_v1.17.0_linux_amd64.tar.gz",
     sha256 = "97165888845f3a0a9bfeaa4b34bd19d72aa3f8d9abd39f9a02042c9fa434fb5a",
     build_file_content = "exports_files([\"mediamtx\"])",
+)
+
+# --- FFmpeg -------------------------------------------------------------
+# The ffmpeg binary is built out-of-band by tools/ffmpeg-dist/publish.sh
+# (compiling FFmpeg against CUDA needs nvcc, not a GPU -- see
+# plans/ffmpeg-prebuilt-artifact.md). S3 is the canonical source; the GitHub
+# Release asset is a mirror. The sha256 is the integrity pin and is now the
+# real checksum of the built artifact; the two URLs below are still
+# placeholders until the artifact is actually published (the repo's bucket is
+# a config open item -- publish.sh prints the final stanza after `aws login`).
+http_archive(
+    name = "ffmpeg_dist",
+    urls = [
+        "https://<bucket-name>.s3.us-east-1.amazonaws.com/ffmpeg/ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz",
+        "https://github.com/<owner>/<repo>/releases/download/ffmpeg-artifacts/ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz",
+    ],
+    sha256 = "2df93667c7e12f2666be244772a41c653a02cab74880e685623770bd9c86ac34",
+    build_file_content = 'exports_files(["ffmpeg", "BUILD-INFO.txt"])',
 )
 
 # --- Stream Deck plugin (rollup) ------------------------------------------

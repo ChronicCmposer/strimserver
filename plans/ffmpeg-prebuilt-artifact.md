@@ -1,6 +1,11 @@
 # Prebuilt FFmpeg artifact: remove BuildKit from the default build path
 
-> **Status:** proposed — nothing implemented yet.
+> **Status:** implemented. The producer (`tools/ffmpeg-dist/`), the Bazel
+> consumer (`MODULE.bazel`'s `@ffmpeg_dist` + `core/BUILD.bazel`), the
+> artifact smoke test, and the reproducibility canary are in place; runtime
+> verification on GPU hardware per the *Verification* section below is still
+> outstanding. Several implementation points were superseded or deferred —
+> see *Deviations from the plan*.
 > **Base:** `feature/buildkit-to-bazel` (PR #2). This plan extends that
 > migration and is meaningless without it.
 > **Verification:** repository claims below — line numbers, pins, and the
@@ -10,6 +15,46 @@
 > `debian13` repo, and CUDA's supported host-compiler range) were checked
 > against NVIDIA's published index and installation guide. Nothing here is
 > recalled from memory.
+
+## Deviations from the plan
+
+1. **FFmpeg pinned to the `release/8.0` branch tip**, commit
+   `281c902aa1a83fe759011097cb005b555034c151` (2026-08-14), rather than an
+   `ffmpeg-8.0.N.tar.xz` point-release tarball. Deliberate: it matches
+   verification step 1 (compare against today's branch tip) and avoids
+   introducing a second moving pin.
+2. **Artifact publish to S3 deferred.** No AWS credentials were available
+   in the implementing session, so the bucket name / region / AWS profile
+   remain open items. `publish.sh` skips the upload loudly (exit 1) and
+   still prints the `http_archive` stanza; the `MODULE.bazel` URLs are
+   placeholders to be filled in by `publish.sh` output after `aws login`.
+3. **`//core:ffmpeg_smoke_test` could not be executed on the implementing
+   host** (arm64 without amd64 binfmt registration) — it is exercised in CI
+   and on hardware.
+4. **The ffmpeg binary is now stripped** in the artifact. The old
+   `core/Dockerfile` build never stripped it; stripping is a deliberate size
+   improvement, and the smoke test's `readelf -d` assertion still validates
+   the full `NEEDED` set.
+5. **Deterministic tarball** (`mtime=0`, `gzip -n`) so the Tier 1 canary
+   compares meaningful bytes rather than build-time noise.
+6. **CUDA 13.0.2 needs four redistributable components** — `cuda_nvcc`,
+   `cuda_cudart`, `cuda_crt`, and `libnvvm` — not the two the plan named.
+   `cuda_crt` provides `include/crt/host_config.h` and `libnvvm` provides
+   `nvvm/bin/cicc`; both are required by nvcc 13.0.2. Discovered during the
+   implementing build; the Dockerfile/publish.sh defaults now list all four.
+7. **nv-codec-headers pinned by exact commit** `e844e5b2…` because the
+   `n13.0.19.0` tag moved between an earlier check and the implementing build.
+   The tag name remains as documentation; the clone checks out the exact
+   commit, and `BUILD-INFO.txt` records both.
+8. **Tar determinism uses `--pax-option=delete=atime,delete=ctime`** (in
+   addition to the `mtime=0` / `gzip -n` already noted in deviation 5): GNU
+   tar otherwise embeds PAX atime/ctime records, which are nondeterministic
+   across builds and would false-positive the Tier 1 canary.
+9. **`./configure` reports `--enable-hwaccel=hevc_cuda did not match
+   anything`** at FFmpeg commit `281c902` — a pre-existing condition of the
+   carried-over flags (the hwaccel was already dead in the old
+   `core/Dockerfile` build). The `hevc_cuvid` decoder and the
+   `h264_nvenc`/`hevc_nvenc` encoders are enabled.
 
 ## Context
 
@@ -59,8 +104,8 @@ Move `core/Dockerfile`'s `build` stage (`:27-133`) out of the Bazel graph into
 Bazel-built images invites "which is authoritative?" — the answer is now
 "neither; it's a release tool."
 
-**Rebase onto Debian.** `FROM debian:trixie-20260518-slim`, with apt pointed at
-`https://snapshot.debian.org/archive/debian/20260518T203109Z` — the *same*
+**Rebase onto Debian.** `FROM debian:trixie-20260824-slim`, with apt pointed at
+`https://snapshot.debian.org/archive/debian/20260824T082821Z` — the *same*
 snapshot `MODULE.bazel:110` already pins. Build deps (`build-essential`,
 `pkgconf`, `git`, `nasm`, `yasm`, `binutils`, `libfdk-aac-dev`) come from there.
 `libfdk-aac-dev` is in `non-free`, so the sources need
@@ -86,7 +131,7 @@ change from tracking the branch); `nv-codec-headers` stays at tag `n13.0.19.0`
 The `./configure` invocation (`core/Dockerfile:64-128`) and
 `-gencode arch=compute_75,code=sm_75` (`:68`) carry over **unchanged**.
 
-**Output** — `ffmpeg-<ffver>-deb20260518-cuda13.0.2-sm75-<shortsha>.tar.gz`
+**Output** — `ffmpeg-<ffver>-deb20260824-cuda13.0.2-sm75-<shortsha>.tar.gz`
 (`.tar.gz` for consistency with `@mediamtx_dist`), containing:
 
 ```
@@ -246,7 +291,11 @@ should open an issue rather than only going red, so it is actually noticed.
 
 ## Open items
 
-- **Branch.** This work builds on `feature/buildkit-to-bazel`; `main` has no
-  Bazel migration, so branching from it would make this incoherent.
-- **Bucket name / region / AWS profile** for the artifact prefix.
-- Exact FFmpeg point release to pin (`8.0`, `8.0.1`, …).
+- **Bucket name / region / AWS profile** for the artifact prefix — still
+  unset, so the `MODULE.bazel` URLs remain placeholders until the first
+  publish (see *Deviations from the plan*).
+- **Runtime verification on GPU hardware** — the real gate: SRT ingest →
+  transcode → egress on a `g4dn`/`g6` instance, confirming `hevc_cuvid`,
+  `hevc_nvenc`, `h264_nvenc`, `libfdk_aac`, `scale_cuda`, and CDI injection.
+- This work builds on `feature/buildkit-to-bazel`; `main` has no Bazel
+  migration, so branching from it would make this incoherent.
