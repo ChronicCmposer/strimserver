@@ -48,6 +48,18 @@
 # =============================================================================
 set -eux -o pipefail
 
+# --- execve-interception probe (fail fast on an unpatched qemu) --------------
+# Under a patched (buildkit-direct-execve) qemu the guest's /bin/sh re-execs
+# via qemu itself; an unpatched qemu ENOEXECs the first guest child. Probe the
+# capability up front so the failure is a clear message, not a mid-build
+# surprise. Passes trivially on the native docker path (safe under set -e
+# because the guard is inside `if !`).
+if ! /bin/sh -c 'exit 0' >/dev/null 2>&1; then
+    echo "error: the qemu emulator cannot execute guest children (missing the buildkit-direct-execve patch)." >&2
+    echo "       Provide QEMU_BIN=/var/tmp/ffmpeg-build/qemu-x86_64-patched or rebuild via build-qemu.sh." >&2
+    exit 1
+fi
+
 # --- pins (env, defaults identical to the Dockerfile ARGs) -------------------
 : "${FFMPEG_VERSION:=8.0}"
 : "${FFMPEG_COMMIT:=281c902aa1a83fe759011097cb005b555034c151}"

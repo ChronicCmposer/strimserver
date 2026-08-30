@@ -1,0 +1,222 @@
+# Source: tonistiigi/binfmt patches/buildkit-direct-execve-v8.1/0004-linux-user-support-loading-scripts-with-shebang.patch
+#   https://raw.githubusercontent.com/tonistiigi/binfmt/master/patches/buildkit-direct-execve-v8.1/0004-linux-user-support-loading-scripts-with-shebang.patch
+# Commit: e4620e68 ("update qemu to 8.1.4", 2023-12-01); tree 4b16346a86506f3c8e298aba5f5972d9446d8ddf
+# Applies to: qemu 8.2.2 (see QEMU_VERSION in build-qemu.sh)
+# NOTE: hand-ported from buildkit-direct-execve-v8.1 to qemu 8.2.2 (ImageSource
+#   API: bprm->fd -> bprm->src.fd); see /tmp/first_build_dump.txt
+#   (loader_exec/load_script ~11968, loader.h ~12021, get_elf_eflags
+#   seek-reset fix ~14254). The v8.1 hunks fail to apply on 8.2.x because
+#   linuxload.c replaced bprm->fd with the ImageSource API bprm->src.fd.
+
+From 14efa42c9bc061ffcad00bfa4a643e73f9a056ee Mon Sep 17 00:00:00 2001
+From: Tibor Vass <tibor@docker.com>
+Date: Thu, 18 Jun 2020 20:57:22 +0000
+Subject: [PATCH] linux-user: support loading scripts with shebang (#!) [hand-ported to qemu 8.2.2]
+
+The interpreter is assumed to be compatible with the target architecture.
+
+The script loading logic is taken from Linux source code to match logic as closely as possible.
+
+An interpreter can itself be a script (#!/other.script), and thus load another interpreter.
+This happens in a loop therefore the loading chain of interpreter-scripts is limited to 5 like in Linux.
+
+Hand-ported to qemu 8.2.2: loader_exec rewritten as a depth-limited loop,
+load_script() added using bprm->src.fd (ImageSource API), and
+get_elf_eflags() resetting the fd position regardless of read error.
+
+Signed-off-by: Tibor Vass <tibor@docker.com>
+Signed-off-by: Tonis Tiigi <tonistiigi@gmail.com>
+---
+diff --git a/linux-user/elfload.c b/linux-user/elfload.c
+index cf9e744..8d3387f 100644
+--- a/linux-user/elfload.c
++++ b/linux-user/elfload.c
+@@ -3807,10 +3807,10 @@ uint32_t get_elf_eflags(int fd)
+         return 0;
+     }
+     ret = read(fd, &ehdr, sizeof(ehdr));
++    offset = lseek(fd, offset, SEEK_SET); /* reset seek regardless of error */
+     if (ret < sizeof(ehdr)) {
+         return 0;
+     }
+-    offset = lseek(fd, offset, SEEK_SET);
+     if (offset == (off_t) -1) {
+         return 0;
+     }
+diff --git a/linux-user/linuxload.c b/linux-user/linuxload.c
+index 4a794f8..81872be 100644
+--- a/linux-user/linuxload.c
++++ b/linux-user/linuxload.c
+@@ -142,7 +142,7 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
+                 struct target_pt_regs *regs, struct image_info *infop,
+                 struct linux_binprm *bprm)
+ {
+-    int retval;
++    int retval, depth;
+ 
+     bprm->src.fd = fdexec;
+     bprm->filename = (char *)filename;
+@@ -151,25 +151,35 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
+     bprm->envc = count(envp);
+     bprm->envp = envp;
+ 
+-    retval = prepare_binprm(bprm);
+-
+-    if (retval < 4) {
+-        return -ENOEXEC;
+-    }
+-    if (bprm->buf[0] == 0x7f
+-        && bprm->buf[1] == 'E'
+-        && bprm->buf[2] == 'L'
+-        && bprm->buf[3] == 'F') {
+-        retval = load_elf_binary(bprm, infop);
++    for (depth = 0; ; depth++) {
++        if (depth > 5) {
++            return -ELOOP;
++        }
++        retval = prepare_binprm(bprm);
++        if (retval >= 0) {
++            if (bprm->buf[0] == 0x7f
++                    && bprm->buf[1] == 'E'
++                    && bprm->buf[2] == 'L'
++                    && bprm->buf[3] == 'F') {
++                retval = load_elf_binary(bprm, infop);
+ #if defined(TARGET_HAS_BFLT)
+-    } else if (bprm->buf[0] == 'b'
+-               && bprm->buf[1] == 'F'
+-               && bprm->buf[2] == 'L'
+-               && bprm->buf[3] == 'T') {
+-        retval = load_flt_binary(bprm, infop);
++            } else if (bprm->buf[0] == 'b'
++                    && bprm->buf[1] == 'F'
++                    && bprm->buf[2] == 'L'
++                    && bprm->buf[3] == 'T') {
++                retval = load_flt_binary(bprm, infop);
+ #endif
+-    } else {
+-        return -ENOEXEC;
++            } else if (bprm->buf[0] == '#'
++                    && bprm->buf[1] == '!') {
++                retval = load_script(bprm);
++                if (retval >= 0) {
++                    continue;
++                }
++            } else {
++                return -ENOEXEC;
++            }
++        }
++        break;
+     }
+     if (retval < 0) {
+         return retval;
+@@ -180,6 +190,98 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
+     return 0;
+ }
+ 
++static inline bool spacetab(char c) { return c == ' ' || c == '\t'; }
++static inline const char *next_non_spacetab(const char *first, const char *last)
++{
++    for (; first <= last; first++)
++        if (!spacetab(*first))
++            return first;
++    return NULL;
++}
++static inline const char *next_terminator(const char *first, const char *last)
++{
++    for (; first <= last; first++)
++        if (spacetab(*first) || !*first)
++            return first;
++    return NULL;
++}
++
++/*
++ * Reads the interpreter (shebang #!) line and modifies bprm object accordingly.
++ * Adapted from the tonistiigi/binfmt buildkit-direct-execve patch set to
++ * qemu 8.2's ImageSource-based struct linux_binprm.
++ */
++int load_script(struct linux_binprm *bprm)
++{
++    const char *i_name, *i_sep, *i_arg, *i_end, *buf_end;
++    int execfd, i, argc_delta;
++
++    buf_end = bprm->buf + sizeof(bprm->buf) - 1;
++    i_end = (const char *)memchr(bprm->buf, '\n', sizeof(bprm->buf));
++    if (!i_end) {
++        i_end = next_non_spacetab(bprm->buf + 2, buf_end);
++        if (!i_end) {
++            return -ENOEXEC; /* Entire buf is spaces/tabs */
++        }
++        /*
++         * If there is no later space/tab/NUL we must assume the
++         * interpreter path is truncated.
++         */
++        if (!next_terminator(i_end, buf_end)) {
++            return -ENOEXEC;
++        }
++        i_end = buf_end;
++    }
++    /* Trim any trailing spaces/tabs from i_end */
++    while (spacetab(i_end[-1]))
++        i_end--;
++    *((char *)i_end) = '\0';
++    /* Skip over leading spaces/tabs */
++    i_name = next_non_spacetab(bprm->buf + 2, i_end);
++    if (!i_name || (i_name == i_end)) {
++        return -ENOEXEC; /* No interpreter name found */
++    }
++
++    /* Is there an optional argument? */
++    i_arg = NULL;
++    i_sep = next_terminator(i_name, i_end);
++    if (i_sep && (*i_sep != '\0')) {
++        i_arg = next_non_spacetab(i_sep, i_end);
++        *((char *)i_sep) = '\0';
++    }
++
++    execfd = open(i_name, O_RDONLY);
++    if (execfd < 0) {
++        return -ENOEXEC; /* Could not open interpreter */
++    }
++
++    /*
++     * Splice in (1) the interpreter's name for argv[0]
++     *           (2) (optional) argument to interpreter
++     *           (3) filename of shell script (replace argv[0])
++     *           (4) user arguments (argv[1:])
++     */
++    argc_delta = 1 /* extra filename */ + (i_arg ? 1 : 0);
++    bprm->argc += argc_delta;
++    bprm->argv = realloc(bprm->argv, sizeof(char *) * (bprm->argc + 1));
++
++    /* shift argv by argc_delta */
++    for (i = bprm->argc; i >= argc_delta; i--)
++        bprm->argv[i] = bprm->argv[i - argc_delta];
++
++    bprm->argv[0] = (char *)strdup(i_name);
++    if (i_arg)
++        bprm->argv[1] = (char *)strdup(i_arg);
++
++    bprm->src.fd = execfd; /* not closing fd as it is needed for the duration of the program */
++    bprm->src.cache = NULL;
++    bprm->src.cache_size = 0;
++    bprm->filename = (char *)strdup(i_name); /* replace filename with script interpreter */
++    /* envc and envp are kept unchanged */
++
++    return 0;
++}
++
+ bool imgsrc_read(void *dst, off_t offset, size_t len,
+                  const ImageSource *img, Error **errp)
+ {
+diff --git a/linux-user/loader.h b/linux-user/loader.h
+index e102e6f..b4ab773 100644
+--- a/linux-user/loader.h
++++ b/linux-user/loader.h
+@@ -92,6 +92,7 @@ int loader_exec(int fdexec, const char *filename, char **argv, char **envp,
+ uint32_t get_elf_eflags(int fd);
+ int load_elf_binary(struct linux_binprm *bprm, struct image_info *info);
+ int load_flt_binary(struct linux_binprm *bprm, struct image_info *info);
++int load_script(struct linux_binprm *bprm);
+ 
+ abi_long memcpy_to_target(abi_ulong dest, const void *src,
+                           unsigned long len);

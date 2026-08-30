@@ -352,10 +352,29 @@ of truth; the thin `tools/ffmpeg-dist/Dockerfile` wrapper runs the
 same script, so the docker path and the chroot+qemu path produce
 byte-identical output (the sha256 in `MODULE.bazel` is the contract).
 
-arm64 hosts must provide the patched qemu via `QEMU_BIN` (default:
-`qemu-x86_64-static`/`qemu-x86_64` from PATH; the script's error
-message names the known-good build at
-`/var/tmp/ffmpeg-build/qemu-x86_64-patched`); amd64 hosts need no
+On non-amd64 hosts, `publish.sh` now builds the patched qemu-x86_64
+emulator from source when no valid one is available: qemu 8.2.2 with a
+hand-ported version of the tonistiigi `buildkit-direct-execve` patch
+set (7 patches committed at `tools/ffmpeg-dist/qemu-patches/`; patches
+0004 and 0005 were hand-ported to 8.2.2's `ImageSource` API because no
+upstream v8.2 patch set exists — tonistiigi/binfmt jumps from v8.1 to
+v9.2). qemu 8.2.2 is required for byte-identical reproducibility: qemu
+8.1.5 exposes a different guest CPUID (leaf 0x07 EBX bit 29,
+AVX512_BF16), which changes compiler/nvcc codegen and so yields a
+different ffmpeg binary. The result is cached at
+`${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist/qemu-x86_64-patched` and
+reused across runs (rebuilt on demand when missing or invalid). Host
+build dependencies — meson, ninja, python3, pkg-config, gcc, and
+libglib2.0-dev — are required only on non-amd64 hosts; `build-qemu.sh`
+fails loudly with the exact `apt-get install` command if any are
+missing. `QEMU_BIN` may still be used to override with a pre-built
+patched qemu; it is validated (must contain the buildkit-direct-execve
+marker `safe_execve` and report the pinned version, qemu 8.2.2) and
+ignored with a warning if it is not a patched emulator at that version.
+The previous registry auto-fetch (`QEMU_IMAGE`, e.g.
+`tonistiigi/binfmt:qemu-v8.1.5`) was removed because every registry tag
+ships an **unpatched** emulator that cannot execute guest child
+processes (ENOEXEC — the exact bug this replaces); amd64 hosts need no
 qemu. An already-extracted rootfs can be reused by setting
 `FFMPEG_DIST_ROOTFS`. `publish.sh` then extracts the stripped
 `ffmpeg` binary plus its `BUILD-INFO.txt` provenance record, writes

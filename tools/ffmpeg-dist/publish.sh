@@ -27,9 +27,14 @@
 #   CUDA_COMPONENTS      default "cuda_nvcc cuda_cudart cuda_crt libnvvm"
 #   GENCODE              default arch=compute_75,code=sm_75
 #   NPROC                default 8
-#   QEMU_BIN             default: qemu-x86_64-static or qemu-x86_64 from PATH.
-#                        Only consulted when the host is not x86_64; amd64
-#                        hosts run the guest natively with no qemu at all.
+#   QEMU_BIN             default: unset. Explicit override for the patched qemu
+#                        used on non-x86_64 hosts; must be a
+#                        buildkit-direct-execve patched qemu (verified via the
+#                        'safe_execve' marker), otherwise it is ignored with a
+#                        warning. Resolution order: QEMU_BIN (validated) >
+#                        cached patched qemu (re-validated) > self-heal source
+#                        build via tools/ffmpeg-dist/build-qemu.sh. amd64 hosts
+#                        run the guest natively with no qemu at all.
 #   FFMPEG_DIST_ROOTFS   default unset; when set to an already-extracted rootfs
 #                        the Docker Hub registry pull is skipped entirely.
 #   S3_BUCKET            default s3://<bucket-name>  (same placeholder as the root Makefile)
@@ -92,21 +97,97 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/out"
 
 host_arch="$(uname -m)"
+qemu_cache_path="${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist/qemu-x86_64-patched"
 
 # --- resolve the qemu emulator (only needed on non-x86_64 hosts) ---
+# qemu_is_patched <path> -- true iff <path> is a usable buildkit-direct-execve
+# patched qemu: non-empty and executable, statically linked ELF ('file' matches
+# static-pie / statically linked), carries the 'safe_execve' marker, and runs
+# (--version exits 0). Same checks as tools/ffmpeg-dist/build-qemu.sh.
+qemu_is_patched() {
+  local path="$1"
+  [[ -n "$path" ]] || return 1
+  [[ -x "$path" ]] || return 1
+  # NB: no grep -q in these pipelines -- under `set -o pipefail` grep -q exits
+  # early on a match, strings/file die with SIGPIPE (141), and the pipeline
+  # reports failure despite the match. grep reads all input instead.
+  file "$path" | grep -iE 'static' >/dev/null || return 1
+  strings "$path" | grep safe_execve >/dev/null || return 1
+  "$path" --version >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# qemu_reported_version <path> -- prints the numeric version string reported by
+# <path>'s --version (e.g. "8.2.2"), or empty when the binary cannot report one.
+# Reads all of --version's output (no grep -q, which under `set -o pipefail`
+# SIGPIPEs the producer on an early exit and makes the pipeline fail).
+qemu_reported_version() {
+  local path="$1"
+  "$path" --version 2>/dev/null | sed -n '1s/.*version \([0-9][0-9.]*\).*/\1/p'
+}
+
+# resolve_qemu -- sets $qemu to a working patched qemu-x86_64 absolute path.
+# Priority: QEMU_BIN override (validated + version-gated) > cached patched qemu
+# (re-validated + version-gated) > self-heal source build via
+# tools/ffmpeg-dist/build-qemu.sh > loud error. The version gate protects the
+# byte-identity contract: a stale cache built against a different qemu pin
+# (e.g. an older 8.1.5 cache when the pin moved to 8.2.2) still passes the
+# static/safe_execve/runs checks, but a different qemu exposes different guest
+# CPUID leaves, which changes the guest toolchain's codegen and therefore the
+# final artifact -- so any cached qemu whose reported version differs from the
+# pinned QEMU_VERSION is treated as invalid and rebuilt.
+resolve_qemu() {
+  local qemu_version reported_version
+  qemu_version="$(sed -n 's/^QEMU_VERSION=//p' "$repo_root/tools/ffmpeg-dist/build-qemu.sh" | head -1 | sed -E 's/.*QEMU_VERSION:-([^}]*)\}.*/\1/')"
+  if [[ -n "$QEMU_BIN" ]]; then
+    if qemu_is_patched "$QEMU_BIN"; then
+      reported_version="$(qemu_reported_version "$QEMU_BIN")"
+      if [[ "$reported_version" == "$qemu_version" ]]; then
+        qemu="$(readlink -m "$QEMU_BIN")"
+        return 0
+      fi
+      echo "==> warning: QEMU_BIN=$QEMU_BIN is a patched qemu but reports qemu ${reported_version}; the pinned artifact requires qemu ${qemu_version}; ignoring it" >&2
+    else
+      echo "==> warning: QEMU_BIN=$QEMU_BIN is not a buildkit-direct-execve patched qemu (no 'safe_execve' marker); ignoring it" >&2
+    fi
+  fi
+  if qemu_is_patched "$qemu_cache_path"; then
+    reported_version="$(qemu_reported_version "$qemu_cache_path")"
+    if [[ "$reported_version" == "$qemu_version" ]]; then
+      qemu="$qemu_cache_path"
+      return 0
+    fi
+    echo "==> warning: cached qemu ($qemu_cache_path) is patched but reports qemu ${reported_version}; the pinned artifact requires qemu ${qemu_version}; rebuilding it" >&2
+  fi
+  echo "==> building patched qemu-x86_64 from source (qemu-${qemu_version}) ..."
+  if "$repo_root/tools/ffmpeg-dist/build-qemu.sh" && qemu_is_patched "$qemu_cache_path"; then
+    qemu="$qemu_cache_path"
+    return 0
+  fi
+  echo "error: no usable buildkit-direct-execve patched qemu-x86_64 was found." >&2
+  echo "       The self-heal source build failed; it needs host build deps:" >&2
+  echo "         apt-get install -y meson ninja-build python3 pkg-config gcc libglib2.0-dev" >&2
+  echo "       or provide the known-good binary via" >&2
+  echo "       QEMU_BIN=/var/tmp/ffmpeg-build/qemu-x86_64-patched" >&2
+  exit 1
+}
+
 if [[ "$host_arch" != "x86_64" ]]; then
-  QEMU_BIN="${QEMU_BIN:-$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)}"
-  if [[ -z "$QEMU_BIN" || ! -x "$QEMU_BIN" ]]; then
+  qemu=""
+  if ! resolve_qemu || ! "$qemu" --version >/dev/null 2>&1; then
     echo "error: host arch is '$host_arch' (not x86_64) and no usable qemu-x86_64 was found." >&2
     echo "       publish.sh runs natively on amd64 hosts with no qemu at all." >&2
     echo "       arm64 hosts need the tonistiigi buildkit-direct-execve patched qemu" >&2
     echo "       (upstream qemu cannot intercept the guest's execve and the" >&2
-    echo "       buildkit-bundled qemu segfaults on NVIDIA's cicc). Known-good:" >&2
-    echo "       /var/tmp/ffmpeg-build/qemu-x86_64-patched" >&2
-    echo "       Provide it via QEMU_BIN=/var/tmp/ffmpeg-build/qemu-x86_64-patched," >&2
-    echo "       or install qemu-x86_64-static / qemu-x86_64 on PATH." >&2
+    echo "       buildkit-bundled qemu segfaults on NVIDIA's cicc)." >&2
+    echo "       publish.sh self-heals by building it from source (build-qemu.sh);" >&2
+    echo "       that needs host deps: apt-get install -y meson ninja-build" >&2
+    echo "       python3 pkg-config gcc libglib2.0-dev, or point QEMU_BIN at a" >&2
+    echo "       known-good binary: QEMU_BIN=/var/tmp/ffmpeg-build/qemu-x86_64-patched." >&2
     exit 1
   fi
+  QEMU_BIN="$qemu"
+  echo "==> qemu: $QEMU_BIN"
 fi
 
 # --- rootfs provisioning: pull the pinned base image via the registry API ---

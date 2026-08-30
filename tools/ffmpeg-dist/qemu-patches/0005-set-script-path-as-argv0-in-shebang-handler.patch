@@ -1,0 +1,29 @@
+# Source: tonistiigi/binfmt patches/buildkit-direct-execve-v8.1/0005-set-script-path-as-argv0-in-shebang-handler.patch
+#   https://raw.githubusercontent.com/tonistiigi/binfmt/master/patches/buildkit-direct-execve-v8.1/0005-set-script-path-as-argv0-in-shebang-handler.patch
+# Commit: e4620e68 ("update qemu to 8.1.4", 2023-12-01); tree 4b16346a86506f3c8e298aba5f5972d9446d8ddf
+# Applies to: qemu 8.2.2 (see QEMU_VERSION in build-qemu.sh)
+# NOTE: hand-ported from buildkit-direct-execve-v8.1 to qemu 8.2.2 (ImageSource
+#   API); see /tmp/first_build_dump.txt (~11968). Sets bprm->argv[0] to the
+#   script path inside load_script (harmless/overwritten by the later
+#   argv[0] = strdup(i_name); included for fidelity with the patch set).
+
+From baadf95fbcc53dc609480c8432569b01c2ab60a9 Mon Sep 17 00:00:00 2001
+From: Tonis Tiigi <tonistiigi@gmail.com>
+Date: Thu, 26 Aug 2021 01:18:32 +0200
+Subject: [PATCH] set script path as argv0 in shebang handler [hand-ported to qemu 8.2.2]
+
+Signed-off-by: Tonis Tiigi <tonistiigi@gmail.com>
+---
+diff --git a/linux-user/linuxload.c b/linux-user/linuxload.c
+index 81872be..fc1f8a3 100644
+--- a/linux-user/linuxload.c
++++ b/linux-user/linuxload.c
+@@ -250,6 +250,8 @@ int load_script(struct linux_binprm *bprm)
+         *((char *)i_sep) = '\0';
+     }
+ 
++    bprm->argv[0] = bprm->filename;
++
+     execfd = open(i_name, O_RDONLY);
+     if (execfd < 0) {
+         return -ENOEXEC; /* Could not open interpreter */

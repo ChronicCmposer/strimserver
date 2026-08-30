@@ -72,6 +72,35 @@
     alternative for docker hosts. Output was verified **byte-identical** to
     the pinned sha256
     `2df93667c7e12f2666be244772a41c653a02cab74880e685623770bd9c86ac34`.
+11. **The patched qemu is built from source (self-heal), not fetched.**
+    The previous registry auto-fetch (`QEMU_IMAGE`, e.g.
+    `tonistiigi/binfmt:qemu-v8.1.5`) was removed because no prebuilt
+    patched qemu exists anywhere: every `tonistiigi/binfmt` registry tag
+    ships an **unpatched** qemu (no buildkit-direct-execve /
+    `safe_execve` marker) that ENOEXECs on the guest's first child, the
+    `qemu-v8.2.2` tag does not exist, and buildkit releases skip 8.2.x.
+    Instead, on non-amd64 hosts `publish.sh` builds qemu **8.2.2** with
+    a hand-ported version of the tonistiigi `buildkit-direct-execve`
+    patch set (7 patches at `tools/ffmpeg-dist/qemu-patches/`, with
+    provenance headers): patches 0001–0003, 0006, and 0007 apply
+    cleanly; 0004 (shebang support) and 0005 (argv0) were hand-ported
+    to 8.2.2's `ImageSource` API (`bprm->src.fd`) because
+    tonistiigi/binfmt has no v8.2 patch set (it jumps v8.1 → v9.2),
+    including the `get_elf_eflags` seek-reset fix in
+    `linux-user/elfload.c`. qemu 8.1.5 was tested and rejected: it
+    exposes a different guest CPUID than 8.2.2 (leaf 0x07 EBX bit 29,
+    AVX512_BF16 — 8.1.5: `0x01dc47a9`, 8.2.2: `0x21dc47a9`), which
+    changes compiler/nvcc codegen and breaks byte-identity. Built via
+    `tools/ffmpeg-dist/build-qemu.sh`, caching the result at
+    `${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist/qemu-x86_64-patched`.
+    `resolve_qemu` now self-heals in order: validated `QEMU_BIN`
+    (patched marker **and** version match) → validated cache →
+    `build-qemu.sh` → loud error. The guest `build.sh` probes execve
+    interception first and fails fast with a clear error if the
+    emulator cannot execute guest children. The FFmpeg artifact sha256
+    pin
+    (`2df93667c7e12f2666be244772a41c653a02cab74880e685623770bd9c86ac34`)
+    is unchanged — the artifact remains byte-identical.
 
 ## Context
 
