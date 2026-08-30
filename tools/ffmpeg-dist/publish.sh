@@ -3,37 +3,49 @@
 # tools/ffmpeg-dist/publish.sh -- build, checksum, upload, and print the
 # MODULE.bazel stanza for the pinned FFmpeg artifact.
 #
-# Builds tools/ffmpeg-dist/Dockerfile (docker if present, else buildctl),
-# extracts the /out payload, tars it as
-#   ffmpeg-<FFMPEG_VERSION>-deb<YYYYMMDD>-cuda<X.Y.Z>-sm<N>-<shortsha>.tar.gz
-# (written into the current directory), uploads it to
-# $S3_BUCKET/ffmpeg/ with --acl public-read, then prints the http_archive
-# block to paste into MODULE.bazel (name = "ffmpeg_dist").
+# qemu-direct flow (no docker, no buildctl): the script pulls the pinned
+# debian:trixie-<date>-slim base image via the Docker Hub registry API (plain
+# curl+jq -- no docker daemon), extracts it into a rootfs, copies the shared
+# build script (tools/ffmpeg-dist/build.sh) in, and runs it inside a chroot --
+# invoking the patched qemu-x86_64 explicitly for the amd64 guest when the
+# host is not x86_64. The build itself is the shared build.sh, the same single
+# source of truth the (kept-for-compatibility) Dockerfile wrapper runs.
 #
-# Env vars (defaults mirror the Dockerfile ARGs):
-#   FFMPEG_VERSION      default 8.0
-#   FFMPEG_COMMIT       default 281c902aa1a83fe759011097cb005b555034c151
+# The resulting /out payload (ffmpeg + BUILD-INFO.txt) is tared as
+#   ffmpeg-<FFMPEG_VERSION>-deb<YYYYMMDD>-cuda<X.Y.Z>-sm<N>-<shortsha>.tar.gz
+# (written into the current directory), uploaded to $S3_BUCKET/ffmpeg/ with
+# --acl public-read, then the http_archive block is printed for MODULE.bazel
+# (name = "ffmpeg_dist").
+#
+# Env vars (defaults mirror the build.sh pins / the Dockerfile ARGs):
+#   FFMPEG_VERSION       default 8.0
+#   FFMPEG_COMMIT        default 281c902aa1a83fe759011097cb005b555034c151
 #   NV_CODEC_HEADERS_TAG default n13.0.19.0
 #   NV_CODEC_HEADERS_COMMIT default e844e5b26f46bb77479f063029595293aa8f812d
-#   CUDA_MANIFEST_URL   default .../redistrib_13.0.2.json
-#   DEBIAN_SNAPSHOT     default 20260824T082821Z
-#   CUDA_COMPONENTS     default "cuda_nvcc cuda_cudart cuda_crt libnvvm"
-#   GENCODE             default arch=compute_75,code=sm_75
-#   NPROC               default 8
-#   S3_BUCKET           default s3://<bucket-name>  (same placeholder as the root Makefile)
-#   AWS_REGION          default us-east-1
-#   GITHUB_REPOSITORY   owner/repo; when set, a GitHub Release mirror URL is
-#                       added to the stanza's urls list.
-#   SKIP_UPLOAD         default unset; 1 = build + checksum only, print the
-#                       stanza with a SKIP_UPLOAD note, exit 0 (used by the
-#                       reproducibility canary, which only compares sha256s).
+#   CUDA_MANIFEST_URL    default .../redistrib_13.0.2.json
+#   DEBIAN_SNAPSHOT      default 20260824T082821Z
+#   CUDA_COMPONENTS      default "cuda_nvcc cuda_cudart cuda_crt libnvvm"
+#   GENCODE              default arch=compute_75,code=sm_75
+#   NPROC                default 8
+#   QEMU_BIN             default: qemu-x86_64-static or qemu-x86_64 from PATH.
+#                        Only consulted when the host is not x86_64; amd64
+#                        hosts run the guest natively with no qemu at all.
+#   FFMPEG_DIST_ROOTFS   default unset; when set to an already-extracted rootfs
+#                        the Docker Hub registry pull is skipped entirely.
+#   S3_BUCKET            default s3://<bucket-name>  (same placeholder as the root Makefile)
+#   AWS_REGION           default us-east-1
+#   GITHUB_REPOSITORY    owner/repo; when set, a GitHub Release mirror URL is
+#                        added to the stanza's urls list.
+#   SKIP_UPLOAD          default unset; 1 = build + checksum only, print the
+#                        stanza with a SKIP_UPLOAD note, exit 0 (used by the
+#                        reproducibility canary, which only compares sha256s).
 #
 # If AWS credentials are missing the upload is skipped (loudly, exit 1) but the
 # stanza is still printed, so the artifact can be published later.
 # =============================================================================
 set -euo pipefail
 
-# --- inputs (defaults mirror the Dockerfile ARGs) ---
+# --- inputs (defaults mirror the build.sh pins / Dockerfile ARGs) ---
 FFMPEG_VERSION="${FFMPEG_VERSION:-8.0}"
 FFMPEG_COMMIT="${FFMPEG_COMMIT:-281c902aa1a83fe759011097cb005b555034c151}"
 NV_CODEC_HEADERS_TAG="${NV_CODEC_HEADERS_TAG:-n13.0.19.0}"
@@ -47,6 +59,8 @@ S3_BUCKET="${S3_BUCKET:-s3://<bucket-name>}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}"
 SKIP_UPLOAD="${SKIP_UPLOAD:-}"
+QEMU_BIN="${QEMU_BIN:-}"
+FFMPEG_DIST_ROOTFS="${FFMPEG_DIST_ROOTFS:-}"
 
 # --- guard clauses: refuse to build with a malformed pin ---
 if [[ ! "$FFMPEG_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
@@ -75,68 +89,136 @@ artifact="ffmpeg-${FFMPEG_VERSION}-deb${deb_date}-cuda${cuda_version}-${sm_suffi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/out" "$work/rootfs"
+mkdir -p "$work/out"
 
-# --- builder detection: docker preferred, buildctl fallback ---
-if command -v docker >/dev/null 2>&1; then
-  builder="docker"
-elif command -v buildctl >/dev/null 2>&1; then
-  builder="buildctl"
-else
-  echo "error: neither docker nor buildctl found on PATH" >&2
-  exit 1
+host_arch="$(uname -m)"
+
+# --- resolve the qemu emulator (only needed on non-x86_64 hosts) ---
+if [[ "$host_arch" != "x86_64" ]]; then
+  QEMU_BIN="${QEMU_BIN:-$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)}"
+  if [[ -z "$QEMU_BIN" || ! -x "$QEMU_BIN" ]]; then
+    echo "error: host arch is '$host_arch' (not x86_64) and no usable qemu-x86_64 was found." >&2
+    echo "       publish.sh runs natively on amd64 hosts with no qemu at all." >&2
+    echo "       arm64 hosts need the tonistiigi buildkit-direct-execve patched qemu" >&2
+    echo "       (upstream qemu cannot intercept the guest's execve and the" >&2
+    echo "       buildkit-bundled qemu segfaults on NVIDIA's cicc). Known-good:" >&2
+    echo "       /var/tmp/ffmpeg-build/qemu-x86_64-patched" >&2
+    echo "       Provide it via QEMU_BIN=/var/tmp/ffmpeg-build/qemu-x86_64-patched," >&2
+    echo "       or install qemu-x86_64-static / qemu-x86_64 on PATH." >&2
+    exit 1
+  fi
 fi
 
-common_build_args=(
-  "FFMPEG_VERSION=$FFMPEG_VERSION"
-  "FFMPEG_COMMIT=$FFMPEG_COMMIT"
-  "NV_CODEC_HEADERS_TAG=$NV_CODEC_HEADERS_TAG"
-  "NV_CODEC_HEADERS_COMMIT=$NV_CODEC_HEADERS_COMMIT"
-  "CUDA_MANIFEST_URL=$CUDA_MANIFEST_URL"
-  "DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT"
-  "CUDA_COMPONENTS=$CUDA_COMPONENTS"
-  "GENCODE=$GENCODE"
-  "NPROC=$NPROC"
-)
+# --- rootfs provisioning: pull the pinned base image via the registry API ---
+# provision_rootfs <rootfs> <tag> -- pulls the <tag> manifest list from the
+# Docker Hub registry (plain curl+jq), selects the linux/amd64 image, and
+# extracts its layers into <rootfs>. Returns non-zero on any failure; the
+# caller prints the loud error with the FFMPEG_DIST_ROOTFS fallback hint.
+provision_rootfs() {
+  local rootfs="$1" tag="$2" token manifest_list amd64_digest manifest layer_digests layer_digest
+  token="$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull" | jq -r '.token')" \
+    || return 1
+  manifest_list="$(curl -fsSL \
+      -H "Authorization: Bearer $token" \
+      -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json' \
+      "https://registry-1.docker.io/v2/library/debian/manifests/$tag" \
+    | jq -c .)" \
+    || return 1
+  amd64_digest="$(printf '%s' "$manifest_list" | jq -r '.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .digest')" \
+    || return 1
+  [[ -n "$amd64_digest" ]] || return 1
+  manifest="$(curl -fsSL \
+      -H "Authorization: Bearer $token" \
+      -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+      "https://registry-1.docker.io/v2/library/debian/manifests/$amd64_digest" \
+    | jq -c .)" \
+    || return 1
+  layer_digests="$(printf '%s' "$manifest" | jq -r '.layers[].digest')" \
+    || return 1
+  [[ -n "$layer_digests" ]] || return 1
+  mkdir -p "$rootfs"
+  for layer_digest in $layer_digests; do
+    curl -fsSL -H "Authorization: Bearer $token" \
+      "https://registry-1.docker.io/v2/library/debian/blobs/$layer_digest" \
+      | tar -xzf - -C "$rootfs" \
+      || return 1
+  done
+  return 0
+}
+
+rootfs="${FFMPEG_DIST_ROOTFS:-$work/rootfs}"
+if [[ -z "$FFMPEG_DIST_ROOTFS" ]]; then
+  base_tag="debian:trixie-${deb_date}-slim"
+  echo "==> pulling $base_tag (linux/amd64) via the Docker Hub registry API"
+  if ! provision_rootfs "$rootfs" "${base_tag#debian:}"; then
+    echo "error: failed to pull '$base_tag' from Docker Hub via the registry API." >&2
+    echo "       Reuse an already-extracted rootfs instead:" >&2
+    echo "       FFMPEG_DIST_ROOTFS=/var/tmp/debian-rootfs-20260824 ./publish.sh" >&2
+    exit 1
+  fi
+fi
+
+# --- post-provisioning: guest DNS, the shared build script, qemu ---
+cp -a /etc/resolv.conf "$rootfs/etc/resolv.conf"
+# The host resolv.conf is often a symlink into /run (systemd-resolved), which
+# has no target inside the guest; materialize a regular file in that case.
+if [[ -L "$rootfs/etc/resolv.conf" ]]; then
+  rm -f "$rootfs/etc/resolv.conf"
+  cp -fL /etc/resolv.conf "$rootfs/etc/resolv.conf"
+fi
+cp "$repo_root/tools/ffmpeg-dist/build.sh" "$rootfs/build.sh"
+chmod +x "$rootfs/build.sh"
+if [[ "$host_arch" != "x86_64" ]]; then
+  cp -f "$QEMU_BIN" "$rootfs/usr/local/bin/qemu-x86_64"
+fi
+
+# --- inner harness: mounts + chroot (+ qemu when the host is not amd64) ---
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'set -euo pipefail\n'
+  printf 'rootfs=%s\n' "$(printf %q "$rootfs")"
+  printf 'mount -t proc proc "$rootfs/proc"\n'
+  printf 'for n in null zero full random urandom tty; do\n'
+  printf '  touch "$rootfs/dev/$n"\n'
+  printf '  mount --bind "/dev/$n" "$rootfs/dev/$n"\n'
+  printf 'done\n'
+  printf 'mount --bind "$rootfs/etc/resolv.conf" "$rootfs/etc/resolv.conf"\n'
+  for pin in FFMPEG_VERSION FFMPEG_COMMIT NV_CODEC_HEADERS_TAG NV_CODEC_HEADERS_COMMIT \
+             CUDA_MANIFEST_URL DEBIAN_SNAPSHOT CUDA_COMPONENTS GENCODE NPROC; do
+    printf 'export %s=%s\n' "$pin" "$(printf %q "${!pin}")"
+  done
+  if [[ "$host_arch" != "x86_64" ]]; then
+    printf 'chroot "$rootfs" /usr/local/bin/qemu-x86_64 /bin/bash -eux -o pipefail /build.sh\n'
+  else
+    printf 'chroot "$rootfs" /bin/bash -eux -o pipefail /build.sh\n'
+  fi
+} > "$work/inner.sh"
+chmod +x "$work/inner.sh"
 
 # The artifact is always linux/amd64 (matches .bazelrc's
 # --platforms=//tools/bazel:linux_amd64), so on arm64 hosts this is a
 # cross-arch build through QEMU -- expected, and slow.
-echo "==> building $artifact (linux/amd64) with $builder"
+echo "==> building $artifact (linux/amd64) via chroot+qemu (no docker, no buildctl)"
 
-if [[ "$builder" == "docker" ]]; then
-  docker_build_args=()
-  for arg in "${common_build_args[@]}"; do docker_build_args+=(--build-arg "$arg"); done
-  docker build --platform linux/amd64 --progress plain \
-    -f "$repo_root/tools/ffmpeg-dist/Dockerfile" \
-    --target out \
-    "${docker_build_args[@]}" \
-    -t "ffmpeg-dist:$artifact" \
-    "$repo_root"
-  # the out stage is FROM scratch (no CMD); a dummy command satisfies docker
-  # create's "No command specified" validation -- nothing is ever executed.
-  container="$(docker create "ffmpeg-dist:$artifact" /bin/true)"
-  docker cp "$container:/out/." "$work/out/"
-  docker rm "$container" >/dev/null
+# --- privilege wrapper: root, passwordless sudo, or a fresh user namespace ---
+if [[ $EUID -eq 0 ]]; then
+  bash "$work/inner.sh"
+elif sudo -n true 2>/dev/null; then
+  sudo -n bash "$work/inner.sh"
+elif unshare -Urmpf true 2>/dev/null; then
+  unshare -Urmpf bash "$work/inner.sh"
 else
-  buildctl_build_args=()
-  for arg in "${common_build_args[@]}"; do buildctl_build_args+=(--opt "build-arg:$arg"); done
-  buildctl build --progress=plain \
-    --frontend dockerfile.v0 \
-    --local context="$repo_root" \
-    --local dockerfile="$repo_root" \
-    --opt filename=tools/ffmpeg-dist/Dockerfile \
-    --opt platform=linux/amd64 \
-    --opt target=out \
-    "${buildctl_build_args[@]}" \
-    --output type=local,dest="$work/rootfs"
-  cp -a "$work/rootfs/out/." "$work/out/"
-fi
-
-if [[ ! -f "$work/out/ffmpeg" || ! -f "$work/out/BUILD-INFO.txt" ]]; then
-  echo "error: build produced no /out/ffmpeg or /out/BUILD-INFO.txt" >&2
+  echo "error: need root to mount proc and bind device nodes for the chroot;" >&2
+  echo "       run as root, with passwordless sudo, or where 'unshare -Urmpf true' works." >&2
   exit 1
 fi
+
+if [[ ! -f "$rootfs/opt/ffmpeg-dist/usr/local/bin/ffmpeg" || ! -f "$rootfs/opt/ffmpeg-dist/BUILD-INFO.txt" ]]; then
+  echo "error: build produced no /opt/ffmpeg-dist/usr/local/bin/ffmpeg or /opt/ffmpeg-dist/BUILD-INFO.txt" >&2
+  exit 1
+fi
+cp -f "$rootfs/opt/ffmpeg-dist/usr/local/bin/ffmpeg" "$work/out/ffmpeg"
+cp -f "$rootfs/opt/ffmpeg-dist/BUILD-INFO.txt" "$work/out/BUILD-INFO.txt"
 
 # --- checksum + tar (deterministic member order; PAX atime/ctime stripped) ---
 tar --format=posix --sort=name --mtime=@0 --pax-option=delete=atime,delete=ctime --owner=0 --group=0 --numeric-owner \

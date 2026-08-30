@@ -187,7 +187,7 @@ gracefully on shutdown.
 | [FFmpeg](https://github.com/FFmpeg/FFmpeg) | `8.0` at commit `281c902` (tip of `release/8.0`, 2026-08-14; pinned and baked into the prebuilt artifact) | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
 | [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.0` at commit `e844e5b2` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
 | FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
-| Intermediate Debian image | `debian:trixie-20260824-slim` (snapshot `20260824T082821Z`) | Base image for the artifact producer (`tools/ffmpeg-dist/Dockerfile`); the same snapshot supplies the scratch-image runtime libs via `@trixie` (rules_distroless) |
+| Intermediate Debian image | `debian:trixie-20260824-slim` (snapshot `20260824T082821Z`) | Base image for the artifact producer (`tools/ffmpeg-dist`: pulled via the Docker Hub registry API into a rootfs by `publish.sh`, or `FROM` the thin `Dockerfile` wrapper); the same snapshot supplies the scratch-image runtime libs via `@trixie` (rules_distroless) |
 | Go toolchain | `golang:1.26.4-alpine3.24` | Controller build and test stages (`core/controller/Dockerfile`); module declares `go 1.26.4` |
 | [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.17.0`, Linux amd64 release tarball | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
 | `libfdk-aac` | `libfdk-aac-dev` in build stage; `libfdk-aac2t64` in runtime-libs stage | AAC encode support through FFmpeg |
@@ -198,9 +198,9 @@ gracefully on shutdown.
 > Note: the FFmpeg build currently compiles for `sm_75`
 > (Turing, e.g. the T4 in `g4dn` instances). To run the
 > ffmpeg stages on a different GPU family — for example the
-> L4 (`sm_89`) in `g6` instances — adjust the `--nvccflags`
-> `-gencode` target in `core/Dockerfile`, or run on a
-> matching instance type.
+> L4 (`sm_89`) in `g6` instances — adjust the `-gencode`
+> target (`GENCODE`) in `tools/ffmpeg-dist` when rebuilding
+> the artifact, or run on a matching instance type.
 
 > **Architecture: x86_64 only.** Every image is built
 > exclusively for the `linux/amd64` (x86_64) architecture,
@@ -336,10 +336,30 @@ cd tools/ffmpeg-dist
 S3_BUCKET="s3://your-bucket-name" AWS_REGION="us-east-1" ./publish.sh
 ```
 
-`publish.sh` builds `tools/ffmpeg-dist/Dockerfile` (with
-`docker`, falling back to `buildctl`), extracts the stripped
-`ffmpeg` binary plus its `BUILD-INFO.txt` provenance record,
-writes `ffmpeg-<ffver>-deb<date>-cuda<ver>-sm<N>-<shortsha>.tar.gz`
+`publish.sh` needs no docker daemon and no `buildctl`. It pulls
+the pinned `debian:trixie-20260824-slim` base image via the
+Docker Hub **registry API** (plain `curl` + `jq`), extracts it
+into a rootfs, copies in the shared build script
+`tools/ffmpeg-dist/build.sh`, and runs it inside a chroot. On
+non-amd64 hosts the chroot invokes the tonistiigi
+buildkit-direct-execve **patched qemu-x86_64** explicitly — upstream
+qemu cannot intercept the guest's `execve` without binfmt_misc, and
+BuildKit's bundled qemu segfaults on NVIDIA's `cicc`; amd64 hosts
+run the guest natively with no qemu. All build steps (apt snapshot
+pinning, CUDA redistributables, nv-codec-headers, FFmpeg) live in
+the shared `tools/ffmpeg-dist/build.sh`, which is the single source
+of truth; the thin `tools/ffmpeg-dist/Dockerfile` wrapper runs the
+same script, so the docker path and the chroot+qemu path produce
+byte-identical output (the sha256 in `MODULE.bazel` is the contract).
+
+arm64 hosts must provide the patched qemu via `QEMU_BIN` (default:
+`qemu-x86_64-static`/`qemu-x86_64` from PATH; the script's error
+message names the known-good build at
+`/var/tmp/ffmpeg-build/qemu-x86_64-patched`); amd64 hosts need no
+qemu. An already-extracted rootfs can be reused by setting
+`FFMPEG_DIST_ROOTFS`. `publish.sh` then extracts the stripped
+`ffmpeg` binary plus its `BUILD-INFO.txt` provenance record, writes
+`ffmpeg-<ffver>-deb<date>-cuda<ver>-sm<N>-<shortsha>.tar.gz`
 (e.g. `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz`),
 uploads it to the immutable `s3://<bucket>/ffmpeg/` prefix with
 `--acl public-read`, and prints the `http_archive` stanza to paste

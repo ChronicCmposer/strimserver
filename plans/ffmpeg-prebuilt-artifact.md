@@ -55,6 +55,23 @@
    carried-over flags (the hwaccel was already dead in the old
    `core/Dockerfile` build). The `hevc_cuvid` decoder and the
    `h264_nvenc`/`hevc_nvenc` encoders are enabled.
+10. **The producer no longer uses docker/buildctl (qemu-direct rework).**
+    `publish.sh` builds without docker or buildctl: it pulls the pinned
+    `debian:trixie-20260824-slim` base image via the Docker Hub **registry
+    API** (plain `curl` + `jq`), extracts it into a rootfs, and runs the
+    shared `tools/ffmpeg-dist/build.sh` inside a chroot. On non-amd64 hosts
+    the chroot invokes the tonistiigi buildkit-direct-execve **patched
+    qemu-x86_64** explicitly for the amd64 guest — upstream qemu cannot
+    intercept the guest's `execve` without binfmt_misc, and BuildKit's
+    bundled qemu segfaults on NVIDIA's `cicc`; amd64 hosts run the guest
+    natively with no qemu. Privilege handling is root → `sudo -n` →
+    `unshare -Urmpf` (the unprivileged user-namespace path is how the arm64
+    implementing host builds it). The build steps moved into the shared
+    `build.sh` (single source of truth); `tools/ffmpeg-dist/Dockerfile` is
+    now a thin wrapper around the same script, kept as an equivalent
+    alternative for docker hosts. Output was verified **byte-identical** to
+    the pinned sha256
+    `2df93667c7e12f2666be244772a41c653a02cab74880e685623770bd9c86ac34`.
 
 ## Context
 
@@ -146,6 +163,10 @@ in eighteen months nobody can say what is in the blob.
 
 **`tools/ffmpeg-dist/publish.sh`** — build → extract → tar → `sha256sum` →
 `aws s3 cp` → print the `http_archive` stanza to paste into `MODULE.bazel`.
+It builds without docker/buildctl — it pulls the pinned base via the Docker
+Hub registry API into a rootfs and runs the shared `build.sh` inside a chroot
+(+ patched qemu on non-amd64 hosts); the Dockerfile survives as a thin
+wrapper around the same script for docker hosts. See deviation 10.
 
 **Bucket layout — immutable, checksum in the name:**
 `s3://<bucket>/ffmpeg/ffmpeg-<...>-<shortsha>.tar.gz`. A bump is always a new
@@ -286,7 +307,7 @@ should open an issue rather than only going red, so it is actually noticed.
 | CUDA 13.0.2 redistributables unproven on Debian trixie | Debian 13 is an officially supported CUDA distro (GCC 14.2 / glibc 2.41, inside the supported 6.x–15.x range) — verified against NVIDIA's install guide. If 13.0.2 specifically balks, bump the pin to 13.3, which lists Debian 13 explicitly. Not a reason to abandon the Debian switch. |
 | FFmpeg build is not bit-reproducible | Phase 3 measures this before depending on it; Tier 2 fingerprint is the fallback. |
 | Hand-picked `.so` set subtly wrong | The new `readelf -d` assertion in the smoke test makes it a build-time failure. Runtime GPU test still mandatory. |
-| The artifact is a blob nobody can rebuild | `BUILD-INFO.txt` + the Dockerfile stays in-repo + the canary proves the recipe still works. |
+| The artifact is a blob nobody can rebuild | `BUILD-INFO.txt` + `build.sh`/the Dockerfile stay in-repo + the canary proves the recipe still works. |
 | Switching FFmpeg from branch to pinned release changes the binary | Intended. Verification step 1 compares against today's tip so the delta is known, not discovered. |
 
 ## Open items

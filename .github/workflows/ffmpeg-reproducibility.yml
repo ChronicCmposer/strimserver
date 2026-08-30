@@ -9,7 +9,8 @@
 # lists) -- is documented in plans/ffmpeg-prebuilt-artifact.md.
 #
 # The build needs no GPU: nvcc compiles and never runs on a GPU, so the
-# github-hosted ubuntu-latest runner (amd64, with docker) is sufficient.
+# github-hosted ubuntu-latest runner (amd64) is sufficient: publish.sh runs
+# the guest natively in a sudo chroot, no docker and no qemu.
 name: ffmpeg-artifact-reproducibility
 
 on:
