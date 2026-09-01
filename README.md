@@ -501,7 +501,7 @@ facade and the underlying `bazel` command it runs):
 
 ```bash
 # A) Build a redistributable bundle + SHA-256 locally (no upload).
-#    Output: bazel-bin/strimserver-deployment.checked.tar(.sha256)
+#    Output: bazel-bin/strimserver-deployment.tar(.sha256)
 make package
 bazel build //:package
 

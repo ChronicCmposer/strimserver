@@ -101,7 +101,7 @@ pkg_tar(
         ":bundle_openssh_rpm",
         ":bundle_scripts",
     ],
-    out = "strimserver-deployment.tar",
+    out = "strimserver-deployment.unchecked.tar",
 )
 
 genrule(
@@ -110,7 +110,7 @@ genrule(
         ":_strimserver_deployment_tar_unchecked",
         ":check_no_twitch_key",
     ],
-    outs = ["strimserver-deployment.checked.tar"],
+    outs = ["strimserver-deployment.tar"],
     cmd = "cp $(location :_strimserver_deployment_tar_unchecked) $@",
 )
 
