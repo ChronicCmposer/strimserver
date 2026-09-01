@@ -1,6 +1,25 @@
 # strimserver only ever ships linux/amd64 (see README: "Architecture: x86_64 only").
 build --platforms=//tools/bazel:linux_amd64
 
+# Non-x86_64 hosts (e.g. aarch64 with qemu-user binfmt): the stock default
+# test toolchain forces the test execution platform to satisfy the linux/amd64
+# target constraints, so tests fail analysis with "No matching toolchains
+# found" when the only execution platform is the host. Registering a
+# hypothetical x86_64 execution platform globally would fix that but also
+# makes Bazel prefer the amd64 Go SDK under qemu for ALL Go compilation and
+# breaks C++ toolchain
+# resolution for @bazel_tools//src/tools/launcher:launcher_maker. Instead,
+# run test actions on the target platform (linux/amd64) via qemu-user binfmt;
+# compile/genrule actions keep running natively on the host.
+# NOTE: --use_target_platform_for_tests is deprecated in Bazel 9.2.0 (emits a
+# non-fatal WARNING on every invocation). The suggested replacement --
+# registering the target platform as an execution platform, e.g.
+# --extra_execution_platforms=//tools/bazel:linux_x86_64_exec -- is deliberately
+# NOT used: it would reintroduce the amd64 Go SDK preference under qemu and
+# the C++ launcher_maker toolchain failure above. The linux_x86_64_exec
+# platform target was removed as dead code; do not "fix" this deprecation.
+build --use_target_platform_for_tests=true
+
 test --test_output=errors
 test --test_summary=terse
 
