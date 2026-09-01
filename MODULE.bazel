@@ -89,6 +89,8 @@ use_repo(
 # picking up Go 1.26 support means moving to v2 -- see the "version: 2" line
 # added to .golangci.yml alongside this pin.
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+s3_http_archive = use_repo_rule("//tools/bazel:s3_download.bzl", "s3_http_archive")
+s3_http_file = use_repo_rule("//tools/bazel:s3_download.bzl", "s3_http_file")
 
 http_archive(
     name = "golangci_lint_linux_amd64",
@@ -152,18 +154,36 @@ http_archive(
 # The ffmpeg binary is built out-of-band by tools/ffmpeg-dist/publish.sh
 # (compiling FFmpeg against CUDA needs nvcc, not a GPU -- see
 # plans/ffmpeg-prebuilt-artifact.md). S3 is the canonical source; the GitHub
-# Release asset is a mirror. The sha256 is the integrity pin and is now the
-# real checksum of the built artifact; the two URLs below are still
-# placeholders until the artifact is actually published (the repo's bucket is
-# a config open item -- publish.sh prints the final stanza after `aws login`).
-http_archive(
+# Release asset is a mirror. The sha256 is the integrity pin. The S3 bucket
+# and region come from the STRIMSERVER_S3_BUCKET / STRIMSERVER_S3_REGION env
+# vars (no committed defaults); when they are unset, the GitHub Release
+# mirror below is used.
+s3_http_archive(
     name = "ffmpeg_dist",
-    urls = [
-        "https://<bucket-name>.s3.us-east-1.amazonaws.com/ffmpeg/ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz",
-        "https://github.com/<owner>/<repo>/releases/download/ffmpeg-artifacts/ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz",
-    ],
+    s3_key = "ffmpeg/ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz",
     sha256 = "2df93667c7e12f2666be244772a41c653a02cab74880e685623770bd9c86ac34",
+    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/ffmpeg-artifacts/ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz"],
     build_file_content = 'exports_files(["ffmpeg", "BUILD-INFO.txt"])',
+)
+
+# --- Offline fallback segment ----------------------------------------------
+# The 2160p60 HEVC/AAC fallback clip is produced out-of-band on macOS by
+# tools/brb-screen/publish.sh generate (hevc_videotoolbox + aac_at are
+# VideoToolbox/AudioToolbox codecs, so the encode cannot run inside the Bazel
+# graph), then uploaded to S3 by tools/brb-screen/publish.sh upload <path>
+# on a Linux host with AWS credentials. S3 is the canonical source; the
+# GitHub Release asset is a mirror. The sha256 is the integrity pin. The S3
+# bucket and region come from the STRIMSERVER_S3_BUCKET / STRIMSERVER_S3_REGION
+# env vars (no committed defaults); when they are unset, the GitHub Release
+# mirror below is used.
+# Pin updated by running the two-phase publish; see
+# plans/buildkit-to-bazel-migration.md and README.
+s3_http_file(
+    name = "offline_segment_dist",
+    s3_key = "offline/strimserver-offline-2160p60.mp4",
+    sha256 = "05ff15e41a61e9478b005135699a130e21a7efab21b6a1bcae1aa30bd3182f7d",
+    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/offline-segment/strimserver-offline-2160p60.mp4"],
+    downloaded_file_name = "strimserver-offline-2160p60.mp4",
 )
 
 # --- Stream Deck plugin (rollup) ------------------------------------------

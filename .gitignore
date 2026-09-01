@@ -6,3 +6,14 @@ deploy/aws/*.key
 
 # Bazel output symlinks (point outside the repo; nothing here to commit).
 /bazel-*
+
+# ffmpeg-dist / offline-segment build artifacts
+tools/ffmpeg-dist/out.log
+tools/ffmpeg-dist/ffmpeg-*.tar.gz
+tools/ffmpeg-dist/1
+local/video/strimserver-offline-2160p60.mp4
+
+# untracked local SDK copy / python caches / local-only obs paths
+go/
+deploy/aws/__pycache__/
+tools/local-obs/

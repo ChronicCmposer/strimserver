@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Run the infra-identifier guard on staged/working changes.
+root="$(git rev-parse --show-toplevel)"
+exec "$root/tools/check-no-infra-identifiers.sh"

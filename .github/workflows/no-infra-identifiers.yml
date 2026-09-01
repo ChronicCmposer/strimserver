@@ -1,0 +1,9 @@
+name: no-infra-identifiers
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for AWS-infra identifiers
+        run: tools/check-no-infra-identifiers.sh

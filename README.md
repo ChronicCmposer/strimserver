@@ -183,7 +183,7 @@ gracefully on shutdown.
 | Component | Version / source | Where used |
 | --- | --- | --- |
 | NVIDIA CUDA redistributables | `13.0.2` (`cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm`; per-component sha256 pinned via the `redistrib_13.0.2.json` manifest) | Compile the FFmpeg artifact in `tools/ffmpeg-dist` (producer-only; not needed for a normal package build) |
-| Prebuilt FFmpeg artifact | `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz` (sha256 pinned in `MODULE.bazel` via `http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
+| Prebuilt FFmpeg artifact | `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz` (sha256 pinned in `MODULE.bazel` via `s3_http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
 | [FFmpeg](https://github.com/FFmpeg/FFmpeg) | `8.0` at commit `281c902` (tip of `release/8.0`, 2026-08-14; pinned and baked into the prebuilt artifact) | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
 | [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.0` at commit `e844e5b2` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
 | FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
@@ -253,6 +253,31 @@ pinned by the source tree:
   `bazel build //:package` consumes the prebuilt artifact and
   needs no CUDA toolchain.
 
+### Bazel S3 fetch rules (`STRIMSERVER_S3_BUCKET` / `STRIMSERVER_S3_REGION`)
+
+`MODULE.bazel` fetches the two large artifacts through
+`tools/bazel/s3_download.bzl`: the pinned FFmpeg tarball
+(`@ffmpeg_dist`, via `s3_http_archive`) and the offline
+fallback clip (`@offline_segment_dist`, via `s3_http_file`).
+When **both** `STRIMSERVER_S3_BUCKET` and
+`STRIMSERVER_S3_REGION` are set, the S3 URL is used as the
+primary download source; when either is unset, the rules fall
+back to the GitHub Release mirror URLs (the same blobs, hosted
+on GitHub), so a plain `make package` / `bazel build //:package`
+works with no AWS configuration:
+
+```bash
+export STRIMSERVER_S3_BUCKET="your-bucket-name"   # no s3:// prefix
+export STRIMSERVER_S3_REGION="<your-region>"
+```
+
+Setting exactly one of the two is an error (a half-configured
+bucket must not silently resolve to the mirror). Caveat: Bazel
+repo rules read these variables only when the Bazel server
+starts. If you change them after a build, run `bazel shutdown`
+and re-run, or pass them explicitly, e.g.
+`bazel build //:package --repo_env=STRIMSERVER_S3_BUCKET=your-bucket-name --repo_env=STRIMSERVER_S3_REGION=<your-region>`.
+
 ## Build instructions
 
 Clone the repository:
@@ -288,28 +313,52 @@ make generate          # rewrites the .env.example and types.generated.ts
 make check-generated   # fails if those generated files are stale in git
 ```
 
-Point Bazel at the offline fallback segment expected by the
-deployment bundle. Unlike the rest of the bundle's inputs,
-this file isn't checked in or fetched — wrap wherever you've
-placed it in a one-line `BUILD.bazel` and pass it as a build
-flag:
+The deployment bundle's offline fallback segment
+(`strimserver-offline-2160p60.mp4`) is fetched by default: Bazel
+pulls it through `MODULE.bazel`'s `s3_http_file(name =
+"offline_segment_dist")` (S3, with a GitHub Release mirror), and
+`//local/video:strimserver-offline-2160p60.mp4` wraps the downloaded
+file. The clip is a 2160p60 HEVC/AAC encode produced out-of-band on
+macOS — the `hevc_videotoolbox` + `aac_at` codecs are
+VideoToolbox/AudioToolbox-only and cannot run inside the Bazel
+graph. Publishing is a two-phase flow — generation needs macOS, upload
+needs a Linux host with AWS credentials configured:
+
+**Phase 1 — generate on macOS** (no AWS needed):
 
 ```bash
-# Option A: generate the default 2160p60 fallback clip on a machine with a compatible FFmpeg setup.
-. tools/brb-screen/bslib.sh
-generate2160p
-mkdir -p local/video
-cp ~/Downloads/strimserver-offline-2160p60.mp4 local/video/
-echo 'exports_files(["strimserver-offline-2160p60.mp4"])' > local/video/BUILD.bazel
-
-# Option B: point it at an already-created fallback file the same way.
+cd tools/brb-screen
+./publish.sh generate
 ```
 
-Then pass `--//:offline_segment=//local/video:strimserver-offline-2160p60.mp4`
-to any `bazel build`/`bazel run` invocation below (or add it to a
-`.bazelrc.local` as `build --//:offline_segment=...` so you don't have to
-repeat it). Building without it fails with a clear message telling you to
-set the flag.
+`publish.sh generate` sources `bslib.sh`'s `generate2160p` (the same
+encode `bslib.sh` documents), writes
+`~/Downloads/strimserver-offline-2160p60.mp4`, and prints its sha256.
+
+**Phase 2 — upload from a Linux host with AWS credentials.** Copy the
+clip to the host (e.g. `scp`), then:
+
+```bash
+cd tools/brb-screen
+S3_BUCKET="s3://your-bucket-name" AWS_REGION="<your-region>" \
+  ./publish.sh upload /path/to/strimserver-offline-2160p60.mp4
+```
+
+`AWS_REGION` is your bucket's own region — set it to your
+value; there is no baked-in default. `publish.sh upload`
+computes the sha256, uploads the mp4 to
+`$S3_BUCKET/offline/`, and prints the `s3_http_file` stanza to paste
+into `MODULE.bazel` — the sha256 there is the integrity pin. It also
+prints the `gh release upload` command for the GitHub Release mirror
+(tag `offline-segment`).
+
+On a Mac that also has AWS credentials configured, running
+`./publish.sh` with no subcommand generates and uploads in one flow.
+
+The `--//:offline_segment` build flag remains only as an optional
+override: point it at a filegroup wrapping a locally-generated clip
+of your own (or add `build --//:offline_segment=...` to a
+`.bazelrc.local`). Without the flag the S3-fetched default is used.
 
 Start or connect to a BuildKit daemon only when building one
 of the two off-path targets: the experimental OpenSSH RPM
@@ -324,7 +373,7 @@ tunnel, and no `sudo`.
 
 The `ffmpeg` image's binary is a pinned, checksummed prebuilt
 artifact fetched by Bazel through `MODULE.bazel`'s
-`http_archive(name = "ffmpeg_dist", ...)`. The FFmpeg compile
+`s3_http_archive(name = "ffmpeg_dist", ...)`. The FFmpeg compile
 does not run in the Bazel graph — it happens out-of-band, once
 per version bump, in `tools/ffmpeg-dist/`, and **the sha256 in
 `MODULE.bazel` is the integrity guarantee**.
@@ -333,8 +382,12 @@ To rebuild and publish a new artifact:
 
 ```bash
 cd tools/ffmpeg-dist
-S3_BUCKET="s3://your-bucket-name" AWS_REGION="us-east-1" ./publish.sh
+S3_BUCKET="s3://your-bucket-name" AWS_REGION="<your-region>" ./publish.sh
 ```
+
+`AWS_REGION` is your bucket's own region — set it to your
+value; there is no baked-in default (`SKIP_UPLOAD=1` rebuilds
+and checksums without either variable).
 
 `publish.sh` needs no docker daemon and no `buildctl`. It pulls
 the pinned `debian:trixie-20260824-slim` base image via the
@@ -380,9 +433,11 @@ qemu. An already-extracted rootfs can be reused by setting
 `ffmpeg` binary plus its `BUILD-INFO.txt` provenance record, writes
 `ffmpeg-<ffver>-deb<date>-cuda<ver>-sm<N>-<shortsha>.tar.gz`
 (e.g. `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz`),
-uploads it to the immutable `s3://<bucket>/ffmpeg/` prefix with
-`--acl public-read`, and prints the `http_archive` stanza to paste
-into `MODULE.bazel`. `BUILD-INFO.txt` records the FFmpeg commit,
+uploads it to the `s3://<bucket>/ffmpeg/` prefix with no ACL
+modification (objects get the bucket's default private ACL; the
+IP-scoped HTTPS-only bucket policy from `bucket-cidr-policy.sh` is
+the only access gate), and prints the `s3_http_archive` stanza to
+paste into `MODULE.bazel`. `BUILD-INFO.txt` records the FFmpeg commit,
 nv-codec-headers tag, Debian snapshot, CUDA component sha256s,
 `-gencode` target, the full `configure` line, and `readelf -d`
 output, so the blob always stays reproducible.
@@ -402,17 +457,17 @@ facade and the underlying `bazel` command it runs):
 # A) Build a redistributable bundle + SHA-256 locally (no upload).
 #    Output: bazel-bin/strimserver-deployment.checked.tar(.sha256)
 make package
-bazel build --//:offline_segment=//local/video:strimserver-offline-2160p60.mp4 //:package
+bazel build //:package
 
 # B) Build, then attach the bundle + checksum to an existing GitHub
 #    release. Requires the GitHub CLI (`gh auth login`) and a pushed tag.
 make release GIT_TAG=v1.0.0
-bazel run --//:offline_segment=... //:release   # reads GIT_TAG from the environment
+bazel run //:release   # reads GIT_TAG from the environment
 
 # C) Build and upload a single-tenant bundle to S3 (the default goal).
 export S3_BUCKET="s3://your-bucket-name"
 make publish-strimserver
-bazel run --//:offline_segment=... //:publish_strimserver   # reads S3_BUCKET from the environment
+bazel run //:publish_strimserver   # reads S3_BUCKET from the environment
 ```
 
 All three build the same three OCI images —
@@ -737,6 +792,16 @@ with:
    - the motivation for the change;
    - the test/build/deployment commands that were run;
    - any compatibility or migration notes.
+
+The repository ships a pre-commit guard (`.githooks/pre-commit`,
+backed by `tools/check-no-infra-identifiers.sh`) that rejects
+commits containing AWS-infra identifiers (the old build-machine
+S3 domain, the old AWS host IP prefix, an operator name, or the
+old S3 bucket name). Enable it with:
+
+```bash
+git config core.hooksPath .githooks
+```
 
 Avoid committing secrets, Twitch stream keys, generated SRT
 passphrases, local `.env` files, deployment artifacts,

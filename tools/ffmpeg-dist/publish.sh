@@ -14,7 +14,9 @@
 # The resulting /out payload (ffmpeg + BUILD-INFO.txt) is tared as
 #   ffmpeg-<FFMPEG_VERSION>-deb<YYYYMMDD>-cuda<X.Y.Z>-sm<N>-<shortsha>.tar.gz
 # (written into the current directory), uploaded to $S3_BUCKET/ffmpeg/ with
-# --acl public-read, then the http_archive block is printed for MODULE.bazel
+# no ACL modification (objects get the bucket's default private ACL; the
+# IP-scoped HTTPS-only bucket policy from bucket-cidr-policy.sh is the only
+# access gate), then the s3_http_archive block is printed for MODULE.bazel
 # (name = "ffmpeg_dist").
 #
 # Env vars (defaults mirror the build.sh pins / the Dockerfile ARGs):
@@ -37,10 +39,10 @@
 #                        run the guest natively with no qemu at all.
 #   FFMPEG_DIST_ROOTFS   default unset; when set to an already-extracted rootfs
 #                        the Docker Hub registry pull is skipped entirely.
-#   S3_BUCKET            default s3://<bucket-name>  (same placeholder as the root Makefile)
-#   AWS_REGION           default us-east-1
-#   GITHUB_REPOSITORY    owner/repo; when set, a GitHub Release mirror URL is
-#                        added to the stanza's urls list.
+#   S3_BUCKET            required for upload (e.g. s3://<bucket-name>; SKIP_UPLOAD=1 works without it)
+#   AWS_REGION           required for upload (no default; SKIP_UPLOAD=1 works without it)
+#   GITHUB_REPOSITORY    owner/repo; default ChronicCmposer/strimserver; used for
+#                        the GitHub Release mirror URL in the stanza's mirror_urls.
 #   SKIP_UPLOAD          default unset; 1 = build + checksum only, print the
 #                        stanza with a SKIP_UPLOAD note, exit 0 (used by the
 #                        reproducibility canary, which only compares sha256s).
@@ -61,7 +63,7 @@ CUDA_COMPONENTS="${CUDA_COMPONENTS:-cuda_nvcc cuda_cudart cuda_crt libnvvm}"
 GENCODE="${GENCODE:-arch=compute_75,code=sm_75}"
 NPROC="${NPROC:-8}"
 S3_BUCKET="${S3_BUCKET:-s3://<bucket-name>}"
-AWS_REGION="${AWS_REGION:-us-east-1}"
+AWS_REGION="${AWS_REGION:-}"
 GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}"
 SKIP_UPLOAD="${SKIP_UPLOAD:-}"
 QEMU_BIN="${QEMU_BIN:-}"
@@ -313,36 +315,34 @@ echo "==> sha256:   $sha256"
 if [[ "$SKIP_UPLOAD" == "1" ]]; then
   echo "==> SKIP_UPLOAD=1: skipping upload; artifact remains local."
   upload_ok=0
+elif [[ -z "$AWS_REGION" ]]; then
+  # Config error (not a skip): fail loud before the sts call, which would
+  # otherwise report a misleading "credentials not found" for an empty region.
+  echo "error: AWS_REGION is required for upload (no default)." >&2
+  exit 1
 elif ! aws --region "$AWS_REGION" sts get-caller-identity >/dev/null 2>&1; then
   echo "!! AWS credentials not found (aws sts get-caller-identity failed)." >&2
   echo "!! Skipping upload; $artifact remains local." >&2
   echo "!! Re-run with valid credentials to publish, or upload manually:" >&2
-  echo "!!   aws --region $AWS_REGION s3 cp --acl public-read $artifact $S3_BUCKET/ffmpeg/$artifact" >&2
+  echo "!!   aws --region $AWS_REGION s3 cp $artifact $S3_BUCKET/ffmpeg/$artifact" >&2
   upload_ok=0
 else
-  aws --region "$AWS_REGION" s3 cp --acl public-read "$artifact" "$S3_BUCKET/ffmpeg/$artifact"
+  [[ -n "${S3_BUCKET#s3://}" ]] || { echo "error: S3_BUCKET is required for upload (e.g. S3_BUCKET=s3://your-bucket-name)" >&2; exit 1; }
+  aws --region "$AWS_REGION" s3 cp "$artifact" "$S3_BUCKET/ffmpeg/$artifact"
   upload_ok=1
 fi
 
 # --- MODULE.bazel stanza ---
-bucket="${S3_BUCKET#s3://}"
-s3_url="https://${bucket}.s3.${AWS_REGION}.amazonaws.com/ffmpeg/${artifact}"
-if [[ -n "$GITHUB_REPOSITORY" ]]; then
-  mirror_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/ffmpeg-artifacts/${artifact}"
-fi
+# The S3 URL is derived from STRIMSERVER_S3_BUCKET / STRIMSERVER_S3_REGION at
+# fetch time (not printed); mirror_urls is mandatory, so always emit it.
+mirror_url="https://github.com/${GITHUB_REPOSITORY:-ChronicCmposer/strimserver}/releases/download/ffmpeg-artifacts/${artifact}"
 
-printf '\n# --- MODULE.bazel: paste this block into MODULE.bazel ---\n'
-printf 'http_archive(\n'
+printf '\n# --- MODULE.bazel: paste this s3_http_archive block into MODULE.bazel ---\n'
+printf 's3_http_archive(\n'
 printf '    name = "ffmpeg_dist",\n'
-if [[ -n "$GITHUB_REPOSITORY" ]]; then
-  printf '    urls = [\n'
-  printf '        "%s",\n' "$s3_url"
-  printf '        "%s",\n' "$mirror_url"
-  printf '    ],\n'
-else
-  printf '    url = "%s",\n' "$s3_url"
-fi
+printf '    s3_key = "ffmpeg/%s",\n' "$artifact"
 printf '    sha256 = "%s",\n' "$sha256"
+printf '    mirror_urls = ["%s"],\n' "$mirror_url"
 printf '    build_file_content = "exports_files([\\"ffmpeg\\", \\"BUILD-INFO.txt\\"])",\n'
 printf ')\n'
 if [[ "$upload_ok" == 0 ]]; then
