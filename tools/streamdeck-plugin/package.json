@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Stream Deck control for the strimserver controller",
   "type": "module",
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c -w"
@@ -17,9 +18,13 @@
     "@rollup/plugin-commonjs": "^28",
     "@rollup/plugin-node-resolve": "^16",
     "@rollup/plugin-typescript": "^12",
+    "@rollup/rollup-linux-arm64-gnu": "4.62.2",
     "@types/node": "^24.13.2",
     "rollup": "^4",
     "tslib": "^2",
     "typescript": "^5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": []
   }
 }

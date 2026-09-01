@@ -86,6 +86,58 @@ def transfer_twitch_key(key, hostname, username, port):
         os.remove(tmp)
     ssh_run(hostname, username, port, "chmod 600 /mnt/nvme/twitch-stream-key")
 
+
+def interactive():
+    """True when a human is on both ends of the pipe."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def confirm(prompt):
+    """True iff interactive and the operator pressed enter (not EOF/Ctrl-C)."""
+    if not interactive():
+        return False
+    try:
+        input(prompt)
+        return True
+    except (EOFError, KeyboardInterrupt):
+        print("\nskipped.")
+        return False
+
+
+def offer_exec_start(host, user):
+    """Offer to hand off to deploy/aws/start_strimserver by replacing this
+    process (execve) - the same pattern launch uses to hand off to setup.
+    Returns only if the operator declines or it cannot run; on accept the
+    process image is replaced and control never comes back.
+    """
+    start = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "start_strimserver")
+    if not interactive() or not os.path.exists(start):
+        return
+
+    # start_strimserver requires SSH_CMD/SSH_HOST/SSH_USER; hand it exactly what
+    # setup used so it starts the service on the same box.
+    env = dict(os.environ)
+    env["SSH_HOST"] = host
+    env["SSH_USER"] = user
+    env.setdefault("SSH_CMD", "ssh")
+
+    print(f"\nabout to run, replacing this process (execve):\n"
+          f"    {start}\n"
+          f"(starts strimserver.service on {user}@{host}).")
+    if not confirm("press enter to start strimserver (ctrl-c to skip): "):
+        return
+
+    # Replace this process. execve keeps our stdin/stdout/stderr; start_strimserver
+    # is a bash script, so exec it directly and let its shebang pick the shell.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.execve(start, [start], env)
+    except OSError as e:
+        print(f"could not exec {start}: {e}")
+
+
 if __name__ == "__main__":
     HOST = os.environ.get("SSH_HOST", "strimserver")
     USER = os.environ.get("SSH_USER", "ec2-user")
@@ -142,4 +194,7 @@ if __name__ == "__main__":
         "cd /mnt/nvme && chmod +x deploy.sh",
         "cd /mnt/nvme && ./deploy.sh",
     ])
+
+    # 4) offer to start the service, replacing this process (execve)
+    offer_exec_start(HOST, USER)
 

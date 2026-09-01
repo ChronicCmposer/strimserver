@@ -5,13 +5,14 @@ const (
    PathNormalized PathName = "normalized"
 )
 const (
-   StageMediaMTX       StageName = "mediamtx"
-   StageNormalize      StageName = "normalize"
-   StageScaleAndEgress StageName = "scale_and_egress"
+   StageMediaMTX           StageName = "mediamtx"
+   StageNormalize          StageName = "normalize"
+   StageScaleAndEgress     StageName = "scale_and_egress"
+   StageSingleStageEgress  StageName = "single_stage_egress"
 )
 
 const (
-   ComponentScaleAndEgress ControlComponent = ControlComponent(StageScaleAndEgress)
+   ComponentEgress ControlComponent = "egress"
 )
 
 const (
@@ -21,10 +22,10 @@ const (
 
 var (
    AllPathNames         = []PathName{PathIngress0, PathNormalized}
-   AllStageNames        = []StageName{StageMediaMTX, StageNormalize, StageScaleAndEgress}
+   AllStageNames        = []StageName{StageMediaMTX, StageNormalize, StageScaleAndEgress, StageSingleStageEgress}
    AllPathStatuses      = []PathStatus{Unknown, Ready, NotReady}
    AllStageStates       = []StageState{Running, Stopped} // NoTarget excluded by intent
-   AllControlComponents = []ControlComponent{ComponentScaleAndEgress}
+   AllControlComponents = []ControlComponent{ComponentEgress}
    AllControlActions    = []ControlAction{ActionStart, ActionStop}
 )
 

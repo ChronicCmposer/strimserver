@@ -1,3 +1,6 @@
+// Package main implements the strimserver controller: it drives the
+// mediamtx/normalize/scale-and-egress containerd containers and their
+// lifecycle transitions, and exposes the HTTP/websocket control plane.
 package main
 
 import (
@@ -262,7 +265,12 @@ func (f ContainerFactory) CreateContainerdEventListener(
 
                eventType := reflect.TypeOf(event)
                eventName := eventType.Name()
-               target, ok := f.stageNames[event.(TaskEvent).GetContainerID()]
+               taskEvent, ok := event.(TaskEvent)
+               if !ok {
+                  log.Printf("received %q event without a container id: %+v", eventName, event)
+                  continue
+               }
+               target, ok := f.stageNames[taskEvent.GetContainerID()]
                if !ok {
                   log.Printf("received %q event, but not associated with any stage: %+v", eventName, event)
                   continue

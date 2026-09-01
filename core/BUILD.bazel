@@ -1,0 +1,489 @@
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@rules_distroless//distroless:defs.bzl", "cacerts")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+load("//tools/bazel:deb_file.bzl", "deb_file")
+
+exports_files([
+    "strimserver.env.example",
+    "mediamtx.yaml.template",
+    "transcode.sh",
+    "notify.sh",
+])
+
+# core/strimserver.env is gitignored (user-provided secrets); referencing it
+# here means //:strimserver_deployment_tar fails at analysis time naming
+# this exact path if it doesn't exist yet -- see README's Build instructions.
+exports_files(["strimserver.env"])
+
+# Regenerated from the controller's env spec; see //core/controller:generate.
+write_source_files(
+    name = "write_env_example",
+    visibility = ["//core/controller:__pkg__"],
+    files = {
+        "strimserver.env.example": "//core/controller:env_example_gen",
+    },
+)
+
+# =============================================================================
+# mediamtx image (FROM scratch). Assembled by rules_oci from the pinned
+# @mediamtx_dist tarball plus Debian trixie donor packages from @trixie (the
+# apt extension in MODULE.bazel). The ffmpeg image lives right below,
+# assembled from the pinned @ffmpeg_dist artifact; libfdk-aac is ffmpeg-only
+# and isn't needed here.
+# =============================================================================
+
+# The mediamtx binary is linux/amd64. On an x86_64 host the native `strip`
+# (from PATH) handles it, exactly as before. On any other host, the amd64 GNU
+# strip from the pinned @trixie binutils deb is run under the
+# buildkit-direct-execve patched qemu-x86_64 (built by tools/qemu/build-qemu.sh
+# via the @qemu_x86_64_patched repo rule, with the amd64 loader + libc + the
+# strip binary's own libs supplied hermetically through qemu's -L sysroot).
+# Stripping is a pure size optimization for this static Go binary, so on a
+# non-x86_64 host a missing/broken qemu or a strip failure falls back to
+# skipping with a loud note instead of failing the whole build; the amd64
+# bytes are otherwise identical, and the smoke test does not depend on
+# stripping. On x86_64 hosts nothing changes: the alias below resolves the
+# qemu tool to a local placeholder (its value is only ever expanded into an
+# unused shell variable), so @qemu_x86_64_patched is never fetched there.
+
+# The patched qemu-x86_64 as a genrule tool, selected away on x86_64 exec
+# hosts so amd64 builds never fetch the (source-built) emulator repo.
+alias(
+    name = "qemu_x86_64_patched_tool",
+    actual = select({
+        "//tools/bazel:is_x86_64_exec": ":qemu_x86_64_patched_placeholder",
+        "//conditions:default": "@qemu_x86_64_patched//:qemu-x86_64",
+    }),
+)
+
+genrule(
+    name = "qemu_x86_64_patched_placeholder",
+    outs = ["qemu-x86_64.placeholder"],
+    cmd = "touch $@",
+)
+
+genrule(
+    name = "mediamtx_bin_stripped",
+    srcs = ["@mediamtx_dist//:mediamtx"],
+    tools = [
+        ":amd64_strip_bin",
+        ":amd64_strip_libbfd",
+        ":amd64_strip_libsframe",
+        ":amd64_strip_libz",
+        ":amd64_strip_libzstd",
+        ":amd64_strip_libgcc_s",
+        ":ld_linux",
+        ":libc_so",
+        ":qemu_x86_64_patched_tool",
+    ],
+    outs = ["mediamtx"],
+    cmd = """
+set -eu
+cp $(location @mediamtx_dist//:mediamtx) $@
+chmod +w $@
+host="$$(uname -m)"
+machine="$$(readelf -h $@ | awk -F': *' '/Machine:/{print $$2}' | tr '[:upper:]' '[:lower:]')"
+case "$$machine" in
+  *x86-64*)
+    if [ "$$host" = x86_64 ]; then
+      # Native host strip: unchanged behavior.
+      strip $@
+    else
+      # Cross-strip on a non-x86_64 host: run the amd64 GNU strip under the
+      # patched qemu-x86_64, with the amd64 runtime closure (loader, libc,
+      # and the libs strip itself links against) supplied hermetically via
+      # qemu's -L sysroot. Fail-soft: any qemu/strip failure skips with a
+      # loud note -- the unstripped binary is fine.
+      qemu="$(location :qemu_x86_64_patched_tool)"
+      strip_tool="$(location :amd64_strip_bin)"
+      sysroot="$$(mktemp -d)"
+      trap 'rm -rf "$$sysroot"' EXIT
+      mkdir -p "$$sysroot/lib64" "$$sysroot/lib/x86_64-linux-gnu"
+      cp "$(location :ld_linux)" "$$sysroot/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+      ln -s ../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "$$sysroot/lib64/ld-linux-x86-64.so.2"
+      cp "$(location :libc_so)" "$$sysroot/lib/x86_64-linux-gnu/libc.so.6"
+      cp "$(location :amd64_strip_libbfd)" "$$sysroot/lib/x86_64-linux-gnu/libbfd-2.44-system.so"
+      cp "$(location :amd64_strip_libsframe)" "$$sysroot/lib/x86_64-linux-gnu/libsframe.so.1"
+      cp "$(location :amd64_strip_libz)" "$$sysroot/lib/x86_64-linux-gnu/libz.so.1"
+      cp "$(location :amd64_strip_libzstd)" "$$sysroot/lib/x86_64-linux-gnu/libzstd.so.1"
+      cp "$(location :amd64_strip_libgcc_s)" "$$sysroot/lib/x86_64-linux-gnu/libgcc_s.so.1"
+      if ! "$$qemu" -L "$$sysroot" "$$strip_tool" "$@"; then
+        echo "note: skipping strip of $$machine mediamtx on $$host host (qemu cross-strip failed)" >&2
+      fi
+    fi
+    ;;
+  *)
+    echo "note: skipping strip of $$machine mediamtx on $$host host (no cross strip)" >&2
+    ;;
+esac
+""",
+)
+
+deb_file(
+    name = "busybox_bin",
+    data = "@trixie//busybox-static/amd64:data",
+    path = "usr/bin/busybox",
+)
+
+deb_file(
+    name = "nice_bin",
+    data = "@trixie//coreutils/amd64:data",
+    path = "usr/bin/nice",
+)
+
+deb_file(
+    name = "envsubst_bin",
+    data = "@trixie//gettext-base/amd64:data",
+    path = "usr/bin/envsubst",
+)
+
+deb_file(
+    name = "ld_linux",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+)
+
+deb_file(
+    name = "libc_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libc.so.6",
+)
+
+deb_file(
+    name = "libm_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libm.so.6",
+)
+
+deb_file(
+    name = "libpthread_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libpthread.so.0",
+)
+
+deb_file(
+    name = "libresolv_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libresolv.so.2",
+)
+
+# --- amd64 GNU strip tool ----------------------------------------------------
+# Used to cross-strip the amd64 @mediamtx_dist binary on non-x86_64 hosts by
+# running it under the patched qemu-x86_64 (see mediamtx_bin_stripped below).
+# The real ELF is x86_64-linux-gnu-strip (the /usr/bin/strip symlink in the
+# deb points at it, and deb_file cannot copy a dangling symlink); the libs are
+# the strip binary's own runtime closure. libsframe/libz/libzstd ship soname
+# symlinks in the deb, so the real versioned files are extracted here and
+# renamed to their sonames when the qemu sysroot is assembled in the genrule.
+# libgcc_s.so.1 is also in the closure (binutils links it for stack
+# unwinding); libgcc-s1 is already in the @trixie donor set transitively, so
+# it costs nothing extra to supply.
+deb_file(
+    name = "amd64_strip_bin",
+    data = "@trixie//binutils-x86-64-linux-gnu/amd64:data",
+    path = "usr/bin/x86_64-linux-gnu-strip",
+)
+
+deb_file(
+    name = "amd64_strip_libbfd",
+    data = "@trixie//libbinutils/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libbfd-2.44-system.so",
+)
+
+deb_file(
+    name = "amd64_strip_libsframe",
+    data = "@trixie//libsframe1/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libsframe.so.1.0.0",
+)
+
+deb_file(
+    name = "amd64_strip_libz",
+    data = "@trixie//zlib1g/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libz.so.1.3.1",
+)
+
+deb_file(
+    name = "amd64_strip_libzstd",
+    data = "@trixie//libzstd1/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libzstd.so.1.5.7",
+)
+
+deb_file(
+    name = "amd64_strip_libgcc_s",
+    data = "@trixie//libgcc-s1/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+)
+
+cacerts(
+    name = "cacerts",
+    package = "@trixie//ca-certificates/amd64:data",
+)
+
+pkg_files(
+    name = "mediamtx_usr_bin",
+    srcs = [
+        ":busybox_bin",
+        ":envsubst_bin",
+        ":nice_bin",
+    ],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/usr/bin",
+)
+
+pkg_files(
+    name = "mediamtx_lib64",
+    srcs = [":ld_linux"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib64",
+)
+
+pkg_files(
+    name = "mediamtx_libs",
+    srcs = [
+        ":libc_so",
+        ":libm_so",
+        ":libpthread_so",
+        ":libresolv_so",
+    ],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib/x86_64-linux-gnu",
+)
+
+pkg_files(
+    name = "mediamtx_nsswitch",
+    srcs = [":nsswitch_conf"],
+    attributes = pkg_attributes(mode = "0644"),
+    prefix = "/etc",
+    renames = {":nsswitch_conf": "nsswitch.conf"},
+)
+
+genrule(
+    name = "nsswitch_conf",
+    outs = ["nsswitch.conf.gen"],
+    cmd = "printf 'hosts: files dns\\n' > $@",
+)
+
+pkg_files(
+    name = "mediamtx_root",
+    srcs = [":mediamtx_bin_stripped"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+)
+
+pkg_files(
+    name = "mediamtx_entrypoint",
+    srcs = ["entrypoint.mediamtx.sh"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+    renames = {"entrypoint.mediamtx.sh": "entrypoint.sh"},
+)
+
+pkg_tar(
+    name = "mediamtx_files_tar",
+    srcs = [
+        ":mediamtx_entrypoint",
+        ":mediamtx_lib64",
+        ":mediamtx_libs",
+        ":mediamtx_nsswitch",
+        ":mediamtx_root",
+        ":mediamtx_usr_bin",
+    ],
+    symlinks = {
+        "/bin/sh": "/usr/bin/busybox",
+        "/usr/bin/cat": "busybox",
+        "/usr/bin/ln": "busybox",
+        "/usr/bin/mkdir": "busybox",
+        "/usr/bin/nc": "busybox",
+        "/usr/bin/rm": "busybox",
+        "/usr/bin/sh": "busybox",
+        "/usr/bin/wget": "busybox",
+    },
+)
+
+oci_image(
+    name = "mediamtx_image",
+    architecture = "amd64",
+    entrypoint = ["/entrypoint.sh"],
+    os = "linux",
+    tars = [
+        ":cacerts",
+        ":mediamtx_files_tar",
+    ],
+)
+
+oci_load(
+    name = "mediamtx_image_tarball",
+    image = ":mediamtx_image",
+    repo_tags = ["docker.io/library/mediamtx:latest"],
+)
+
+sh_test(
+    name = "mediamtx_smoke_test",
+    srcs = ["mediamtx_smoke_test.sh"],
+    args = ["$(location :mediamtx_files_tar)"],
+    data = [":mediamtx_files_tar"],
+)
+
+# =============================================================================
+# ffmpeg image (FROM scratch). The binary comes from the pinned, checksummed
+# @ffmpeg_dist artifact (built out-of-band by tools/ffmpeg-dist/publish.sh);
+# the runtime debs below (libc6 set + libfdk-aac2t64) come from the @trixie
+# apt snapshot and serve both images.
+# =============================================================================
+
+deb_file(
+    name = "libdl_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libdl.so.2",
+)
+
+deb_file(
+    name = "librt_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/librt.so.1",
+)
+
+deb_file(
+    name = "libnss_dns_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libnss_dns.so.2",
+)
+
+deb_file(
+    name = "libnss_files_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libnss_files.so.2",
+)
+
+# libfdk-aac2t64 ships libfdk-aac.so.2 as a SYMLINK to libfdk-aac.so.2.0.3, and
+# deb_file (tar -xzf of a single member + cp -p) cannot copy a dangling symlink
+# (the target member is not extracted). Extract the real versioned file here and
+# recreate the soname symlink in :ffmpeg_files_tar -- matching the Debian
+# package layout (and the soname symlink the Debian package ships).
+deb_file(
+    name = "libfdk_aac_real",
+    data = "@trixie//libfdk-aac2t64/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libfdk-aac.so.2.0.3",
+)
+
+pkg_files(
+    name = "ffmpeg_usr_bin",
+    srcs = [
+        ":busybox_bin",
+        ":nice_bin",
+    ],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/usr/bin",
+)
+
+pkg_files(
+    name = "ffmpeg_lib64",
+    srcs = [":ld_linux"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib64",
+)
+
+pkg_files(
+    name = "ffmpeg_libs",
+    srcs = [
+        ":libc_so",
+        ":libm_so",
+        ":libdl_so",
+        ":libpthread_so",
+        ":librt_so",
+        ":libresolv_so",
+        ":libnss_dns_so",
+        ":libnss_files_so",
+    ],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib/x86_64-linux-gnu",
+)
+
+pkg_files(
+    name = "ffmpeg_fdk_libs",
+    srcs = [":libfdk_aac_real"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/usr/lib/x86_64-linux-gnu",
+)
+
+pkg_files(
+    name = "ffmpeg_nsswitch",
+    srcs = [":nsswitch_conf"],
+    attributes = pkg_attributes(mode = "0644"),
+    prefix = "/etc",
+    renames = {":nsswitch_conf": "nsswitch.conf"},
+)
+
+pkg_files(
+    name = "ffmpeg_root",
+    srcs = ["@ffmpeg_dist//:ffmpeg"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+)
+
+pkg_tar(
+    name = "ffmpeg_files_tar",
+    srcs = [
+        ":ffmpeg_usr_bin",
+        ":ffmpeg_lib64",
+        ":ffmpeg_libs",
+        ":ffmpeg_fdk_libs",
+        ":ffmpeg_nsswitch",
+        ":ffmpeg_root",
+    ],
+    symlinks = {
+        "/bin/sh": "/usr/bin/busybox",
+        "/usr/bin/cat": "/usr/bin/busybox",
+        "/usr/bin/ln": "/usr/bin/busybox",
+        "/usr/bin/mkdir": "/usr/bin/busybox",
+        "/usr/bin/nc": "/usr/bin/busybox",
+        "/usr/bin/rm": "/usr/bin/busybox",
+        "/usr/bin/sh": "/usr/bin/busybox",
+        "/usr/bin/wget": "/usr/bin/busybox",
+        # soname symlink for the real libfdk-aac.so.2.0.3 shipped above
+        "/usr/lib/x86_64-linux-gnu/libfdk-aac.so.2": "libfdk-aac.so.2.0.3",
+    },
+)
+
+oci_image(
+    name = "ffmpeg_image",
+    architecture = "amd64",
+    os = "linux",
+    tars = [":ffmpeg_files_tar"],
+    env = {
+        "NVIDIA_VISIBLE_DEVICES": "all",
+        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video",
+        "LD_LIBRARY_PATH": "/usr/lib64",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    },
+)
+
+oci_load(
+    name = "ffmpeg_image_tarball",
+    repo_tags = ["docker.io/library/ffmpeg:latest"],
+    image = ":ffmpeg_image",
+)
+
+filegroup(
+    name = "ffmpeg_image_tar_file",
+    srcs = [":ffmpeg_image_tarball"],
+    output_group = "tarball",
+    visibility = ["//visibility:public"],
+)
+
+sh_test(
+    name = "ffmpeg_smoke_test",
+    srcs = ["ffmpeg_smoke_test.sh"],
+    args = ["$(location :ffmpeg_files_tar)"],
+    data = [":ffmpeg_files_tar"],
+)
+
+filegroup(
+    name = "mediamtx_image_tar_file",
+    srcs = [":mediamtx_image_tarball"],
+    output_group = "tarball",
+    visibility = ["//visibility:public"],
+)

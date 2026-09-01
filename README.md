@@ -30,24 +30,23 @@ file.
 ## Architecture
 
 > **strimserver depends directly on
-> [containerd](https://github.com/containerd/containerd) and
-> [BuildKit](https://github.com/moby/buildkit).** There is
-> no Docker, Kubernetes, or higher-level orchestrator in the
-> loop. The controller links the `containerd/v2` client
+> [containerd](https://github.com/containerd/containerd).**
+> There is no Docker, Kubernetes, or higher-level orchestrator
+> in the loop. The controller links the `containerd/v2` client
 > library and drives the containerd API directly to create,
-> snapshot, start, stop, and supervise stage containers;
-> images are built with `buildctl` against a BuildKit
-> daemon. Both are hard requirements on the build host and
-> on the EC2 runtime host.
+> snapshot, start, stop, and supervise stage containers.
+> containerd is a hard requirement on the EC2 runtime host,
+> which the controller drives directly. Every OCI image is
+> assembled by Bazel (`rules_oci`) from pinned inputs.
 
 The runtime is split across three independent OCI images,
 all managed by the controller:
 
 | Image | Source target | Role |
 | --- | --- | --- |
-| `strimserver-controller:latest` | `core/controller/Dockerfile` (`runtime`) | Go control plane: drives containerd, reconciles stages, serves the HTTP/WebSocket API |
-| `mediamtx:latest` | `core/Dockerfile` (`--target mediamtx`) | MediaMTX media server: SRT ingest, RTSP routing, Unix MPEG-TS source, recording |
-| `ffmpeg:latest` | `core/Dockerfile` (`--target ffmpeg`) | FFmpeg + NVIDIA HW accel; the same image backs both ffmpeg stages |
+| `strimserver-controller:latest` | `core/controller/BUILD.bazel` (rules_oci from `debian:trixie` snapshot apt packages via the `@trixie` apt extension in `MODULE.bazel`) | Go control plane: drives containerd, reconciles stages, serves the HTTP/WebSocket API |
+| `mediamtx:latest` | `core/BUILD.bazel` (rules_oci from `@mediamtx_dist` + `debian:trixie` snapshot apt packages) | MediaMTX media server: SRT ingest, RTSP routing, Unix MPEG-TS source, recording |
+| `ffmpeg:latest` | `core/BUILD.bazel` (rules_oci from the pinned `@ffmpeg_dist` S3 artifact, `s3_http_archive`) | FFmpeg + NVIDIA HW accel; the same image backs both ffmpeg stages |
 
 The controller supervises **three pipeline stages**, each a
 container whose desired/actual state it reconciles:
@@ -156,7 +155,17 @@ gracefully on shutdown.
   redistributable bundle plus SHA-256 checksum locally),
   `make release` (attach the bundle and checksum to a GitHub
   release via the GitHub CLI), and `make publish-strimserver`
-  (build and upload a single-tenant bundle to S3).
+  (build and upload a single-tenant bundle to S3). The Stream
+  Deck plugin is published alongside the deployment tar as its
+  own distributable: `make release` uploads
+  `com.chroniccmposer.strimserver.sdPlugin.zip` and its
+  `com.chroniccmposer.strimserver.sdPlugin.tar.gz` variant
+  (+ checksums) to the GitHub release, and `make publish-strimserver` /
+  `make publish-streamdeck` upload them to
+  `strimserver-streamdeck-plugin.zip` and
+  `strimserver-streamdeck-plugin.tar.gz` on S3. It is a separate
+  artifact — `make package` never includes it inside
+  `strimserver-deployment.tar`.
 - EC2 setup automation for formatting and mounting NVMe
   ephemeral storage at `/mnt/nvme`, installing the systemd
   unit, importing the OCI images into containerd, generating
@@ -170,8 +179,9 @@ gracefully on shutdown.
   1080p60, 1440p60, and 2160p60 HEVC files.
 - Optional `iperf3` bandwidth-test container and deployment
   scripts.
-- Optional experimental OpenSSH RPM build, gated by
-  `ENABLE_EXPERIMENTAL_OPENSSH` in `feature-toggles.env`.
+- Experimental OpenSSH RPM, always bundled: built
+  out-of-band by `tools/openssh/publish.sh` and fetched
+  from the pinned `@openssh_dist` artifact.
 
 ## Build dependencies and versions
 
@@ -179,24 +189,25 @@ gracefully on shutdown.
 
 | Component | Version / source | Where used |
 | --- | --- | --- |
-| NVIDIA CUDA build image | `nvidia/cuda:13.0.2-devel-ubuntu24.04` | FFmpeg build stage in `core/Dockerfile` |
-| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | Git branch `release/8.0` | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
-| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.0` | NVIDIA codec integration for FFmpeg |
-| FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Compiled SASS target in `core/Dockerfile`; see the EC2 note below |
-| Intermediate Debian image | `debian:trixie-20260518-slim` | `mediamtx-fetch` / `libs` stages in `core/Dockerfile` and the `libs` stage in `core/controller/Dockerfile` (build-time only; runtime images are `FROM scratch`) |
-| Go toolchain | `golang:1.26.4-alpine3.24` | Controller build and test stages (`core/controller/Dockerfile`); module declares `go 1.26.4` |
-| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.17.0`, Linux amd64 release tarball | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
-| `libfdk-aac` | `libfdk-aac-dev` in build stage; `libfdk-aac2t64` in runtime-libs stage | AAC encode support through FFmpeg |
-| busybox / `gettext-base` (`envsubst`) | Debian packages copied into the scratch images | Shell + tools for the scratch runtime images and MediaMTX template rendering |
-| iperf3 | `3.19.1-r1` | Optional bandwidth-test container |
-| [Fish shell](https://github.com/fish-shell/fish-shell) | `4.3.1` `linux-x86_64` release tarball (SHA-256 verified) | Downloaded and installed on the EC2 host by `fish-deploy.sh` (not from distro repositories); used for the operator login shell and deployment helpers |
+| NVIDIA CUDA redistributables | `13.0.2` (`cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm`; per-component sha256 pinned via the `redistrib_13.0.2.json` manifest) | Compile the FFmpeg artifact in `tools/ffmpeg-dist` (producer-only; not needed for a normal package build) |
+| Prebuilt FFmpeg artifact | `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz` (sha256 pinned in `MODULE.bazel` via `s3_http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
+| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | `8.0` at commit `281c902` (tip of `release/8.0`, 2026-08-14; pinned and baked into the prebuilt artifact) | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
+| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.0` at commit `e844e5b2` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
+| FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
+| Intermediate Debian image | `debian:trixie` snapshot `20260824T082821Z` | Base for the artifact producer (`tools/ffmpeg-dist`: pulled via the Docker Hub registry API into a rootfs by `publish.sh`); the same snapshot supplies the scratch-image runtime libs via the `@trixie` rules_distroless apt extension |
+| Go toolchain | `go 1.26.4` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
+| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.17.0`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
+| `libfdk-aac` | `libfdk-aac2t64` (Debian trixie package from `@trixie`) | AAC encode support through FFmpeg (`libfdk-aac.so.2` in the ffmpeg image) |
+| busybox / `gettext-base` (`envsubst`) | Debian trixie packages from `@trixie` | Shell + tools for the scratch runtime images and MediaMTX template rendering |
+| iperf3 | `3.19.1-r1` `.apk` (`@iperf3_apk` http_file) on alpine `3.23.3` (digest-pinned `@alpine_linux_amd64` oci.pull) | Optional bandwidth-test image |
+| Node.js | `24.13.0` (from `tools/streamdeck-plugin/.nvmrc` via rules_nodejs `node_version_from_nvmrc`) | Stream Deck plugin build |
 
 > Note: the FFmpeg build currently compiles for `sm_75`
 > (Turing, e.g. the T4 in `g4dn` instances). To run the
 > ffmpeg stages on a different GPU family — for example the
-> L4 (`sm_89`) in `g6` instances — adjust the `--nvccflags`
-> `-gencode` target in `core/Dockerfile`, or run on a
-> matching instance type.
+> L4 (`sm_89`) in `g6` instances — adjust the `-gencode`
+> target (`GENCODE`) in `tools/ffmpeg-dist` when rebuilding
+> the artifact, or run on a matching instance type.
 
 > **Architecture: x86_64 only.** Every image is built
 > exclusively for the `linux/amd64` (x86_64) architecture,
@@ -204,42 +215,96 @@ gracefully on shutdown.
 > processor used in current-generation AWS GPU instances.
 > The scratch images copy shared libraries from
 > `x86_64-linux-gnu` paths, the Fish and MediaMTX binaries
-> are `linux-x86_64`/`linux_amd64` releases, and BuildKit
-> builds the `linux/amd64` platform. There is no
-> `arm64`/`aarch64` support today; building for ARM (e.g.
-> AWS Graviton with NVIDIA, or the `g5g` family) or other
-> architectures would require parameterizing the build
-> platform, the FFmpeg `-gencode` target, the library copy
-> paths, and the upstream binary URLs (see *Possible future
-> enhancements*).
+> are `linux-x86_64`/`linux_amd64` releases, and Bazel
+> (`--platforms=//tools/bazel:linux_amd64`) builds the
+> `linux/amd64` platform. On non-x86_64 development hosts
+> (e.g. aarch64), the Bazel test suite can still be run:
+> `.bazelrc` sets `--use_target_platform_for_tests=true`,
+> which runs test actions on the target platform via
+> qemu-user binfmt (install `qemu-user` and
+> `qemu-user-binfmt`) while compile/genrule actions stay
+> native; this does not add arm64 build support. Building
+> artifacts for `arm64`/`aarch64` is still unsupported
+> today; building for ARM (e.g. AWS Graviton with NVIDIA,
+> or the `g5g` family) or other architectures would require
+> parameterizing the build platform, the FFmpeg `-gencode`
+> target, the library copy paths, and the upstream binary
+> URLs (see *Possible future enhancements*).
 
 ### Host build and deployment tools
 
 These tools are required by the repository but are not
 pinned by the source tree:
 
-- GNU Make.
-- **containerd** and **BuildKit / `buildctl`** — direct,
-  non-optional dependencies. Images are built with
-  `buildctl`; the `ffmpeg` image target builds against a
-  BuildKit daemon at `tcp://127.0.0.1:1234` (intended for a
-  remote/tunneled `buildkitd`; see
-  `tools/buildkit-scripts/`), while the controller and
-  mediamtx targets use the default `buildctl` address. The
-  EC2 runtime host runs containerd, which the controller
-  drives directly.
-- Go (1.26.x) on the build host for `make generate` / `make
-  check-generated` and the `controller` / `test-controller`
-  targets.
-- Node.js (>= 24) for building the Stream Deck plugin.
+- **Bazel** (via [Bazelisk](https://github.com/bazelbuild/bazelisk);
+  see `.bazelversion`) — the build system. It downloads and
+  pins the Go and Node.js toolchains itself (see
+  `MODULE.bazel`); you don't need either installed separately
+  just to build. `make` is kept as a thin facade over `bazel`
+  for muscle memory — see `Makefile`.
+- **containerd** — runs on the EC2 runtime host, which the
+  controller drives directly. All bundled OCI images are
+  assembled natively by Bazel (`rules_oci`) from pinned
+  inputs.
 - AWS CLI with credentials authorized to read and write the
   configured S3 bucket and launch/manage EC2 instances.
 - `jq`, used by AWS helper scripts.
 - Python 3, used by EC2 launch/setup helpers.
 - `tar`, `sudo`, OpenSSH client, and standard POSIX shell
   tooling.
+- On non-x86_64 hosts (e.g. aarch64), `qemu-user` and
+  `qemu-user-binfmt` (Debian/Ubuntu) must be installed and
+  registered so the test suite (`make test-controller` /
+  `bazel test //core/controller:all`) can run the
+  linux/amd64 test binaries under emulation; on x86_64 hosts
+  this is unnecessary.
 - An NVIDIA-capable build environment (CUDA toolchain) is
-  required to **build** the GPU-enabled FFmpeg image.
+  required only when **rebuilding** the GPU FFmpeg artifact
+  via `tools/ffmpeg-dist`; a normal `make package` /
+  `bazel build //:package` consumes the prebuilt artifact and
+  needs no CUDA toolchain.
+
+### Helper scripts (`scripts/`)
+
+- `scripts/bucket-cidr-policy.sh` — scope HTTPS-only read
+  access to the S3 bucket to an operator CIDR (the IP-scoped
+  bucket policy that gates the published artifacts).
+- `scripts/upload-artifact.sh` — upload a built FFmpeg
+  artifact to S3 with no ACL modification (objects get the
+  bucket's default private ACL; the policy above is the only
+  access gate).
+
+The old `check-env.sh` helper is gone (the controller image is
+built by Bazel now), but the controller binary keeps the same
+self-check as a flag: build it with `bazel build
+//core/controller:strimserver-controller` and run
+`./strimserver-controller -check-env` to validate the required
+env vars and exit.
+
+### Bazel S3 fetch rules (`STRIMSERVER_S3_BUCKET` / `STRIMSERVER_S3_REGION`)
+
+`MODULE.bazel` fetches the two large artifacts through
+`tools/bazel/s3_download.bzl`: the pinned FFmpeg tarball
+(`@ffmpeg_dist`, via `s3_http_archive`) and the offline
+fallback clip (`@offline_segment_dist`, via `s3_http_file`).
+When **both** `STRIMSERVER_S3_BUCKET` and
+`STRIMSERVER_S3_REGION` are set, the S3 URL is used as the
+primary download source; when either is unset, the rules fall
+back to the GitHub Release mirror URLs (the same blobs, hosted
+on GitHub), so a plain `make package` / `bazel build //:package`
+works with no AWS configuration:
+
+```bash
+export STRIMSERVER_S3_BUCKET="your-bucket-name"   # no s3:// prefix
+export STRIMSERVER_S3_REGION="<your-region>"
+```
+
+Setting exactly one of the two is an error (a half-configured
+bucket must not silently resolve to the mirror). Caveat: Bazel
+repo rules read these variables only when the Bazel server
+starts. If you change them after a build, run `bazel shutdown`
+and re-run, or pass them explicitly, e.g.
+`bazel build //:package --repo_env=STRIMSERVER_S3_BUCKET=your-bucket-name --repo_env=STRIMSERVER_S3_REGION=<your-region>`.
 
 ## Build instructions
 
@@ -254,7 +319,8 @@ Create the runtime configuration file and fill in the
 bitrate and media settings:
 
 ```bash
-cp core/strimserver.env.example core/strimserver.env
+make prepare          # bootstrap: cp core/strimserver.env.example core/strimserver.env
+                      # (only when core/strimserver.env doesn't exist yet -- never overwrites)
 $EDITOR core/strimserver.env
 ```
 
@@ -276,74 +342,236 @@ make generate          # rewrites the .env.example and types.generated.ts
 make check-generated   # fails if those generated files are stale in git
 ```
 
-Prepare a local artifact output directory:
+The deployment bundle's offline fallback segment
+(`strimserver-offline-2160p60.mp4`) is fetched by default: Bazel
+pulls it through `MODULE.bazel`'s `s3_http_file(name =
+"offline_segment_dist")` (S3, with a GitHub Release mirror) and
+bundles the downloaded artifact into the deployment tar directly.
+The clip is a 2160p60 HEVC/AAC encode produced out-of-band on
+macOS — the `hevc_videotoolbox` + `aac_at` codecs are
+VideoToolbox/AudioToolbox-only and cannot run inside the Bazel
+graph. Publishing is a two-phase flow — generation needs macOS, upload
+needs a Linux host with AWS credentials configured:
+
+**Phase 1 — generate on macOS** (no AWS needed):
 
 ```bash
-export OUTPUT_PATH="$HOME/local-dev/strimserver"
-mkdir -p "$OUTPUT_PATH"
+cd tools/brb-screen
+./publish.sh generate
 ```
 
-Create or provide the offline fallback segment expected by
-the deployment bundle. The default Makefile expects this
-file at `$OUTPUT_PATH/strimserver-offline-2160p60.mp4`:
+`publish.sh generate` sources `bslib.sh`'s `generate2160p` (the same
+encode `bslib.sh` documents), writes
+`~/Downloads/strimserver-offline-2160p60.mp4`, and prints its sha256.
+
+**Phase 2 — upload from a Linux host with AWS credentials.** Copy the
+clip to the host (e.g. `scp`), then:
 
 ```bash
-# Option A: generate the default 2160p60 fallback clip on a machine with a compatible FFmpeg setup.
-. tools/brb-screen/bslib.sh
-generate2160p
-cp ~/Downloads/strimserver-offline-2160p60.mp4 "$OUTPUT_PATH/"
-
-# Option B: copy an already-created fallback file into place.
-cp /path/to/strimserver-offline-2160p60.mp4 "$OUTPUT_PATH/"
+cd tools/brb-screen
+S3_BUCKET="s3://your-bucket-name" AWS_REGION="<your-region>" \
+  ./publish.sh upload /path/to/strimserver-offline-2160p60.mp4
 ```
 
-Start or connect to a BuildKit daemon. The `ffmpeg` image
-build expects `buildctl` to reach `tcp://127.0.0.1:1234`;
-the helper scripts in `tools/buildkit-scripts/` can deploy
-and tunnel to a remote BuildKit daemon if desired.
+`AWS_REGION` is your bucket's own region — set it to your
+value; there is no baked-in default. `publish.sh upload`
+computes the sha256, uploads the mp4 to
+`$S3_BUCKET/offline/`, and prints the `s3_http_file` stanza to paste
+into `MODULE.bazel` — the sha256 there is the integrity pin. It also
+prints the `gh release upload` command for the GitHub Release mirror
+(tag `offline-segment`).
+
+On a Mac that also has AWS credentials configured, running
+`./publish.sh` with no subcommand generates and uploads in one flow.
+
+The pinned clip is bundled directly into the deployment tar as
+`strimserver-offline-2160p60.mp4` (no local override flag); to ship a
+new clip, regenerate and republish it via `tools/brb-screen/publish.sh`
+and update the `s3_http_file` pin in `MODULE.bazel`.
+
+No daemon or SSH tunnel is needed for any build: the
+experimental OpenSSH RPM is a pinned, checksummed artifact
+fetched through `@openssh_dist` (built out-of-band by
+`tools/openssh/publish.sh`), and the `iperf3` bandwidth-test
+image is assembled by rules_oci from the digest-pinned alpine
+base plus the pinned `@iperf3_apk` layer. The main
+`make package` / `bazel build //:package` path — including
+the `ffmpeg` image, which is assembled by rules_oci from the
+pinned `@ffmpeg_dist` artifact — needs no daemon and no
+`sudo`.
+
+## FFmpeg reproducibility and artifact pipeline
+
+The `ffmpeg` image's binary is a pinned, checksummed prebuilt
+artifact fetched by Bazel through `MODULE.bazel`'s
+`s3_http_archive(name = "ffmpeg_dist", ...)`. The FFmpeg compile
+does not run in the Bazel graph — it happens out-of-band, once
+per version bump, in `tools/ffmpeg-dist/`, and **the sha256 in
+`MODULE.bazel` is the integrity guarantee**.
+
+To rebuild and publish a new artifact:
+
+```bash
+cd tools/ffmpeg-dist
+S3_BUCKET="s3://your-bucket-name" AWS_REGION="<your-region>" ./publish.sh
+```
+
+`AWS_REGION` is your bucket's own region — set it to your
+value; there is no baked-in default (`SKIP_UPLOAD=1` rebuilds
+and checksums without either variable).
+
+`publish.sh` needs no docker daemon. It pulls
+the pinned `debian:trixie-20260824-slim` base image via the
+Docker Hub **registry API** (plain `curl` + `jq`), extracts it
+into a rootfs, copies in the shared build script
+`tools/ffmpeg-dist/build.sh`, and runs it inside a chroot. On
+non-amd64 hosts the chroot invokes the tonistiigi
+buildkit-direct-execve **patched qemu-x86_64** explicitly — upstream
+qemu cannot intercept the guest's `execve` without binfmt_misc, and
+the qemu bundled in the tonistiigi/binfmt images segfaults on
+NVIDIA's `cicc`; amd64 hosts
+run the guest natively with no qemu. All build steps (apt snapshot
+pinning, CUDA redistributables, nv-codec-headers, FFmpeg) live in
+the shared `tools/ffmpeg-dist/build.sh`, which is the single source
+of truth (the sha256 in `MODULE.bazel` is the contract).
+
+On non-amd64 hosts, `publish.sh` builds the patched qemu-x86_64
+emulator from source when no valid one is available, via the shared
+`tools/qemu/build-qemu.sh`. Qemu is pinned **per consumer**, with an
+env-overridable default `QEMU_VERSION="${QEMU_VERSION:-8.2.2}"`; the
+builder verifies the source tarball's sha256 for the pinned version
+(8.2.2 and 9.2.4 are both mapped) and caches the built binary at a
+version-stamped path,
+`${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist/qemu-x86_64-patched-${QEMU_VERSION}`,
+so the two consumers never share a qemu binary:
+`tools/ffmpeg-dist/publish.sh` pins **qemu 8.2.2** for byte-identical
+reproducibility (qemu 8.1.5 exposes a different guest CPUID — leaf
+0x07 EBX bit 29, AVX512_BF16 — which changes compiler/nvcc codegen
+and so yields a different ffmpeg binary), and
+`tools/openssh/publish.sh` pins **qemu 9.2.4** (the linux-user
+`open_self_maps` MAPERR SIGSEGV fix, needed because amazonlinux's
+glibc grep/awk/m4 crash under 8.2.2 when reading `/proc/self/maps`).
+The `buildkit-direct-execve` patch series is version-specific too:
+qemu 8.2.2 uses the hand-ported v8.1 series committed at
+`tools/qemu/qemu-patches-8.2.2/` (patches 0004 and 0005 were
+hand-ported to 8.2.2's `ImageSource` API because no upstream v8.2
+patch set exists — tonistiigi/binfmt jumps from v8.1 to v9.2), and
+qemu 9.2.4 uses the v9.2 series at `tools/qemu/qemu-patches/`. Host
+build dependencies — meson, ninja, python3, pkg-config, gcc, and
+libglib2.0-dev — are required only on non-amd64 hosts;
+`tools/qemu/build-qemu.sh` fails loudly with the exact `apt-get
+install` command if any are missing. To build the non-default pin,
+run `QEMU_VERSION=9.2.4 tools/qemu/build-qemu.sh` (set `QEMU_VERSION`
+whenever a consumer's pin differs from the 8.2.2 default). `QEMU_BIN`
+may still be used to override with a pre-built patched qemu; it is
+validated (must contain the buildkit-direct-execve marker
+`safe_execve` and report the pinned version) and ignored with a
+warning if it is not a patched emulator at that version.
+The previous registry auto-fetch (`QEMU_IMAGE`, e.g.
+`tonistiigi/binfmt:qemu-v8.1.5`) was removed because every registry tag
+ships an **unpatched** emulator that cannot execute guest child
+processes (ENOEXEC — the exact bug this replaces); amd64 hosts need no
+qemu. An already-extracted rootfs can be reused by setting
+`FFMPEG_DIST_ROOTFS`. `publish.sh` then extracts the stripped
+`ffmpeg` binary plus its `BUILD-INFO.txt` provenance record, writes
+`ffmpeg-<ffver>-deb<date>-cuda<ver>-sm<N>-<shortsha>.tar.gz`
+(e.g. `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz`),
+uploads it to the `s3://<bucket>/ffmpeg/` prefix with no ACL
+modification (objects get the bucket's default private ACL; the
+IP-scoped HTTPS-only bucket policy from `scripts/bucket-cidr-policy.sh` is
+the only access gate), and prints the `s3_http_archive` stanza to
+paste into `MODULE.bazel`. `BUILD-INFO.txt` records the FFmpeg commit,
+nv-codec-headers tag, Debian snapshot, CUDA component sha256s,
+`-gencode` target, the full `configure` line, and `readelf -d`
+output, so the blob always stays reproducible.
+
+A weekly canary (`.github/workflows/ffmpeg-reproducibility.yml`)
+rebuilds the artifact on an ordinary GitHub runner and compares
+the rebuilt sha256 against the pin in `MODULE.bazel` — Tier 1,
+bit-identical. A mismatch opens an issue rather than only going
+red. The Tier 2 fallback compares a semantic fingerprint instead
+(`ffmpeg -buildconf`, the `readelf -d` NEEDED set, and the
+`-encoders` / `-filters` lists): weaker, but it still catches a
+pin drift that silently drops `libfdk_aac`.
 
 Build the deployment bundle. There are three ways to produce
 and publish `strimserver-deployment.tar`, depending on how
-you want consumers to fetch it:
+you want consumers to fetch it (each shown as the `make`
+facade and the underlying `bazel` command it runs):
 
 ```bash
 # A) Build a redistributable bundle + SHA-256 locally (no upload).
-#    Output: $OUTPUT_PATH/strimserver-deployment.tar(.sha256)
+#    Output: bazel-bin/strimserver-deployment.checked.tar(.sha256)
 make package
+bazel build //:package
 
 # B) Build, then attach the bundle + checksum to an existing GitHub
 #    release. Requires the GitHub CLI (`gh auth login`) and a pushed tag.
 make release GIT_TAG=v1.0.0
+bazel run //:release   # reads GIT_TAG from the environment
 
 # C) Build and upload a single-tenant bundle to S3 (the default goal).
 export S3_BUCKET="s3://your-bucket-name"
 make publish-strimserver
+bazel run //:publish_strimserver   # reads S3_BUCKET from the environment
 ```
 
-All three build the same three OCI images —
+The Stream Deck plugin ships as its own distributable,
+published **alongside** `strimserver-deployment.tar` — never
+inside it:
+
+- `make release` / `bazel run //:release` also attach
+  `com.chroniccmposer.strimserver.sdPlugin.zip`, its
+  `com.chroniccmposer.strimserver.sdPlugin.tar.gz` variant, and
+  both `.sha256` files to the GitHub release (in addition to the
+  deployment tar + checksum).
+- `make publish-strimserver` / `bazel run
+  //:publish_strimserver` also upload the plugin bundles to
+  `$S3_BUCKET/strimserver-streamdeck-plugin.zip` and
+  `$S3_BUCKET/strimserver-streamdeck-plugin.tar.gz` (the tar's
+  sha256 is not uploaded to S3, and neither is the plugin's —
+  parity with the existing convention).
+- `make publish-all` / `bazel run //:publish_all` publishes
+  **everything** to S3 in a single bazel run (one
+  server/analysis pass): the strimserver deployment tar
+  (`strimserver-deployment.tar`), the Stream Deck plugin bundles
+  (both `strimserver-streamdeck-plugin.zip` and
+  `.tar.gz`), and the iperf3 bundle
+  (`iperf3-deployment.tar`). Requires AWS credentials and
+  `S3_BUCKET`.
+- `make publish-streamdeck` / `bazel run
+  //tools/streamdeck-plugin:publish_streamdeck` upload **only**
+  the plugin bundles (both .zip and .tar.gz), to the same
+  `strimserver-streamdeck-plugin.zip` / `.tar.gz` keys. This
+  mirrors `make publish-iperf3`.
+- `make package` / `bazel build //:package` builds only the
+  deployment tar (+ checksum); the plugin bundles are a separate
+  artifact produced by `bazel build
+  //tools/streamdeck-plugin:streamdeck_plugin_bundle` and
+  `//tools/streamdeck-plugin:streamdeck_plugin_tar_gz`.
+
+All three deployment paths build the same three OCI images —
 `strimserver-controller:latest`, `ffmpeg:latest`, and
-`mediamtx:latest` — writing `controller-container.tar`,
-`ffmpeg-container.tar`, and `mediamtx-container.tar` under
-`$OUTPUT_PATH`, then package those images together with the
-configuration, scripts, systemd service, feature toggles,
-and the offline segment into `strimserver-deployment.tar`.
-`make package` and `make release` also write a `.sha256`
-checksum next to the tar (consumers verify it via
+`mediamtx:latest` — all assembled natively by Bazel
+(`rules_oci`) from pinned inputs — then package those images
+together with
+the configuration, scripts, systemd service, and the offline
+segment into `strimserver-deployment.tar`.
+`make package` and `make release` also produce a `.sha256`
+checksum for the tar (consumers verify it via
 `DEPLOYMENT_SHA256`; see *AWS EC2 deployment target*) and
 require `TWITCH_STREAM_KEY` to be empty in
 `core/strimserver.env`; `make publish-strimserver` does not,
-and bakes whatever key is present. When
-`ENABLE_EXPERIMENTAL_OPENSSH="true"` in `feature-toggles.env`,
-the experimental OpenSSH RPM is built and added to the
-bundle.
+and bakes whatever key is present. The experimental OpenSSH
+RPM is always included: it is fetched from the pinned
+`@openssh_dist` artifact (built out-of-band by
+`tools/openssh/publish.sh`).
 
 Thanks to the `FROM scratch` images (no base OS, no bundled
 NVIDIA driver — the driver is injected at runtime via CDI)
-and statically/minimally linked binaries, **the entire
-`strimserver-deployment.tar` bundle — including the offline
-fallback clip — is under 50 MB.** This keeps download/transfer and
-EC2 setup fast and makes the bundle cheap to rebuild and
-redeploy.
+and statically/minimally linked binaries, the bundle stays
+small. This keeps download/transfer and EC2 setup fast and
+makes the bundle cheap to rebuild and redeploy.
 
 The deployment bundle contains:
 
@@ -352,18 +580,28 @@ The deployment bundle contains:
 - `deploy.sh`, `fish-deploy.sh`, `imdslib.sh`, `prompt_login.fish`
 - `strimserver.service`
 - `strimserver.env`, `mediamtx.yaml.template`, `transcode.sh`, `notify.sh`
-- `feature-toggles.env`
-- `openssh-experimental.rpm` (only when the OpenSSH toggle is enabled)
+- `openssh-experimental.rpm` (always included; from the pinned `@openssh_dist` artifact)
 
 Other useful targets:
 
 ```bash
-make controller        # build the controller image (build target only)
-make test-controller   # run go test (+ optional golangci-lint) in a build container
-make generate          # regenerate strimserver.env.example + Stream Deck wire types
-make check-generated   # fail if those generated files are stale in git
-make publish-iperf3    # build and publish the iperf3 bandwidth-test bundle to S3
+make controller        # bazel build //core/controller:strimserver-controller
+make test-controller   # bazel test //core/controller:all (go test, lint, codegen staleness)
+make generate          # bazel run //core/controller:generate -- regenerate strimserver.env.example + Stream Deck wire types
+make check-generated   # bazel test //core/controller:generate_test -- fail if those files are stale in git
+make publish-iperf3    # bazel run //tools/bandwidth-test:publish_iperf3 -- build and publish the iperf3 bandwidth-test bundle to S3
 ```
+
+On non-x86_64 hosts, `make test-controller` additionally
+requires `qemu-user`/`qemu-user-binfmt` to be installed and
+registered, as described in *Host build and deployment
+tools*.
+
+`bazel test //...` runs every test in the repo: controller unit tests,
+lint, generated-file staleness, and the image smoke tests
+(`//core/controller:image_smoke_test`, `//core:mediamtx_smoke_test`,
+and `//core:ffmpeg_smoke_test` — the latter also asserts every
+`DT_NEEDED` library is packaged in the image).
 
 ## AWS EC2 deployment target
 
@@ -576,8 +814,6 @@ generate` from the controller's Go definitions.
   `strimserver.env`.
 - Add a local `docker compose` or containerd development
   profile for non-AWS smoke tests.
-- Add automated CI for shell linting, Dockerfile builds,
-  controller tests/lint, and `make check-generated`.
 - Add integration tests that emulate SRT ingest and verify
   normalized stream creation, recording, and RTMP egress
   behavior.
@@ -587,10 +823,9 @@ generate` from the controller's Go definitions.
   additional NVIDIA architectures (e.g. `sm_89` for `g6`).
 - Support building for `arm64`/`aarch64` (e.g. AWS Graviton
   with NVIDIA, such as the `g5g` family) and other
-  architectures by parameterizing the BuildKit target
-  platform, the library copy paths, the `-gencode` target,
-  and the upstream binary download URLs (MediaMTX, Fish,
-  etc.).
+  architectures by parameterizing the Bazel build platform,
+  the library copy paths, the `-gencode` target, and the
+  upstream binary download URLs (MediaMTX, etc.).
 - Add safer secret handling for Twitch stream keys and SRT
   passphrases through AWS Secrets Manager or SSM Parameter
   Store.
@@ -634,6 +869,20 @@ with:
    - the test/build/deployment commands that were run;
    - any compatibility or migration notes.
 
+The repository ships a pre-commit guard (`.githooks/pre-commit`,
+backed by `tools/check-no-infra-identifiers.sh`) that rejects
+commits containing AWS-infra identifiers (a domain, an AWS host
+IP prefix, an operator name, or an S3 bucket). The identifier
+patterns are live infrastructure attributes and are intentionally
+NOT committed; they are injected at runtime via the
+`STRIMSERVER_INFRA_IDENTIFIERS` env var for the git hook and via
+the `INFRA_IDENTIFIERS` repository secret in CI. Enable the hook
+with:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 Avoid committing secrets, Twitch stream keys, generated SRT
 passphrases, local `.env` files, deployment artifacts,
 container tarballs, or recorded video files.
@@ -645,17 +894,16 @@ Core dependencies:
 - [MediaMTX](https://github.com/bluenviron/mediamtx) — the
   media server used for SRT ingest, RTSP routing, the Unix
   MPEG-TS source, and recording.
-- [FFmpeg](https://github.com/FFmpeg/FFmpeg) — built from
-  source (`release/8.0`) for the normalize and scale/egress
-  stages.
+- [FFmpeg](https://github.com/FFmpeg/FFmpeg) — the normalize
+  and scale/egress stages run a pinned prebuilt FFmpeg 8.0
+  artifact (see *FFmpeg reproducibility and artifact
+  pipeline*).
 - [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers)
   — NVIDIA codec headers enabling NVENC/NVDEC/CUVID in the
   FFmpeg build.
 - [containerd](https://github.com/containerd/containerd) —
   the container runtime the controller drives directly via
   the `containerd/v2` client.
-- [BuildKit](https://github.com/moby/buildkit) — used
-  through `buildctl` to build the OCI images.
 - [Container Device Interface
   (CDI)](https://github.com/cncf-tags/container-device-interface)
   — the specification used to inject the NVIDIA GPU and

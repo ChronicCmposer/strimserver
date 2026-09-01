@@ -33,22 +33,21 @@ func bindString(field func(*Config) *string) func(*Config, string) error {
 func bindDuration(field func(*Config) *time.Duration) func(*Config, string) error {
    return func(c *Config, s string) error {
       d, err := time.ParseDuration(s)
-      if err != nil {
-         return err
-      }
-      *field(c) = d
-      return nil
+      if err != nil { return err }; *field(c) = d; return nil
    }
 }
 
 func bindUint8(field func(*Config) *uint8) func(*Config, string) error {
    return func(c *Config, s string) error {
       v, err := strconv.ParseUint(s, 10, 8)
-      if err != nil {
-         return err
-      }
-      *field(c) = uint8(v)
-      return nil
+      if err != nil { return err }; *field(c) = uint8(v); return nil
+   }
+}
+
+func bindBool(field func(*Config) *bool) func(*Config, string) error {
+   return func(c *Config, s string) error {
+      b, err := strconv.ParseBool(s)
+      if err != nil { return err }; *field(c) = b; return nil
    }
 }
 
@@ -114,6 +113,12 @@ func envSpec() []EnvVar {
          Comment: "buffered capacity of the actions channel (0-255)",
          Bind:    bindUint8(func(c *Config) *uint8 { return &c.ControllerActionsBufferSize }),
       },
+      {
+         Name: "ENABLE_SINGLE_STAGE_PIPELINE", Group: GroupController, Required: false,
+         Example: "false",
+         Comment: "feature toggle to enable single_stage_egress",
+         Bind:    bindBool(func(c *Config) *bool { return &c.EnableSingleStagePipeline }),
+      },
 
       // ----------------------------------------------------------- Stage containers
       {
@@ -157,24 +162,36 @@ func envSpec() []EnvVar {
          Bind:    bindString(func(c *Config) *string { return &c.ScaleAndEgress.ContainerID }),
       },
       {
+         Name: "SINGLE_STAGE_EGRESS_CONTAINER_ID", Group: GroupStage, Required: false,
+         Example: "single-stage-egress",
+         Bind:    bindString(func(c *Config) *string { return &c.SingleStageEgress.ContainerID }),
+      },
+      {
          Name: "EGRESS_SNAPSHOT_ID", Group: GroupStage, Required: true,
-         Example: "scale-and-egress-snapshot",
-         Bind:    bindString(func(c *Config) *string { return &c.ScaleAndEgress.SnapshotID }),
+         Example: "egress-snapshot",
+         Bind: func(c *Config, s string) error {
+            c.ScaleAndEgress.SnapshotID = s
+            c.SingleStageEgress.SnapshotID = s
+            return nil
+         },
       },
       {
          Name: "EGRESS_LOG_FILE", Group: GroupStage, Required: true,
-         Example: "/mnt/nvme/logs/scale-and-egress.log",
-         Bind:    bindString(func(c *Config) *string { return &c.ScaleAndEgress.Logfile }),
+         Example: "/mnt/nvme/logs/egress.log",
+         Bind: func(c *Config, s string) error {
+            c.ScaleAndEgress.Logfile = s
+            c.SingleStageEgress.Logfile = s
+            return nil
+         },
       },
       {
-         // One variable, two destinations: normalize and scale_and_egress share
-         // the ffmpeg image. A struct tag could not express this; the closure can.
          Name: "FFMPEG_IMAGE_NAME", Group: GroupStage, Required: true,
          Example: "docker.io/library/ffmpeg:latest",
          Comment: "shared by the normalize and scale_and_egress stages",
          Bind: func(c *Config, s string) error {
             c.Normalize.ImageName = s
             c.ScaleAndEgress.ImageName = s
+            c.SingleStageEgress.ImageName = s
             return nil
          },
       },

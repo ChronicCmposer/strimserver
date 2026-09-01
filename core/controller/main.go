@@ -34,7 +34,8 @@ type Config struct {
    StageStopTimeout time.Duration
    WebsocketWriteTimeout time.Duration
    ControllerActionsBufferSize uint8
-   MediaMTX, Normalize, ScaleAndEgress ContainerConfig
+   EnableSingleStagePipeline bool
+   MediaMTX, Normalize, ScaleAndEgress, SingleStageEgress ContainerConfig
 }
 
 func checkEnv() error {
@@ -51,14 +52,14 @@ func checkEnv() error {
 func printEnvExample(w io.Writer) {
    var last Group
    for _, v := range envSpec() {
-      if v.Group != last { fmt.Fprintf(w, "\n# --- %s ---\n", v.Group); last = v.Group }
-      if v.Comment != "" { fmt.Fprintf(w, "# %s\n", v.Comment) }
-      fmt.Fprintf(w, "%s=%q\n", v.Name, v.Example)
+      if v.Group != last { _, _ = fmt.Fprintf(w, "\n# --- %s ---\n", v.Group); last = v.Group }
+      if v.Comment != "" { _, _ = fmt.Fprintf(w, "# %s\n", v.Comment) }
+      _, _ = fmt.Fprintf(w, "%s=%q\n", v.Name, v.Example)
    }
 }
 
 func printTSTypes(w io.Writer) {
-   p := func(f string, a ...any) { fmt.Fprintf(w, f+"\n", a...) }
+   p := func(f string, a ...any) { _, _ = fmt.Fprintf(w, f+"\n", a...) }
    union := func(vals []string) string {
       q := make([]string, len(vals))
       for i, v := range vals { q[i] = strconv.Quote(v) }
@@ -78,8 +79,19 @@ func printTSTypes(w io.Writer) {
    p("   stages: Record<StageName, StageStatus>;")
    p("}")
    p("")
-   p("export const Stages = { MediaMTX: %q, Normalize: %q, ScaleAndEgress: %q } as const;",
-      StageMediaMTX, StageNormalize, StageScaleAndEgress)
+   stageTSKeys := map[StageName]string{
+      StageMediaMTX:          "MediaMTX",
+      StageNormalize:         "Normalize",
+      StageScaleAndEgress:    "ScaleAndEgress",
+      StageSingleStageEgress: "SingleStageEgress",
+   }
+   stagePairs := make([]string, len(AllStageNames))
+   for i, s := range AllStageNames {
+      key, ok := stageTSKeys[s]
+      if !ok { panic(fmt.Sprintf("printTSTypes: no TS key for stage %q; add it to stageTSKeys", s)) }
+      stagePairs[i] = fmt.Sprintf("%s: %q", key, string(s))
+   }
+   p("export const Stages = { %s } as const;", strings.Join(stagePairs, ", "))
    p("export type ControlComponent = %s;", union(toStrings(AllControlComponents)))
    p("export type ControlAction    = %s;", union(toStrings(AllControlActions)))
 }
@@ -126,7 +138,7 @@ func run() error {
 
    client, err := containerd.New(config.ContainerdSocket)
    if err != nil { return fmt.Errorf("could not initialize containerd client: %w", err) }
-   defer client.Close()
+   defer func() { _ = client.Close() }()
 
    // build the container factory
 
@@ -134,6 +146,10 @@ func run() error {
       config.MediaMTX.ContainerID:        StageMediaMTX,
       config.Normalize.ContainerID:       StageNormalize,
       config.ScaleAndEgress.ContainerID:  StageScaleAndEgress,
+   }
+
+   if config.EnableSingleStagePipeline {
+      containerIDtoStageName[config.SingleStageEgress.ContainerID] = StageSingleStageEgress
    }
 
    containerFactory, err := NewContainerFactory(
@@ -157,18 +173,32 @@ func run() error {
    // build the controller
    paths := map[PathName]PathStatus { PathIngress0: Unknown, PathNormalized: Unknown }
 
-   pathEventRoutes := map[PathEvent]StageTarget {
-      { Path: PathIngress0,    Status: Ready     }: { Stage: StageNormalize,        State: Running },
-      { Path: PathIngress0,    Status: NotReady  }: { Stage: StageNormalize,        State: Stopped },
+   pathEventRoutes   := make(map[PathEvent]StageTarget, 2)
+   commandRoutes     := make(map[ControlCommand]StageTarget, 2)
+
+   createPathReadyPrerequisite := func(name PathName) func(*Controller) error {
+      return func(c *Controller) error {
+         if c.paths[name] != Ready { return fmt.Errorf("%q path is not ready", name) }; return nil
+      }
    }
 
-   commandRoutes := map[ControlCommand]StageTarget {
-      { Component: ComponentScaleAndEgress, Action: ActionStart }: { Stage: StageScaleAndEgress, State: Running,
-         Prerequisite: func(c *Controller) error {
-            if c.paths[PathNormalized] != Ready { return fmt.Errorf("normalized path is not ready") }; return nil
-         },
-      },
-      { Component: ComponentScaleAndEgress, Action: ActionStop }: { Stage: StageScaleAndEgress, State: Stopped },
+   if config.EnableSingleStagePipeline {
+      commandRoutes[ControlCommand{Component: ComponentEgress, Action: ActionStart}] = StageTarget{
+         Stage: StageSingleStageEgress, State: Running, Prerequisite: createPathReadyPrerequisite(PathIngress0),
+      }
+      commandRoutes[ControlCommand{Component: ComponentEgress, Action: ActionStop}] = StageTarget{
+         Stage: StageSingleStageEgress, State: Stopped,
+      }
+   } else {
+      pathEventRoutes[PathEvent{Path: PathIngress0, Status: Ready}] = StageTarget{Stage: StageNormalize, State: Running}
+      pathEventRoutes[PathEvent{Path: PathIngress0, Status: NotReady}] = StageTarget{Stage: StageNormalize, State: Stopped}
+
+      commandRoutes[ControlCommand{Component: ComponentEgress, Action: ActionStart}] = StageTarget{
+         Stage: StageScaleAndEgress, State: Running, Prerequisite: createPathReadyPrerequisite(PathIngress0),
+      }
+      commandRoutes[ControlCommand{Component: ComponentEgress, Action: ActionStop}] = StageTarget{
+         Stage: StageScaleAndEgress, State: Stopped,
+      }
    }
 
    stages := map[StageName]*Stage{
@@ -182,6 +212,10 @@ func run() error {
       StageScaleAndEgress: {
          Status: StageStatus{ Desired: Stopped, Actual: Stopped },
          Ops: containerFactory.CreateStageOps(config.ScaleAndEgress),
+      },
+      StageSingleStageEgress: {
+         Status: StageStatus{ Desired: Stopped, Actual: Stopped },
+         Ops: containerFactory.CreateStageOps(config.SingleStageEgress),
       },
    }
 
@@ -227,7 +261,7 @@ func run() error {
       err = controller.SubmitAddListener(&listener)
       if err != nil {
          log.Printf("could not add ControllerListener for ws client %q: %v", r.RemoteAddr, err)
-         conn.Close(websocket.StatusInternalError, err.Error()); return
+         _ = conn.Close(websocket.StatusInternalError, err.Error()); return
       }
       defer func() {
          done := make(chan struct{})
@@ -243,14 +277,14 @@ func run() error {
       for {
          select {
             case <-ctx.Done():
-               conn.Close(websocket.StatusNormalClosure, "")
+               _ = conn.Close(websocket.StatusNormalClosure, "")
                return
             case status := <-sendChannel:
                wctx, cancel := context.WithTimeout(ctx, config.WebsocketWriteTimeout)
                err := wsjson.Write(wctx, conn, status); cancel()
                if err != nil {
                   log.Printf("ws write error: %v", err)
-                  conn.Close(websocket.StatusInternalError, err.Error()); return
+                  _ = conn.Close(websocket.StatusInternalError, err.Error()); return
                }
          }
       }

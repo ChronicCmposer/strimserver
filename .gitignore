@@ -1,6 +1,17 @@
 .env
 core/strimserver.env
 tools/local-encoder/local-encoder.env
-go
 deploy/aws/twitch-stream-key
 deploy/aws/*.key
+
+# Bazel output symlinks (point outside the repo; nothing here to commit).
+/bazel-*
+
+# ffmpeg-dist / offline-segment build artifacts
+tools/ffmpeg-dist/out.log
+tools/ffmpeg-dist/ffmpeg-*.tar.gz
+tools/ffmpeg-dist/1
+
+# python caches / local-only obs paths
+deploy/aws/__pycache__/
+tools/local-obs/

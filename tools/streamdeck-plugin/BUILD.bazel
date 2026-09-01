@@ -1,0 +1,153 @@
+load("@aspect_bazel_lib//lib:directory_path.bzl", "directory_path")
+load("@aspect_rules_js//js:defs.bzl", "js_binary", "js_run_binary")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+load("@rules_pkg//pkg:zip.bzl", "pkg_zip")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+exports_files([
+    ".nvmrc",
+    "pnpm-lock.yaml",
+])
+
+npm_link_all_packages(name = "node_modules")
+
+# Replaces `npm run build` (rollup -c). The plan named this an
+# npm_package_bin, but that macro doesn't exist in aspect_rules_js 3.4.1 --
+# it was removed in the 2.x/3.x line in favor of js_run_binary (a thin
+# wrapper over bazel_lib's run_binary for a js_binary-shaped tool), which is
+# the currently-documented way to run a linked npm package's bin script as
+# a build step.
+# rollup's own package.json declares `"bin": {"rollup": "dist/bin/rollup"}`
+# (verified directly in the fetched package) -- npm_link_all_packages left
+# this package's `bins` empty (a pnpm_lock-vs-npm-lockfile metadata gap, not
+# something to route around further), so this reaches directly into the
+# linked package's directory output for the real entry point instead of
+# relying on an auto-generated bin alias.
+directory_path(
+    name = "rollup_bin_entry_point",
+    directory = ":node_modules/rollup/dir",
+    path = "dist/bin/rollup",
+)
+
+js_binary(
+    name = "rollup_bin",
+    entry_point = ":rollup_bin_entry_point",
+)
+
+js_run_binary(
+    name = "build",
+    tool = ":rollup_bin",
+    srcs = [
+        "rollup.config.mjs",
+        "tsconfig.json",
+        ":node_modules/@elgato/streamdeck",
+        ":node_modules/@rollup/plugin-commonjs",
+        ":node_modules/@rollup/plugin-node-resolve",
+        ":node_modules/@rollup/plugin-typescript",
+        # Native rollup binary for THIS host. rollup declares the platform
+        # packages as optionalDependencies, which aspect_rules_js only links
+        # behind a select() keyed on the *target* platform; .bazelrc forces the
+        # target to linux/amd64, so on non-x86_64 dev hosts (where the
+        # js_run_binary action still runs natively) only the x64 native package
+        # would be present and rollup would fail with MODULE_NOT_FOUND. Keeping
+        # the arm64-gnu package as a direct devDependency (see package.json)
+        # makes rules_js link it unconditionally at the top level of
+        # node_modules, where rollup's require() walk finds it. Must be bumped
+        # in lockstep with the rollup devDependency.
+        ":node_modules/@rollup/rollup-linux-arm64-gnu",
+        ":node_modules/@types/node",
+        ":node_modules/tslib",
+        ":node_modules/typescript",
+        "//tools/streamdeck-plugin/src/client:srcs",
+    ] + glob(["src/**/*.ts"]),
+    outs = [
+        "com.chroniccmposer.strimserver.sdPlugin/bin/plugin.js",
+        "com.chroniccmposer.strimserver.sdPlugin/bin/plugin.js.map",
+    ],
+    args = ["-c"],
+    chdir = "tools/streamdeck-plugin",
+    mnemonic = "Rollup",
+)
+
+# --- Distributable bundle ---------------------------------------------------
+# The Stream Deck plugin ships as its own zip, published ALONGSIDE
+# strimserver-deployment.tar (never inside it). Everything already lives under
+# the com.chroniccmposer.strimserver.sdPlugin/ directory -- source tree
+# (manifest.json + imgs/**) and the :build outs (bin/plugin.js + .map). rules_pkg
+# 1.3.0's default strip_prefix is files_only() (every directory component is
+# dropped, flattening imgs/** and bin/ to the zip root), so it must be
+# overridden: strip_prefix removes the com.chroniccmposer.strimserver.sdPlugin/
+# package dir, and prefix re-adds it as the single top-level directory, so the
+# zip unzips directly into the plugin folder Stream Deck expects. logs/**
+# (runtime logs) is never part of the glob, so it is excluded by construction.
+pkg_files(
+    name = "streamdeck_bundle_files",
+    srcs = [
+        "com.chroniccmposer.strimserver.sdPlugin/manifest.json",
+        ":build",
+    ] + glob(["com.chroniccmposer.strimserver.sdPlugin/imgs/**"]),
+    strip_prefix = "com.chroniccmposer.strimserver.sdPlugin",
+    prefix = "com.chroniccmposer.strimserver.sdPlugin",
+    visibility = ["//visibility:public"],
+)
+
+pkg_zip(
+    name = "streamdeck_plugin_bundle",
+    srcs = [":streamdeck_bundle_files"],
+    out = "com.chroniccmposer.strimserver.sdPlugin.zip",
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "streamdeck_plugin_bundle_sha256",
+    srcs = [":streamdeck_plugin_bundle"],
+    outs = ["com.chroniccmposer.strimserver.sdPlugin.zip.sha256"],
+    cmd = "printf '%s  com.chroniccmposer.strimserver.sdPlugin.zip\\n' " +
+          "\"$$(sha256sum $(location :streamdeck_plugin_bundle) | cut -d' ' -f1)\" > $@",
+    visibility = ["//visibility:public"],
+)
+
+# The same sdPlugin layout, repackaged as a .tar.gz alongside the .zip (both
+# are published as distributables; see README). Reuses :streamdeck_bundle_files,
+# whose strip_prefix/prefix keep the single com.chroniccmposer.strimserver.sdPlugin/
+# top-level directory. rules_pkg 1.3.0's pkg_tar compresses deterministically
+# in-process: extension "tar.gz" selects gzip, and portable_mtime (default true)
+# pins BOTH the tar entry mtimes and the gzip header mtime to 2000-01-01
+# (gzip.GzipFile(mtime=...)), so the bytes are reproducible. compression_level 9
+# matches what a `gzip -9` fallback would have produced.
+pkg_tar(
+    name = "streamdeck_plugin_tar_gz",
+    srcs = [":streamdeck_bundle_files"],
+    extension = "tar.gz",
+    compression_level = 9,
+    out = "com.chroniccmposer.strimserver.sdPlugin.tar.gz",
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "streamdeck_plugin_tar_gz_sha256",
+    srcs = [":streamdeck_plugin_tar_gz"],
+    outs = ["com.chroniccmposer.strimserver.sdPlugin.tar.gz.sha256"],
+    cmd = "printf '%s  com.chroniccmposer.strimserver.sdPlugin.tar.gz\\n' " +
+          "\"$$(sha256sum $(location :streamdeck_plugin_tar_gz) | cut -d' ' -f1)\" > $@",
+    visibility = ["//visibility:public"],
+)
+
+# Standalone S3 publish for ONLY the plugin bundle (`make publish-streamdeck`),
+# mirroring tools/bandwidth-test:publish_iperf3. Shares the same S3 keys as
+# `make publish-strimserver`, which also uploads the bundles. Publishes BOTH
+# the .zip and .tar.gz variants.
+sh_binary(
+    name = "publish_streamdeck",
+    srcs = ["publish_streamdeck.sh"],
+    data = [
+        ":streamdeck_plugin_bundle",
+        ":streamdeck_plugin_tar_gz",
+    ],
+    args = [
+        "$(rootpath :streamdeck_plugin_bundle)",
+        "$(rootpath :streamdeck_plugin_tar_gz)",
+    ],
+)

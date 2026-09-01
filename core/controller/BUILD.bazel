@@ -1,0 +1,236 @@
+# gazelle:prefix strimserver-controller
+
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+load("//tools/bazel:deb_file.bzl", "deb_file")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/bazel:go_bin.bzl", "go_bin")
+
+exports_files(["go.mod", "go.sum"])
+
+go_library(
+    name = "controller_lib",
+    srcs = [
+        "container_factory.go",
+        "controller.go",
+        "envspec.go",
+        "main.go",
+        "names.go",
+        "paths.go",
+    ],
+    importpath = "strimserver-controller",
+    visibility = ["//visibility:private"],
+    deps = [
+        "@com_github_coder_websocket//:websocket",
+        "@com_github_coder_websocket//wsjson",
+        "@com_github_containerd_containerd_api//events",
+        "@com_github_containerd_containerd_v2//client",
+        "@com_github_containerd_containerd_v2//pkg/cdi",
+        "@com_github_containerd_containerd_v2//pkg/cio",
+        "@com_github_containerd_containerd_v2//pkg/namespaces",
+        "@com_github_containerd_containerd_v2//pkg/oci",
+        "@com_github_containerd_errdefs//:errdefs",
+        "@com_github_containerd_typeurl_v2//:typeurl",
+        "@com_github_opencontainers_runtime_spec//specs-go",
+    ],
+)
+
+# Built as a pure-Go static linux/amd64 binary: pure=on matches the old
+# CGO_ENABLED=0 (verified: no `import "C"` and no os/user anywhere in this
+# package); -trimpath is a rules_go default; the old -ldflags='-s -w' becomes
+# gc_linkopts below.
+go_binary(
+    name = "strimserver-controller",
+    embed = [":controller_lib"],
+    goarch = "amd64",
+    goos = "linux",
+    gc_linkopts = [
+        "-s",
+        "-w",
+    ],
+    pure = "on",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "controller_test",
+    srcs = ["controller_test.go"],
+    embed = [":controller_lib"],
+)
+
+# --- Codegen: strimserver.env.example + the Stream Deck wire types ----------
+# Replaces `make generate` / `make check-generated` (Makefile:53-59). Unlike
+# the make target, `generate_test` never writes to the source tree to check
+# it, and it's wired into the default `bazel test //...` set.
+
+genrule(
+    name = "env_example_gen",
+    outs = ["strimserver.env.example.gen"],
+    cmd = "$(location :strimserver-controller) -print-env-example > $@",
+    tools = [":strimserver-controller"],
+    visibility = ["//core:__pkg__"],
+)
+
+genrule(
+    name = "ts_types_gen",
+    outs = ["types.generated.ts.gen"],
+    cmd = "$(location :strimserver-controller) -print-ts-types > $@",
+    tools = [":strimserver-controller"],
+    visibility = ["//tools/streamdeck-plugin/src/client:__pkg__"],
+)
+
+# write_source_files requires each destination file to live in the same
+# package as the target that writes it, so the actual writes are declared
+# next to their destinations (//core:write_env_example and
+# //tools/streamdeck-plugin/src/client:write_ts_types) and chained here.
+write_source_files(
+    name = "generate",
+    additional_update_targets = [
+        "//core:write_env_example",
+        "//tools/streamdeck-plugin/src/client:write_ts_types",
+    ],
+)
+
+test_suite(
+    name = "generate_test",
+    tests = [
+        "//core:write_env_example_test",
+        "//tools/streamdeck-plugin/src/client:write_ts_types_test",
+    ],
+)
+
+# --- Lint --------------------------------------------------------------
+# golangci-lint pinned as a downloaded, checksummed Bazel tool (see
+# @golangci_lint_linux_amd64 in MODULE.bazel) instead of `go install`ed over
+# the network on every lint-enabled build.
+
+go_bin(name = "go_bin")
+
+sh_test(
+    name = "lint",
+    srcs = ["lint.sh"],
+    args = [
+        "$(location @golangci_lint_linux_amd64//:golangci-lint)",
+        "$(location :go_bin)",
+        "$(location :.golangci.yml)",
+    ],
+    data = [
+        "@golangci_lint_linux_amd64//:golangci-lint",
+        ":go_bin",
+        ".golangci.yml",
+        "container_factory.go",
+        "controller.go",
+        "controller_test.go",
+        "envspec.go",
+        "go.mod",
+        "go.sum",
+        "main.go",
+        "names.go",
+        "paths.go",
+    ],
+)
+
+# =============================================================================
+# controller image (FROM scratch). Assembled by rules_oci from the Go binary
+# plus dash + libc6 donor packages from the @trixie apt snapshot.
+# =============================================================================
+
+deb_file(
+    name = "dash_as_sh",
+    data = "@trixie//dash/amd64:data",
+    path = "usr/bin/dash",
+    out = "sh",
+)
+
+deb_file(
+    name = "controller_ld_linux",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+)
+
+deb_file(
+    name = "controller_libc_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libc.so.6",
+)
+
+pkg_files(
+    name = "controller_bin_sh",
+    srcs = [":dash_as_sh"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/bin",
+)
+
+pkg_files(
+    name = "controller_lib64",
+    srcs = [":controller_ld_linux"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib64",
+)
+
+pkg_files(
+    name = "controller_libs",
+    srcs = [":controller_libc_so"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib/x86_64-linux-gnu",
+)
+
+pkg_files(
+    name = "controller_bin",
+    srcs = [":strimserver-controller"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+    renames = {":strimserver-controller": "strimserver-controller"},
+)
+
+pkg_files(
+    name = "controller_entrypoint",
+    srcs = ["entrypoint.sh"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+)
+
+pkg_tar(
+    name = "controller_files_tar",
+    srcs = [
+        ":controller_bin",
+        ":controller_bin_sh",
+        ":controller_entrypoint",
+        ":controller_lib64",
+        ":controller_libs",
+    ],
+)
+
+oci_image(
+    name = "controller_image",
+    architecture = "amd64",
+    entrypoint = ["/entrypoint.sh"],
+    os = "linux",
+    tars = [":controller_files_tar"],
+)
+
+oci_load(
+    name = "controller_image_tarball",
+    image = ":controller_image",
+    repo_tags = ["docker.io/library/strimserver-controller:latest"],
+)
+
+sh_test(
+    name = "image_smoke_test",
+    srcs = ["image_smoke_test.sh"],
+    args = ["$(location :controller_files_tar)"],
+    data = [":controller_files_tar"],
+)
+
+# Promotes oci_load's named "tarball" output group (the raw OCI tar; the
+# default output is a runnable `docker load`-style script) into a plain
+# filegroup so //:strimserver_deployment_tar can depend on it normally.
+filegroup(
+    name = "controller_image_tar_file",
+    srcs = [":controller_image_tarball"],
+    output_group = "tarball",
+    visibility = ["//visibility:public"],
+)

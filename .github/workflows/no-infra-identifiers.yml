@@ -1,0 +1,13 @@
+name: no-infra-identifiers
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The INFRA_IDENTIFIERS repository secret must hold the pipe-separated
+      # identifier regex (real infra identifiers are never committed).
+      - name: Check for AWS-infra identifiers
+        env:
+          STRIMSERVER_INFRA_IDENTIFIERS: ${{ secrets.INFRA_IDENTIFIERS }}
+        run: tools/check-no-infra-identifiers.sh

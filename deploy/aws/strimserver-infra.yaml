@@ -102,10 +102,10 @@ Parameters:
     Default: "false"
     AllowedValues: ["true", "false"]
     Description: >
-      Open the experimental OpenSSH port (from OperatorCidr). Set this to true
-      only when the deployment bundle is built/deployed with
-      ENABLE_EXPERIMENTAL_OPENSSH=true (feature-toggles.env); otherwise the port
-      is opened but nothing listens on it.
+      Open the experimental OpenSSH port (from OperatorCidr). The
+      openssh-experimental RPM is always bundled with the deployment package
+      (fetched from the pinned @openssh_dist artifact), so set this to true to
+      open the port for it; false keeps the port closed.
 
   ExperimentalSshPort:
     Type: Number

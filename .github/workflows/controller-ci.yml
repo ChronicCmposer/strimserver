@@ -1,0 +1,39 @@
+# CI for the strimserver controller and the deployment package.
+#
+# controller-tests runs the controller unit tests, lint, and codegen
+# staleness checks (`bazel test //core/controller:all`). package-build
+# assembles the full deployment bundle (`//:package`) after bootstrapping
+# core/strimserver.env from the example, mirroring `make prepare`.
+#
+# The pinned ffmpeg artifact has its own weekly reproducibility canary
+# (.github/workflows/ffmpeg-reproducibility.yml); this workflow covers
+# the normal test/build path on every push and pull request.
+name: controller-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  controller-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Run controller tests
+        run: bazel test //core/controller:all
+
+  package-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Bootstrap the runtime env file
+        run: cp core/strimserver.env.example core/strimserver.env
+
+      - name: Build the deployment package
+        run: bazel build //:package

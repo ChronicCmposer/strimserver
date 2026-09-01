@@ -1,0 +1,4 @@
+exports_files([
+    "aspect_bazel_lib_no_bats.patch",
+    "bazel_lib_no_bats.patch",
+])

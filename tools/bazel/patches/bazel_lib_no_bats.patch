@@ -1,0 +1,20 @@
+--- a/MODULE.bazel	2026-08-29 20:53:42.925042127 +0000
++++ b/MODULE.bazel	2026-08-29 20:53:42.937702560 +0000
+@@ -17,8 +17,7 @@
+ bazel_lib_toolchains.zstd()
+ bazel_lib_toolchains.expand_template()
+ bazel_lib_toolchains.spawn_binary()
+-bazel_lib_toolchains.bats()
+-use_repo(bazel_lib_toolchains, "bats_toolchains", "copy_directory_toolchains", "copy_to_directory_toolchains", "coreutils_toolchains", "expand_template_toolchains", "spawn_binary_toolchains", "zstd_toolchains")
++use_repo(bazel_lib_toolchains, "copy_directory_toolchains", "copy_to_directory_toolchains", "coreutils_toolchains", "expand_template_toolchains", "spawn_binary_toolchains", "zstd_toolchains")
+ 
+ register_toolchains(
+     "@copy_directory_toolchains//:all",
+@@ -26,7 +25,6 @@
+     "@coreutils_toolchains//:all",
+     "@expand_template_toolchains//:all",
+     "@spawn_binary_toolchains//:all",
+-    "@bats_toolchains//:all",
+     "@zstd_toolchains//:all",
+ )
+ 
