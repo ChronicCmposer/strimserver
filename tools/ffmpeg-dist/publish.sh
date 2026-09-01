@@ -9,7 +9,7 @@
 # build script (tools/ffmpeg-dist/build.sh) in, and runs it inside a chroot --
 # invoking the patched qemu-x86_64 explicitly for the amd64 guest when the
 # host is not x86_64. The build itself is the shared build.sh, the same single
-# source of truth the (kept-for-compatibility) Dockerfile wrapper runs.
+# source of truth for the pinned artifact.
 #
 # The resulting /out payload (ffmpeg + BUILD-INFO.txt) is tared as
 #   ffmpeg-<FFMPEG_VERSION>-deb<YYYYMMDD>-cuda<X.Y.Z>-sm<N>-<shortsha>.tar.gz
@@ -19,7 +19,7 @@
 # access gate), then the s3_http_archive block is printed for MODULE.bazel
 # (name = "ffmpeg_dist").
 #
-# Env vars (defaults mirror the build.sh pins / the Dockerfile ARGs):
+# Env vars (defaults mirror the build.sh pins):
 #   FFMPEG_VERSION       default 8.0
 #   FFMPEG_COMMIT        default 281c902aa1a83fe759011097cb005b555034c151
 #   NV_CODEC_HEADERS_TAG default n13.0.19.0
@@ -58,7 +58,7 @@
 # =============================================================================
 set -euo pipefail
 
-# --- inputs (defaults mirror the build.sh pins / Dockerfile ARGs) ---
+# --- inputs (defaults mirror the build.sh pins) ---
 FFMPEG_VERSION="${FFMPEG_VERSION:-8.0}"
 FFMPEG_COMMIT="${FFMPEG_COMMIT:-281c902aa1a83fe759011097cb005b555034c151}"
 NV_CODEC_HEADERS_TAG="${NV_CODEC_HEADERS_TAG:-n13.0.19.0}"

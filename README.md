@@ -423,9 +423,7 @@ NVIDIA's `cicc`; amd64 hosts
 run the guest natively with no qemu. All build steps (apt snapshot
 pinning, CUDA redistributables, nv-codec-headers, FFmpeg) live in
 the shared `tools/ffmpeg-dist/build.sh`, which is the single source
-of truth; the thin `tools/ffmpeg-dist/Dockerfile` wrapper runs the
-same script, so the docker path and the chroot+qemu path produce
-byte-identical output (the sha256 in `MODULE.bazel` is the contract).
+of truth (the sha256 in `MODULE.bazel` is the contract).
 
 On non-amd64 hosts, `publish.sh` builds the patched qemu-x86_64
 emulator from source when no valid one is available, via the shared
@@ -829,9 +827,13 @@ with:
 
 The repository ships a pre-commit guard (`.githooks/pre-commit`,
 backed by `tools/check-no-infra-identifiers.sh`) that rejects
-commits containing AWS-infra identifiers (the old build-machine
-S3 domain, the old AWS host IP prefix, an operator name, or the
-old S3 bucket name). Enable it with:
+commits containing AWS-infra identifiers (a domain, an AWS host
+IP prefix, an operator name, or an S3 bucket). The identifier
+patterns are live infrastructure attributes and are intentionally
+NOT committed; they are injected at runtime via the
+`STRIMSERVER_INFRA_IDENTIFIERS` env var for the git hook and via
+the `INFRA_IDENTIFIERS` repository secret in CI. Enable the hook
+with:
 
 ```bash
 git config core.hooksPath .githooks

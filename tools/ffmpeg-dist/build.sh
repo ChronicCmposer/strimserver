@@ -3,19 +3,16 @@
 # tools/ffmpeg-dist/build.sh -- single source of truth for the pinned FFmpeg
 # artifact build.
 #
-# Runs identically in both supported contexts:
-#   * inside a docker build (tools/ffmpeg-dist/Dockerfile is a thin wrapper
-#     that COPYs this file to /build.sh and executes it), and
-#   * inside the chroot that tools/ffmpeg-dist/publish.sh provisions from the
-#     Docker Hub registry API (no docker): the guest executes
-#     /build.sh via chroot (+ qemu-x86_64 when the host is not amd64).
+# Runs inside the chroot that tools/ffmpeg-dist/publish.sh provisions from the
+# Docker Hub registry API (no docker): the guest executes /build.sh via chroot
+# (+ qemu-x86_64 when the host is not amd64).
 #
-# Every pin is an env var with the same default as the Dockerfile ARG, so a
-# bare run and an --build-arg run behave identically. The script is
-# idempotent: each phase removes its previous state before rebuilding, and no
-# host-absolute path is referenced (every path is a guest path).
+# Every pin is an env var with its default defined in this script, so a bare
+# run and an explicit pin behave identically. The script is idempotent: each
+# phase removes its previous state before rebuilding, and no host-absolute
+# path is referenced (every path is a guest path).
 #
-# Pinned inputs (env, defaults mirror tools/ffmpeg-dist/Dockerfile ARGs):
+# Pinned inputs (env, defaults defined in this script):
 #   FFMPEG_VERSION         8.0
 #   FFMPEG_COMMIT          281c902aa1a83fe759011097cb005b555034c151
 #   NV_CODEC_HEADERS_TAG   n13.0.19.0
@@ -60,7 +57,7 @@ if ! /bin/sh -c 'exit 0' >/dev/null 2>&1; then
     exit 1
 fi
 
-# --- pins (env, defaults identical to the Dockerfile ARGs) -------------------
+# --- pins (env, defaults defined in this script) ----------------------------
 : "${FFMPEG_VERSION:=8.0}"
 : "${FFMPEG_COMMIT:=281c902aa1a83fe759011097cb005b555034c151}"
 : "${NV_CODEC_HEADERS_TAG:=n13.0.19.0}"
