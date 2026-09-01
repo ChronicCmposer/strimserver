@@ -4,11 +4,8 @@
 set -euo pipefail
 
 tar="$1"
-sha256="$2"
-streamdeck="$3"
-streamdeck_sha256="$4"
-streamdeck_gz="$5"
-streamdeck_gz_sha256="$6"
+streamdeck="$2"
+streamdeck_gz="$3"
 
 git_tag="${GIT_TAG:-}"
 if [ -z "$git_tag" ] && [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
@@ -21,10 +18,7 @@ if [ -z "$git_tag" ]; then
 fi
 
 echo "Packaged: $tar"
-cat "$sha256"
 echo "Stream Deck plugin: $streamdeck"
-cat "$streamdeck_sha256"
 echo "Stream Deck plugin (tar.gz): $streamdeck_gz"
-cat "$streamdeck_gz_sha256"
 
-gh release upload "$git_tag" "$tar" "$sha256" "$streamdeck" "$streamdeck_sha256" "$streamdeck_gz" "$streamdeck_gz_sha256" --clobber
+gh release upload "$git_tag" "$tar" "$streamdeck" "$streamdeck_gz" --clobber
