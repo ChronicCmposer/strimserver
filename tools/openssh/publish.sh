@@ -15,9 +15,10 @@
 # directory as openssh-experimental.rpm, uploaded to $S3_BUCKET/openssh/ with
 # no ACL modification (objects get the bucket's default private ACL; the
 # IP-scoped HTTPS-only bucket policy from scripts/bucket-cidr-policy.sh is the only
-# access gate), then the s3_http_file block is printed for MODULE.bazel
-# (name = "openssh_dist") along with the `gh release upload` command for the
-# GitHub Release mirror (tag openssh-dist).
+# access gate), then the s3_http_file block (with build_file_content =
+# exports_files for the root-addressable @openssh_dist//:openssh-experimental.rpm
+# label) is printed for MODULE.bazel (name = "openssh_dist") along with the
+# `gh release upload` command for the GitHub Release mirror (tag openssh-dist).
 #
 # Env vars (defaults mirror the build.sh pins):
 #   OPENSSH_TAG        default V_10_3_P1
@@ -346,10 +347,11 @@ mirror_url="https://github.com/${GITHUB_REPOSITORY:-ChronicCmposer/strimserver}/
 printf '\n# --- MODULE.bazel: paste this s3_http_file block into MODULE.bazel ---\n'
 printf 's3_http_file(\n'
 printf '    name = "openssh_dist",\n'
+printf '    downloaded_file_name = "openssh-experimental.rpm",\n'
+printf '    build_file_content = "exports_files([\\"openssh-experimental.rpm\\"])",\n'
 printf '    s3_key = "openssh/openssh-experimental.rpm",\n'
 printf '    sha256 = "%s",\n' "$sha256"
 printf '    mirror_urls = ["%s"],\n' "$mirror_url"
-printf '    downloaded_file_name = "openssh-experimental.rpm",\n'
 printf ')\n'
 if [[ "$upload_ok" == 0 ]]; then
   if [[ "$SKIP_UPLOAD" == "1" ]]; then

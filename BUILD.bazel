@@ -85,10 +85,11 @@ pkg_files(
 
 # The openssh RPM is a required bundle member: it is fetched from the pinned
 # @openssh_dist artifact (built out-of-band by tools/openssh/publish.sh), so
-# there is no toggle to gate it.
+# there is no toggle to gate it. s3_http_file's exports_files mode makes the
+# RPM addressable directly as @openssh_dist//:openssh-experimental.rpm.
 pkg_files(
     name = "bundle_openssh_rpm",
-    srcs = ["//tools/openssh:openssh_rpm"],
+    srcs = ["@openssh_dist//:openssh-experimental.rpm"],
     strip_prefix = strip_prefix.files_only(),
 )
 

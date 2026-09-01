@@ -223,8 +223,15 @@ s3_http_file(
 # The sha256 is the integrity pin. The S3 bucket and region come from the
 # STRIMSERVER_S3_BUCKET / STRIMSERVER_S3_REGION env vars (no committed
 # defaults); when they are unset, the GitHub Release mirror below is used.
+# The published asset is a bare .rpm (no archive suffix), so it is fetched
+# with s3_http_file's root-addressable exports_files mode (build_file_content
+# set) rather than s3_http_archive: it mirrors the @ffmpeg_dist/@mediamtx_dist
+# exports_files pattern while being a bare-file download. exports_files gives
+# the RPM the @openssh_dist//:openssh-experimental.rpm label, and the
+# now-redundant tools/openssh/BUILD.bazel filegroup wrapper is gone.
 s3_http_file(
     name = "openssh_dist",
+    build_file_content = 'exports_files(["openssh-experimental.rpm"])',
     downloaded_file_name = "openssh-experimental.rpm",
     mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental.rpm"],
     s3_key = "openssh/openssh-experimental.rpm",
