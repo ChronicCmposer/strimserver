@@ -207,13 +207,19 @@ gracefully on shutdown.
 > `x86_64-linux-gnu` paths, the Fish and MediaMTX binaries
 > are `linux-x86_64`/`linux_amd64` releases, and Bazel
 > (`--platforms=//tools/bazel:linux_amd64`) builds the
-> `linux/amd64` platform. There is no
-> `arm64`/`aarch64` support today; building for ARM (e.g.
-> AWS Graviton with NVIDIA, or the `g5g` family) or other
-> architectures would require parameterizing the build
-> platform, the FFmpeg `-gencode` target, the library copy
-> paths, and the upstream binary URLs (see *Possible future
-> enhancements*).
+> `linux/amd64` platform. On non-x86_64 development hosts
+> (e.g. aarch64), the Bazel test suite can still be run:
+> `.bazelrc` sets `--use_target_platform_for_tests=true`,
+> which runs test actions on the target platform via
+> qemu-user binfmt (install `qemu-user` and
+> `qemu-user-binfmt`) while compile/genrule actions stay
+> native; this does not add arm64 build support. Building
+> artifacts for `arm64`/`aarch64` is still unsupported
+> today; building for ARM (e.g. AWS Graviton with NVIDIA,
+> or the `g5g` family) or other architectures would require
+> parameterizing the build platform, the FFmpeg `-gencode`
+> target, the library copy paths, and the upstream binary
+> URLs (see *Possible future enhancements*).
 
 ### Host build and deployment tools
 
@@ -236,6 +242,12 @@ pinned by the source tree:
 - Python 3, used by EC2 launch/setup helpers.
 - `tar`, `sudo`, OpenSSH client, and standard POSIX shell
   tooling.
+- On non-x86_64 hosts (e.g. aarch64), `qemu-user` and
+  `qemu-user-binfmt` (Debian/Ubuntu) must be installed and
+  registered so the test suite (`make test-controller` /
+  `bazel test //core/controller:all`) can run the
+  linux/amd64 test binaries under emulation; on x86_64 hosts
+  this is unnecessary.
 - An NVIDIA-capable build environment (CUDA toolchain) is
   required only when **rebuilding** the GPU FFmpeg artifact
   via `tools/ffmpeg-dist`; a normal `make package` /
@@ -537,6 +549,11 @@ make generate          # bazel run //core/controller:generate -- regenerate stri
 make check-generated   # bazel test //core/controller:generate_test -- fail if those files are stale in git
 make publish-iperf3    # bazel run //tools/bandwidth-test:publish_iperf3 -- build and publish the iperf3 bandwidth-test bundle to S3
 ```
+
+On non-x86_64 hosts, `make test-controller` additionally
+requires `qemu-user`/`qemu-user-binfmt` to be installed and
+registered, as described in *Host build and deployment
+tools*.
 
 `bazel test //...` runs every test in the repo: controller unit tests,
 lint, generated-file staleness, and the image smoke tests

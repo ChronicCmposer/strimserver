@@ -1,6 +1,8 @@
 # Thin facade over the Bazel build (see MODULE.bazel/BUILD.bazel). Kept for
 # muscle memory; `bazel` is the real build system now -- run its targets
 # directly for anything not covered here.
+# Note: on non-x86_64 hosts, `make test-controller` requires qemu-user
+# binfmt (`qemu-user` + `qemu-user-binfmt`) to be installed/registered.
 
 S3_BUCKET ?=s3://<bucket-name>
 
