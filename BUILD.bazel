@@ -139,12 +139,16 @@ sh_binary(
         ":strimserver_deployment_tar",
         "//tools/streamdeck-plugin:streamdeck_plugin_bundle",
         "//tools/streamdeck-plugin:streamdeck_plugin_bundle_sha256",
+        "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz",
+        "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz_sha256",
     ],
     args = [
         "$(rootpath :strimserver_deployment_tar)",
         "$(rootpath :strimserver_deployment_sha256)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_bundle)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_bundle_sha256)",
+        "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz)",
+        "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz_sha256)",
     ],
 )
 
@@ -154,9 +158,11 @@ sh_binary(
     data = [
         ":_strimserver_deployment_tar_unchecked",
         "//tools/streamdeck-plugin:streamdeck_plugin_bundle",
+        "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz",
     ],
     args = [
         "$(rootpath :_strimserver_deployment_tar_unchecked)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_bundle)",
+        "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz)",
     ],
 )

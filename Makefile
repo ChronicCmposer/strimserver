@@ -44,13 +44,14 @@ publish-strimserver:
 # The offline fallback clip is bundled directly from MODULE.bazel's
 # s3_http_file(offline_segment_dist); regenerate + republish a new clip via
 # tools/brb-screen/publish.sh.
-# Also uploads the Stream Deck plugin bundle (strimserver-streamdeck-plugin.zip).
+# Also uploads the Stream Deck plugin bundle (strimserver-streamdeck-plugin.zip
+# and .tar.gz).
 	S3_BUCKET=$(S3_BUCKET) bazel run //:publish_strimserver
 
 publish-iperf3:
 	S3_BUCKET=$(S3_BUCKET) bazel run //tools/bandwidth-test:publish_iperf3
 
-# Publish ONLY the Stream Deck plugin bundle to S3 (same object key as
-# publish-strimserver).
+# Publish ONLY the Stream Deck plugin bundle to S3 (same object keys as
+# publish-strimserver). Publishes both the .zip and .tar.gz variants.
 publish-streamdeck:
 	S3_BUCKET=$(S3_BUCKET) bazel run //tools/streamdeck-plugin:publish_streamdeck

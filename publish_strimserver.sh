@@ -6,7 +6,9 @@ set -euo pipefail
 
 tar="$1"
 streamdeck="$2"
+streamdeck_gz="$3"
 bucket="${S3_BUCKET:?Set S3_BUCKET, e.g. S3_BUCKET=s3://your-bucket-name bazel run //:publish_strimserver}"
 
 aws s3 cp "$tar" "$bucket/strimserver-deployment.tar"
 aws s3 cp "$streamdeck" "$bucket/strimserver-streamdeck-plugin.zip"
+aws s3 cp "$streamdeck_gz" "$bucket/strimserver-streamdeck-plugin.tar.gz"
