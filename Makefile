@@ -9,7 +9,7 @@ S3_BUCKET ?=s3://<bucket-name>
 .DEFAULT_GOAL := package
 
 .PHONY: prepare generate check-generated controller test-controller package release \
-	check-no-twitch-key publish-strimserver publish-iperf3 publish-streamdeck
+	check-no-twitch-key publish-all publish-strimserver publish-iperf3 publish-streamdeck
 
 # Bootstrap: copy the example env into place for the first local checkout
 # (never overwrite an existing, possibly customized, core/strimserver.env).
@@ -39,6 +39,13 @@ package:
 GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null)
 release:
 	GIT_TAG=$(GIT_TAG) bazel run //:release
+
+# Publish everything to S3 in one bazel run: the strimserver deployment tar,
+# the Stream Deck plugin bundle (.zip + .tar.gz), and the iperf3 bundle.
+# Requires AWS credentials and S3_BUCKET. Runs a single bazel target rather
+# than the individual publish-* targets (one server/analysis pass).
+publish-all:
+	S3_BUCKET=$(S3_BUCKET) bazel run //:publish_all
 
 publish-strimserver:
 # The offline fallback clip is bundled directly from MODULE.bazel's

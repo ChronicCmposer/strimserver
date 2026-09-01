@@ -531,6 +531,14 @@ inside it:
   `$S3_BUCKET/strimserver-streamdeck-plugin.tar.gz` (the tar's
   sha256 is not uploaded to S3, and neither is the plugin's —
   parity with the existing convention).
+- `make publish-all` / `bazel run //:publish_all` publishes
+  **everything** to S3 in a single bazel run (one
+  server/analysis pass): the strimserver deployment tar
+  (`strimserver-deployment.tar`), the Stream Deck plugin bundles
+  (both `strimserver-streamdeck-plugin.zip` and
+  `.tar.gz`), and the iperf3 bundle
+  (`iperf3-deployment.tar`). Requires AWS credentials and
+  `S3_BUCKET`.
 - `make publish-streamdeck` / `bazel run
   //tools/streamdeck-plugin:publish_streamdeck` upload **only**
   the plugin bundles (both .zip and .tar.gz), to the same

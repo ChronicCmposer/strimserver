@@ -137,6 +137,7 @@ pkg_tar(
         ":iperf3_deploy_script",
     ],
     out = "iperf3-deployment.tar",
+    visibility = ["//visibility:public"],
 )
 
 sh_binary(

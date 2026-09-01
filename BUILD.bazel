@@ -166,3 +166,29 @@ sh_binary(
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz)",
     ],
 )
+
+# `bazel run //:publish_all` -- the one-shot "publish everything" path
+# (`make publish-all`): uploads ALL S3 artifacts -- the strimserver deployment
+# tar, the Stream Deck plugin bundle (.zip + .tar.gz), and the iperf3 bundle --
+# in a SINGLE bazel run (one server/analysis pass) rather than the three
+# individual publish-* targets. Args map to $1..$4 in order:
+# $1=_strimserver_deployment_tar_unchecked, $2=streamdeck_plugin_bundle (zip),
+# $3=streamdeck_plugin_tar_gz, $4=iperf3_deployment_tar. Uses the same S3
+# object keys as the individual targets (bucket root); see publish_all.sh.
+sh_binary(
+    name = "publish_all",
+    srcs = ["publish_all.sh"],
+    data = [
+        ":_strimserver_deployment_tar_unchecked",
+        "//tools/bandwidth-test:iperf3_deployment_tar",
+        "//tools/streamdeck-plugin:streamdeck_plugin_bundle",
+        "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz",
+    ],
+    args = [
+        "$(rootpath :_strimserver_deployment_tar_unchecked)",
+        "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_bundle)",
+        "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz)",
+        "$(rootpath //tools/bandwidth-test:iperf3_deployment_tar)",
+    ],
+    visibility = ["//visibility:public"],
+)
