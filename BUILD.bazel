@@ -135,20 +135,14 @@ sh_binary(
     name = "release",
     srcs = ["release.sh"],
     data = [
-        ":strimserver_deployment_sha256",
         ":strimserver_deployment_tar",
         "//tools/streamdeck-plugin:streamdeck_plugin_bundle",
-        "//tools/streamdeck-plugin:streamdeck_plugin_bundle_sha256",
         "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz",
-        "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz_sha256",
     ],
     args = [
         "$(rootpath :strimserver_deployment_tar)",
-        "$(rootpath :strimserver_deployment_sha256)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_bundle)",
-        "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_bundle_sha256)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz)",
-        "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz_sha256)",
     ],
 )
 
