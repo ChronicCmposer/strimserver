@@ -38,7 +38,7 @@ def _buildctl_build_impl(ctx):
         fail("output_type must be \"oci_tar\" or \"local_file\", got %r" % ctx.attr.output_type)
 
     command = " ".join([part for part in [
-        "sudo buildctl",
+        "buildctl",
         addr_opt,
         "build",
         "--frontend=dockerfile.v0",

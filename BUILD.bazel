@@ -22,36 +22,17 @@ config_setting(
 )
 
 # --- Offline fallback segment --------------------------------------------
-# The Makefile's $(OFFLINE_SEGMENT_OUTPUT) has no rule at all -- it's a bare
-# variable, a bundle prerequisite, and a tar argument, hand-placed by the
-# operator in $OUTPUT_PATH (verified: grepping the Makefile for it turns up
-# no recipe). A label_flag makes it an explicit, overridable graph input:
-# point it at a filegroup wrapping the real file, e.g.
-#   --//:offline_segment=//local/video:strimserver-offline-2160p60.mp4
-# Building without setting it fails on :offline_segment_unset's own message
-# instead of silently packaging nothing.
+# The fallback clip is fetched by default through MODULE.bazel's
+# s3_http_file(name = "offline_segment_dist") and wrapped by
+# //local/video:strimserver-offline-2160p60.mp4 (the clip is produced
+# out-of-band on macOS by tools/brb-screen/publish.sh -- the encode uses
+# VideoToolbox/AudioToolbox codecs that cannot run in the Bazel graph). The
+# label_flag keeps it an explicit, overridable graph input: point it at a
+# filegroup wrapping a locally-generated clip instead, e.g.
+#   --//:offline_segment=//local/video:my_local_clip
 label_flag(
     name = "offline_segment",
-    build_setting_default = ":offline_segment_unset",
-)
-
-genrule(
-    name = "offline_segment_unset",
-    outs = ["offline_segment_unset.marker"],
-    cmd = """
-echo "ERROR: --//:offline_segment is not set." >&2
-echo "Point it at a target for the offline fallback clip, e.g.:" >&2
-echo "  --//:offline_segment=//local/video:strimserver-offline-2160p60.mp4" >&2
-echo "(wrap the real file in a one-line BUILD.bazel exports_files() first)." >&2
-exit 1
-""",
-    # Otherwise a plain `bazel build //...`/`bazel test //...` sweep tries to
-    # build this sentinel directly (it's a real, named, always-buildable
-    # target regardless of what the label_flag currently resolves to) and
-    # fails even when --//:offline_segment has been overridden to something
-    # real. `manual` only affects wildcard expansion, not explicit
-    # dependency edges, so the label_flag's default still resolves normally.
-    tags = ["manual"],
+    build_setting_default = "//local/video:strimserver-offline-2160p60.mp4",
 )
 
 # --- No-Twitch-key gate ---------------------------------------------------

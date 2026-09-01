@@ -1,0 +1,4 @@
+filegroup(
+    name = "strimserver-offline-2160p60.mp4",
+    srcs = ["@offline_segment_dist//file"],
+)

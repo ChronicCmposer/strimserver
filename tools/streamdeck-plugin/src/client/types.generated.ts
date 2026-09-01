@@ -4,7 +4,7 @@
 export type PathStatus = "unknown" | "ready" | "not-ready";
 export type StageState = "running" | "stopped" | "";
 export type PathName  = "ingress0" | "normalized";
-export type StageName = "mediamtx" | "normalize" | "scale_and_egress";
+export type StageName = "mediamtx" | "normalize" | "scale_and_egress" | "single_stage_egress";
 
 export interface StageStatus { desired: StageState; actual: StageState; }
 export interface ControllerStatus {
@@ -12,6 +12,6 @@ export interface ControllerStatus {
    stages: Record<StageName, StageStatus>;
 }
 
-export const Stages = { MediaMTX: "mediamtx", Normalize: "normalize", ScaleAndEgress: "scale_and_egress" } as const;
-export type ControlComponent = "scale_and_egress";
+export const Stages = { MediaMTX: "mediamtx", Normalize: "normalize", ScaleAndEgress: "scale_and_egress", SingleStageEgress: "single_stage_egress" } as const;
+export type ControlComponent = "egress";
 export type ControlAction    = "start" | "stop";

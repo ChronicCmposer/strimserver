@@ -39,6 +39,9 @@ release:
 	GIT_TAG=$(GIT_TAG) bazel run $(BAZEL_OPENSSH_FLAG) //:release
 
 publish-strimserver:
+# --//:offline_segment now defaults to the S3-fetched clip (MODULE.bazel's
+# s3_http_file(offline_segment_dist)); override with a locally-generated clip via
+# --//:offline_segment=//local/video:my_local_clip
 	S3_BUCKET=$(S3_BUCKET) bazel run $(BAZEL_OPENSSH_FLAG) //:publish_strimserver
 
 publish-iperf3:

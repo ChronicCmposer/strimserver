@@ -10,6 +10,25 @@ import { statusStream } from "../client/status-stream";
 import { sendControl } from "../client/control";
 import { Stages, stageUIState, type ControllerStatus, type StageUIState } from "../client/types";
 
+// The egress button represents *either* egress implementation. Both stages are
+// always present in /status (the inactive one sits at off/off), so merge their UI
+// states and surface the most "active" one — in particular "on" if either stage is
+// running, which is this button's contract.
+const EGRESS_STAGES = [Stages.ScaleAndEgress, Stages.SingleStageEgress] as const;
+
+// Highest-priority state wins. Since only one egress stage is active in a given
+// pipeline mode, this mostly just surfaces that stage; the ordering only matters
+// during transitions.
+const UI_PRIORITY: StageUIState[] = ["on", "starting", "stopping", "off", "unknown"];
+
+function mergeEgressState(s: ControllerStatus): StageUIState {
+   const states = EGRESS_STAGES.map((name) => stageUIState(s.stages[name]));
+   for (const candidate of UI_PRIORITY) {
+      if (states.includes(candidate)) return candidate;
+   }
+   return "unknown";
+}
+
 @action({ UUID: "com.chroniccmposer.strimserver.egress" })
 export class EgressToggle extends SingletonAction {
    #visible = 0;
@@ -40,7 +59,7 @@ export class EgressToggle extends SingletonAction {
    override async onKeyDown(ev: KeyDownEvent): Promise<void> {
       // Decide from last-known actual state; never pre-flip the button.
       const goingTo = this.#uiState === "on" || this.#uiState === "starting" ? "stop" : "start";
-      const result = await sendControl("scale_and_egress", goingTo);
+      const result = await sendControl("egress", goingTo);
 
       switch (result.kind) {
          case "ok":
@@ -58,7 +77,7 @@ export class EgressToggle extends SingletonAction {
    }
 
    #applyStatus(s: ControllerStatus): void {
-      this.#uiState = stageUIState(s.stages[Stages.ScaleAndEgress]);
+      this.#uiState = mergeEgressState(s);
       void this.#render();
    }
 

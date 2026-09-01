@@ -24,12 +24,18 @@ Env vars (typically sourced from deploy/aws/.env):
   AMI_ID                explicit AMI id (default: resolve:ssm:<DLAMI_SSM_PARAM>)
   DLAMI_SSM_PARAM       SSM path to the AL2023 GPU DLAMI (sensible default below)
   AWS_REGION            optional; otherwise your CLI's configured region is used
+  SSH_HOST              hostname --wait offers to map in /etc/hosts (default:
+                        PROJECT_NAME; ignored when it is already an IP address)
 """
 import argparse
+import enum
+import ipaddress
 import json
 import os
 import subprocess
 import sys
+import time
+from dataclasses import dataclass
 
 # Public SSM parameter for the latest x86_64 Amazon Linux 2023 GPU DLAMI
 # ("Deep Learning Base OSS Nvidia Driver GPU AMI"): ships the NVIDIA driver,
@@ -46,9 +52,15 @@ def aws(args, capture=True):
     return subprocess.run(cmd, text=True, check=True, capture_output=capture)
 
 
+def aws_text(args):
+    """Run an aws `--output text` scalar query; '' for empty or literal None."""
+    val = (aws(args).stdout or "").strip()
+    return "" if val == "None" else val
+
+
 def stack_output(stack_name, key):
     try:
-        r = aws([
+        return aws_text([
             "cloudformation", "describe-stacks",
             "--stack-name", stack_name,
             "--query", f"Stacks[0].Outputs[?OutputKey=='{key}'].OutputValue",
@@ -56,49 +68,41 @@ def stack_output(stack_name, key):
         ])
     except subprocess.CalledProcessError:
         return ""
-    val = (r.stdout or "").strip()
-    return "" if val == "None" else val
 
 
-def resolve_infra():
-    stack = os.environ.get("CFN_STACK_NAME", "strimserver")
-    sg = os.environ.get("SECURITY_GROUP_ID", "").strip() or stack_output(stack, "SecurityGroupId")
-    profile = os.environ.get("IAM_INSTANCE_PROFILE", "").strip() or stack_output(stack, "InstanceProfileName")
-    project = (os.environ.get("PROJECT_NAME", "").strip()
-               or stack_output(stack, "ProjectName") or "strimserver")
+def resolve_infra(cfg):
+    sg = cfg.security_group or stack_output(cfg.stack, "SecurityGroupId")
+    profile = cfg.instance_profile or stack_output(cfg.stack, "InstanceProfileName")
+    project = cfg.project or stack_output(cfg.stack, "ProjectName") or "strimserver"
     missing = [n for n, v in (("SECURITY_GROUP_ID", sg),
                               ("IAM_INSTANCE_PROFILE", profile)) if not v]
     if missing:
         sys.exit(
             "Could not resolve " + ", ".join(missing) + ".\n"
-            f"Deploy the CloudFormation stack '{stack}' "
+            f"Deploy the CloudFormation stack '{cfg.stack}' "
             "(deploy/aws/strimserver-infra.yaml), or set these env vars."
         )
     return sg, profile, project
 
 
 def sg_vpc_id(sg_id):
-    r = aws(["ec2", "describe-security-groups", "--group-ids", sg_id,
-             "--query", "SecurityGroups[0].VpcId", "--output", "text"])
-    val = (r.stdout or "").strip()
-    return "" if val == "None" else val
+    return aws_text(["ec2", "describe-security-groups", "--group-ids", sg_id,
+                     "--query", "SecurityGroups[0].VpcId", "--output", "text"])
 
 
-def resolve_subnet(sg_id):
+def resolve_subnet(cfg, sg_id):
     """Return a subnet id in the SG's VPC. Prefer a public subnet; warn otherwise.
 
     Honors SUBNET_ID if set. Works without a default VPC.
     """
-    subnet = os.environ.get("SUBNET_ID", "").strip()
-    if subnet:
-        return subnet
+    if cfg.subnet:
+        return cfg.subnet
 
     # If the stack created its own networking (CreateNetwork=true), it exports the
     # public subnet id - use it directly rather than discovering.
-    stack = os.environ.get("CFN_STACK_NAME", "strimserver")
-    managed = stack_output(stack, "SubnetId")
+    managed = stack_output(cfg.stack, "SubnetId")
     if managed:
-        print(f"using managed subnet {managed} from stack '{stack}'")
+        print(f"using managed subnet {managed} from stack '{cfg.stack}'")
         return managed
 
     vpc = sg_vpc_id(sg_id)
@@ -131,19 +135,424 @@ def resolve_subnet(sg_id):
     return chosen
 
 
-def launch_instance(instance_type, use_spot, wait):
-    sg, profile, project = resolve_infra()
+HOSTS_PATH = "/etc/hosts"
+HOSTS_BAK = HOSTS_PATH + ".strimserver.bak"
+HOSTS_NEW = HOSTS_PATH + ".strimserver.new"
+HOSTS_BEGIN = "# BEGIN strimserver (managed by deploy/aws/launch)"
+HOSTS_END = "# END strimserver"
 
-    key_name = os.environ.get("KEY_NAME", "").strip()
-    if not key_name:
+# Fixed script: the new hosts file arrives on stdin and the target/backup/temp
+# paths arrive as positional args ($1/$2/$3), so nothing is interpolated into
+# the shell body. The new file lands as a sibling temp and is renamed over the
+# target, so an interrupted write can never leave a truncated hosts file. sudo
+# reads its password prompt from /dev/tty, not stdin, so the pipe is safe.
+HOSTS_APPLY_SH = """
+set -e
+dst=$1 bak=$2 tmp=$3
+trap 'rm -f "$tmp"' EXIT
+cat > "$tmp"
+chown root:root "$tmp"
+chmod 644 "$tmp"
+cp -p "$dst" "$bak"
+mv -f "$tmp" "$dst"
+"""
+
+
+def _is_ip(value):
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+@dataclass(frozen=True)
+class Ssh:
+    """SSH settings, read once from the environment.
+
+    `host` is the operator's SSH_HOST only when it is a real hostname; an
+    IP-valued SSH_HOST is dropped to "" so it never competes with the hostname
+    we map in /etc/hosts (against a freshly launched instance it would be a
+    stale address anyway).
+    """
+    cmd: list
+    user: str
+    port: str
+    host: str
+
+    @classmethod
+    def from_env(cls):
+        host = os.environ.get("SSH_HOST", "").strip()
+        if host and _is_ip(host):
+            host = ""
+        return cls(
+            cmd=os.environ.get("SSH_CMD", "ssh").split(),
+            user=os.environ.get("SSH_USER", "ec2-user"),
+            port=os.environ.get("SSH_PORT", "22"),
+            host=host,
+        )
+
+
+@dataclass(frozen=True)
+class Config:
+    """All environment inputs, read once - the one authoritative config surface
+    (see the module docstring for what each var means). `security_group`,
+    `instance_profile`, `project`, `subnet`, and `ami` hold explicit overrides
+    ("" when unset) that resolve_infra/resolve_subnet fill from stack outputs.
+    AWS_REGION is deliberately not here: aws() is its sole reader.
+    """
+    stack: str
+    project: str
+    key_name: str
+    instance_type: str
+    subnet: str
+    ami: str
+    dlami_ssm_param: str
+    security_group: str
+    instance_profile: str
+    ssh: Ssh
+
+    @classmethod
+    def from_env(cls, instance_type=None):
+        return cls(
+            stack=os.environ.get("CFN_STACK_NAME", "strimserver"),
+            project=os.environ.get("PROJECT_NAME", "").strip(),
+            key_name=os.environ.get("KEY_NAME", "").strip(),
+            instance_type=instance_type or os.environ.get("INSTANCE_TYPE", "g4dn.xlarge"),
+            subnet=os.environ.get("SUBNET_ID", "").strip(),
+            ami=os.environ.get("AMI_ID", "").strip(),
+            dlami_ssm_param=os.environ.get("DLAMI_SSM_PARAM", DEFAULT_DLAMI_SSM_PARAM),
+            security_group=os.environ.get("SECURITY_GROUP_ID", "").strip(),
+            instance_profile=os.environ.get("IAM_INSTANCE_PROFILE", "").strip(),
+            ssh=Ssh.from_env(),
+        )
+
+
+def interactive():
+    """True when a human is on both ends of the pipe."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def confirm(prompt):
+    """True iff interactive and the operator pressed enter (not EOF/Ctrl-C)."""
+    if not interactive():
+        return False
+    try:
+        input(prompt)
+        return True
+    except (EOFError, KeyboardInterrupt):
+        print("\nskipped.")
+        return False
+
+
+def hosts_alias(project, ssh):
+    """Hostname to map in /etc/hosts: the operator's SSH_HOST when it is a real
+    name, else the project name."""
+    return ssh.host or project
+
+
+def strip_managed_block(text):
+    """Drop the BEGIN..END region (to EOF if END is missing)."""
+    out, inside = [], False
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if inside:
+            inside = stripped != HOSTS_END
+            continue
+        if stripped == HOSTS_BEGIN:
+            inside = True
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def unmanaged_entry(text, hostname):
+    """First line outside the managed block that already claims hostname."""
+    for line in text.splitlines():
+        fields = line.split("#", 1)[0].split()
+        if len(fields) >= 2 and hostname in fields[1:]:
+            return line.strip()
+    return None
+
+
+def render_hosts(current, ip, hostname):
+    body = strip_managed_block(current).rstrip("\n")
+    block = f"{HOSTS_BEGIN}\n{ip}\t{hostname}\n{HOSTS_END}\n"
+    return (body + "\n\n" if body else "") + block
+
+
+class HostsPlan(enum.Enum):
+    """What plan_hosts_change decided about the managed /etc/hosts block."""
+    CONFLICT = "conflict"  # an unmanaged entry already claims the hostname
+    NOOP = "noop"          # the managed block already maps it
+    WRITE = "write"        # payload is the new file text to write
+
+
+def plan_hosts_change(current, ip, hostname):
+    """Pure decision about mapping hostname -> ip in `current`. Returns a
+    (HostsPlan, payload) pair: the conflicting line for CONFLICT, the new file
+    text for WRITE, None for NOOP.
+    """
+    conflict = unmanaged_entry(strip_managed_block(current), hostname)
+    if conflict:
+        return HostsPlan.CONFLICT, conflict
+    new = render_hosts(current, ip, hostname)
+    if new == current:
+        return HostsPlan.NOOP, None
+    return HostsPlan.WRITE, new
+
+
+def upsert_hosts_entry(ip, hostname):
+    """Rewrite the managed block. True if /etc/hosts now maps hostname -> ip."""
+    try:
+        with open(HOSTS_PATH) as f:
+            current = f.read()
+    except OSError as e:
+        print(f"could not read {HOSTS_PATH}: {e}")
+        return False
+
+    plan, payload = plan_hosts_change(current, ip, hostname)
+    if plan is HostsPlan.CONFLICT:
+        print(f"\n{HOSTS_PATH} already has an unmanaged entry for '{hostname}':\n"
+              f"    {payload}\n"
+              f"Leaving it alone - it would shadow the managed block anyway.\n"
+              f"Edit or remove that line and re-run, or use SSH_HOST={ip} below.")
+        return False
+    if plan is HostsPlan.NOOP:
+        print(f"{HOSTS_PATH} already maps {hostname} -> {ip}")
+        return True
+
+    new = payload
+    if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
+        print("sudo may prompt for your password...")
+    try:
+        subprocess.run(["sudo", "sh", "-c", HOSTS_APPLY_SH, "_",
+                        HOSTS_PATH, HOSTS_BAK, HOSTS_NEW],
+                       input=new, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"failed to update {HOSTS_PATH} (exit {e.returncode}); "
+              f"nothing was changed.")
+        return False
+    except KeyboardInterrupt:
+        print("\naborted; nothing was changed.")
+        return False
+    print(f"{HOSTS_PATH} updated: {hostname} -> {ip}  "
+          f"(previous file saved as {HOSTS_BAK})")
+    return True
+
+
+def maybe_upsert_hosts(ip, hostname):
+    """Offer the /etc/hosts edit. Skips silently when it cannot apply."""
+    if not sys.platform.startswith("linux"):
+        return False
+    if not confirm(f"press enter to upsert '{ip} {hostname}' into {HOSTS_PATH} "
+                   f"(ctrl-c to skip): "):
+        return False
+    return upsert_hosts_entry(ip, hostname)
+
+
+# The box runs stock sshd on 22 and the experimental OpenSSH on this port
+# (tools/openssh/sshd_config); a relaunch can leave a stale key under either.
+EXPERIMENTAL_SSH_PORT = "2222"
+
+
+def scrub_known_hosts(hostname, port):
+    """Evict any stale host key for hostname from known_hosts, under every name
+    ssh could have filed it under: the bare name (the default port-22 form, e.g.
+    'strimserver') plus the bracketed [hostname]:PORT form for each non-22 port
+    we might connect on (SSH_PORT and the experimental OpenSSH port, e.g.
+    '[strimserver]:2222'). Same file ssh's accept-new and the exec'd setup use,
+    so the scrub, the poll, and the handoff all agree on one file.
+    """
+    kh = os.path.expanduser("~/.ssh/known_hosts")
+    if not os.path.exists(kh):
+        print(f"no {kh}; nothing to scrub")
+        return
+    names = [hostname]
+    for p in (port, EXPERIMENTAL_SSH_PORT):
+        if p and p != "22":
+            bracket = f"[{hostname}]:{p}"
+            if bracket not in names:
+                names.append(bracket)
+    for name in names:
+        try:
+            r = subprocess.run(["ssh-keygen", "-f", kh, "-R", name],
+                               capture_output=True, text=True)
+        except FileNotFoundError:
+            print("warning: ssh-keygen not found; skipping known_hosts cleanup")
+            return
+        if r.returncode != 0:
+            print(f"warning: ssh-keygen -R {name} failed: {(r.stderr or '').strip()}")
+    print(f"removed any stale host keys for {', '.join(names)} from {kh}  "
+          f"(previous file saved as {kh}.old)")
+
+
+def maybe_scrub_known_hosts(hostname, port, mapped):
+    """Offer to drop the old host key for hostname from known_hosts.
+
+    Only after /etc/hosts was just updated: the reused hostname now points at a
+    new instance, so a stale key (on either sshd port) would make SSH refuse to
+    connect.
+    """
+    if not mapped:
+        return
+    if confirm(f"press enter to drop the old host key for '{hostname}' from "
+               f"known_hosts (ctrl-c to skip): "):
+        scrub_known_hosts(hostname, port)
+
+
+class Probe(enum.Enum):
+    """Outcome of the SSH reachability poll."""
+    READY = "ready"            # sshd answered and key auth works
+    REACHABLE = "reachable"    # sshd answered but auth was refused
+    UNRESOLVED = "unresolved"  # host has no /etc/hosts or DNS entry
+    TIMEOUT = "timeout"        # never answered within the budget
+    SKIPPED = "skipped"        # Ctrl-C, or no ssh client
+
+
+def wait_for_ssh(ssh, host, total=240, interval=5, connect_timeout=5):
+    """Poll SSH reachability with the real client, so the handoff to setup does
+    not race sshd coming up. Probes the exact path setup will use - same SSH_CMD,
+    user, port, and `host` (the name setup connects by, not the raw IP). Because
+    the probe carries StrictHostKeyChecking=accept-new, a successful poll also
+    records `host` in known_hosts as a side effect, so setup's first ssh never
+    stops to ask the operator to trust the host. Returns a Probe member.
+    """
+    probe = ssh.cmd + [
+        "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={connect_timeout}",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-p", ssh.port, f"{ssh.user}@{host}", "true",
+    ]
+    deadline = time.monotonic() + total
+    print(f"waiting for ssh on {host}:{ssh.port} ", end="", flush=True)
+    try:
+        while time.monotonic() < deadline:
+            try:
+                r = subprocess.run(probe, capture_output=True, text=True)
+            except FileNotFoundError:
+                print(" (ssh client not found; skipping)")
+                return Probe.SKIPPED
+            if r.returncode == 0:
+                print(" up")
+                return Probe.READY
+            err = r.stderr or ""
+            # A name that resolves nowhere won't start resolving on its own -
+            # bail now instead of retrying uselessly for the whole budget.
+            if any(s in err for s in ("Could not resolve", "Name or service not known",
+                                      "nodename nor servname",
+                                      "Temporary failure in name resolution")):
+                print(f" cannot resolve '{host}'")
+                return Probe.UNRESOLVED
+            # sshd is talking but rejected our key. Real auth failure, or the
+            # instance is still installing the key pair via cloud-init.
+            if "Permission denied" in err or "publickey" in err:
+                print(" up (auth refused)")
+                return Probe.REACHABLE
+            print(".", end="", flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print(" skipped")
+        return Probe.SKIPPED
+    print(" timeout")
+    return Probe.TIMEOUT
+
+
+def effective_ssh_host(ssh, public_ip, hostname, mapped):
+    """The host setup_strimserver will connect to: the operator's SSH_HOST when
+    set, else the mapped hostname (when /etc/hosts was written), else the IP."""
+    return ssh.host or (hostname if mapped else public_ip)
+
+
+def offer_exec_setup(setup_host):
+    """Offer to hand off to deploy/aws/setup_strimserver, pointed at setup_host,
+    by replacing this process (execve). Returns only if the operator declines or
+    it cannot run; on accept the process image is replaced and never comes back.
+    """
+    setup = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "setup_strimserver")
+
+    # Only offer when a human is present: setup_strimserver reads from the tty
+    # (its interactive device prompt), and replacing the process is disruptive.
+    if not interactive() or not os.path.exists(setup):
+        return
+
+    env = dict(os.environ)
+    env["SSH_HOST"] = setup_host
+
+    print(f"\nabout to run, replacing this process (execve):\n"
+          f"    SSH_HOST={setup_host} {setup}\n"
+          f"The instance keeps running if you skip here or interrupt setup.")
+    if not confirm("press enter to run setup_strimserver now (ctrl-c to skip): "):
+        return
+
+    # Replace this process. execve keeps our stdin/stdout/stderr (the tty), which
+    # setup_strimserver needs for its device prompt. Run it under the same
+    # interpreter so the handoff never depends on setup's +x bit or shebang.
+    argv = [sys.executable, setup] if sys.executable else [setup]
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.execve(argv[0], argv, env)
+    except OSError as e:
+        print(f"could not exec {setup}: {e}")
+
+
+def post_launch(cfg, public_ip, project):
+    """Configure local access to the new instance and offer the setup handoff:
+    map /etc/hosts, scrub the stale host key, poll ssh, then offer the execve
+    handoff. Falls through to printed next-steps if the handoff is declined or
+    unavailable.
+    """
+    ssh = cfg.ssh
+    hostname = hosts_alias(project, ssh)
+    mapped = maybe_upsert_hosts(public_ip, hostname)
+
+    # The reused hostname now points at a new box; offer to drop its old host key
+    # so SSH won't refuse to connect over a changed-key mismatch.
+    maybe_scrub_known_hosts(hostname, ssh.port, mapped)
+
+    # Block until sshd answers so the handoff doesn't hit a refused connection.
+    # Poll by the exact name setup will connect to: accept-new then records that
+    # host in known_hosts, so a successful poll also means no trust prompt.
+    setup_host = effective_ssh_host(ssh, public_ip, hostname, mapped)
+    status = wait_for_ssh(ssh, setup_host)
+    if status is Probe.TIMEOUT:
+        print(f"could not reach ssh; the instance is running but nothing answered "
+              f"on tcp/{ssh.port}. Likely the security group doesn't allow "
+              f"{ssh.port} from your IP, or EnableExperimentalSsh is false in the "
+              f"stack. setup can be retried once ssh is reachable.")
+    elif status is Probe.UNRESOLVED:
+        print(f"could not resolve '{setup_host}' - it has no /etc/hosts entry "
+              f"(did you skip the upsert?) and no DNS record. Set SSH_HOST to the "
+              f"public IP {public_ip}, or add the mapping, then retry setup.")
+    elif status is Probe.REACHABLE:
+        print("ssh is up but rejected key auth. If the instance just booted, the "
+              "key may still be installing (retry shortly); otherwise check "
+              "SSH_CMD / the KEY_NAME used at launch.")
+
+    # Offer to hand straight off to setup by replacing this process. Returns only
+    # if declined/unavailable; on accept it execs and the lines below never print.
+    offer_exec_setup(setup_host)
+
+    print("\nnext steps:")
+    if mapped:
+        print("  deploy/aws/setup_strimserver")
+    else:
+        print(f"  SSH_HOST={public_ip} deploy/aws/setup_strimserver")
+        print(f"  # or add '{public_ip} {hostname}' to /etc/hosts, then run "
+              f"deploy/aws/setup_strimserver")
+    print()
+
+
+def launch_instance(cfg, use_spot, wait):
+    sg, profile, project = resolve_infra(cfg)
+
+    if not cfg.key_name:
         sys.exit("KEY_NAME is required (an EC2 key pair name for SSH access).")
 
-    subnet = resolve_subnet(sg)
-
-    ami = os.environ.get("AMI_ID", "").strip()
-    if not ami:
-        ssm_param = os.environ.get("DLAMI_SSM_PARAM", DEFAULT_DLAMI_SSM_PARAM)
-        ami = f"resolve:ssm:{ssm_param}"
+    subnet = resolve_subnet(cfg, sg)
+    ami = cfg.ami or f"resolve:ssm:{cfg.dlami_ssm_param}"
 
     # Fold subnet + security group + public-IP request into a single primary NIC.
     # AWS forbids combining --associate-public-ip-address (or this NIC form) with
@@ -154,9 +563,9 @@ def launch_instance(instance_type, use_spot, wait):
     cmd = [
         "ec2", "run-instances",
         "--image-id", ami,
-        "--instance-type", instance_type,
+        "--instance-type", cfg.instance_type,
         "--count", "1",
-        "--key-name", key_name,
+        "--key-name", cfg.key_name,
         "--iam-instance-profile", f"Name={profile}",
         # Enforce IMDSv2 (imdslib.sh requests a token).
         "--metadata-options", "HttpTokens=required,HttpEndpoint=enabled",
@@ -177,13 +586,8 @@ def launch_instance(instance_type, use_spot, wait):
 
     cmd += ["--query", "Instances[0].InstanceId", "--output", "text"]
 
-    try:
-        r = aws(cmd)
-    except subprocess.CalledProcessError as e:
-        sys.exit(f"run-instances failed: {(e.stderr or '').strip()}")
-
-    instance_id = (r.stdout or "").strip()
-    print(f"launched: {instance_id}  ({instance_type}, {'spot' if use_spot else 'on-demand'})")
+    instance_id = aws_text(cmd)
+    print(f"launched: {instance_id}  ({cfg.instance_type}, {'spot' if use_spot else 'on-demand'})")
 
     if not wait:
         print("Tip: pass --wait to block until running and print the public IP + next steps.")
@@ -191,33 +595,37 @@ def launch_instance(instance_type, use_spot, wait):
 
     print("waiting for running state...")
     aws(["ec2", "wait", "instance-running", "--instance-ids", instance_id], capture=False)
-    r = aws([
+    public_ip = aws_text([
         "ec2", "describe-instances", "--instance-ids", instance_id,
         "--query", "Reservations[0].Instances[0].PublicIpAddress", "--output", "text",
     ])
-    public_ip = (r.stdout or "").strip()
-    if not public_ip or public_ip == "None":
+    if not public_ip:
         print("\nInstance is running but has no public IP. The chosen subnet is "
               "likely private (no internet gateway route). Set SUBNET_ID to a "
               "public subnet and relaunch.")
         return
     print(f"\npublic ip: {public_ip}\n")
-    print("next steps:")
-    print(f"  SSH_HOST={public_ip} deploy/aws/setup_strimserver")
-    print(f"  # or add '{public_ip} strimserver' to /etc/hosts, then run deploy/aws/setup_strimserver\n")
+    post_launch(cfg, public_ip, project)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Launch a strimserver GPU instance (no launch template).")
     parser.add_argument(
-        "--type", default=os.environ.get("INSTANCE_TYPE", "g6.xlarge"),
+        "--type", default=os.environ.get("INSTANCE_TYPE", "g4dn.xlarge"),
         help="EC2 instance type (default g6.xlarge: T4/sm_75, matches the default FFmpeg build)")
     parser.add_argument("--no-spot", action="store_true",
                         help="Use an on-demand instance instead of spot.")
-    parser.add_argument("--wait", action="store_true",
-                        help="Wait for running state and print the public IP + next steps.")
+    parser.add_argument(
+        "--wait", action="store_true",
+        help="Wait for running state, print the public IP + next steps, offer to "
+             "upsert the IP/hostname pair into /etc/hosts, then offer to exec "
+             "into setup_strimserver (replacing this process).")
     args = parser.parse_args()
 
-    launch_instance(instance_type=args.type, use_spot=not args.no_spot, wait=args.wait)
+    cfg = Config.from_env(instance_type=args.type)
+    try:
+        launch_instance(cfg, use_spot=not args.no_spot, wait=args.wait)
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"aws call failed: {(e.stderr or '').strip() or e}")
 

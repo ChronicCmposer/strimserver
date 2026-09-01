@@ -5,3 +5,5 @@ test --test_output=errors
 test --test_summary=terse
 
 common --noenable_workspace
+
+build --disk_cache=~/.cache/strimserver-bazel-cache
