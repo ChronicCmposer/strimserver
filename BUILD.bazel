@@ -101,7 +101,7 @@ pkg_tar(
         ":bundle_openssh_rpm",
         ":bundle_scripts",
     ],
-    out = "strimserver-deployment.tar",
+    out = "strimserver-deployment.unchecked.tar",
 )
 
 genrule(
@@ -110,7 +110,7 @@ genrule(
         ":_strimserver_deployment_tar_unchecked",
         ":check_no_twitch_key",
     ],
-    outs = ["strimserver-deployment.checked.tar"],
+    outs = ["strimserver-deployment.tar"],
     cmd = "cp $(location :_strimserver_deployment_tar_unchecked) $@",
 )
 
@@ -133,7 +133,7 @@ filegroup(
 
 sh_binary(
     name = "release",
-    srcs = ["release.sh"],
+    srcs = ["scripts/release.sh"],
     data = [
         ":strimserver_deployment_tar",
         "//tools/streamdeck-plugin:streamdeck_plugin_bundle",
@@ -148,7 +148,7 @@ sh_binary(
 
 sh_binary(
     name = "publish_strimserver",
-    srcs = ["publish_strimserver.sh"],
+    srcs = ["scripts/publish_strimserver.sh"],
     data = [
         ":_strimserver_deployment_tar_unchecked",
         "//tools/streamdeck-plugin:streamdeck_plugin_bundle",
@@ -171,7 +171,7 @@ sh_binary(
 # object keys as the individual targets (bucket root); see publish_all.sh.
 sh_binary(
     name = "publish_all",
-    srcs = ["publish_all.sh"],
+    srcs = ["scripts/publish_all.sh"],
     data = [
         ":_strimserver_deployment_tar_unchecked",
         "//tools/bandwidth-test:iperf3_deployment_tar",
@@ -184,5 +184,15 @@ sh_binary(
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz)",
         "$(rootpath //tools/bandwidth-test:iperf3_deployment_tar)",
     ],
+    visibility = ["//visibility:public"],
+)
+
+# `bazel run //:bump_version -- patch` -- bumps the latest vX.Y.Z git tag
+# (`make bump-version LEVEL=patch`). Tag-based versioning: git tags are the
+# source of truth (no VERSION file). Reads git directly from the repo root;
+# no data/args.
+sh_binary(
+    name = "bump_version",
+    srcs = ["scripts/bump-version.sh"],
     visibility = ["//visibility:public"],
 )

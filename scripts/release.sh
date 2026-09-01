@@ -21,4 +21,9 @@ echo "Packaged: $tar"
 echo "Stream Deck plugin: $streamdeck"
 echo "Stream Deck plugin (tar.gz): $streamdeck_gz"
 
+if ! gh release view "$git_tag" >/dev/null 2>&1; then
+   echo "Release $git_tag does not exist; creating it" >&2
+   gh release create "$git_tag" --title "$git_tag" --generate-notes
+fi
+
 gh release upload "$git_tag" "$tar" "$streamdeck" "$streamdeck_gz" --clobber

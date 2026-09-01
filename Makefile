@@ -9,7 +9,7 @@ S3_BUCKET ?=s3://<bucket-name>
 .DEFAULT_GOAL := package
 
 .PHONY: prepare generate check-generated controller test-controller package release \
-	check-no-twitch-key publish-all publish-strimserver publish-iperf3 publish-streamdeck
+	bump-version check-no-twitch-key publish-all publish-strimserver publish-iperf3 publish-streamdeck
 
 # Bootstrap: copy the example env into place for the first local checkout
 # (never overwrite an existing, possibly customized, core/strimserver.env).
@@ -39,6 +39,15 @@ package:
 GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null)
 release:
 	GIT_TAG=$(GIT_TAG) bazel run //:release
+
+# Bump the latest vX.Y.Z git tag and push it (tag-based versioning; git tags
+# are the source of truth). Guards: clean tree, on `dev`, synced with
+# origin/dev, and the tag must be on the origin/dev or origin/release/* line.
+bump-version:
+	@if [ -z "$(LEVEL)" ]; then \
+	  echo "usage: make bump-version LEVEL=major|minor|patch" >&2; exit 1; \
+	fi
+	bazel run //:bump_version -- "$(LEVEL)"
 
 # Publish everything to S3 in one bazel run: the strimserver deployment tar,
 # the Stream Deck plugin bundle (.zip + .tar.gz), and the iperf3 bundle.

@@ -15,3 +15,6 @@ tools/ffmpeg-dist/1
 # python caches / local-only obs paths
 deploy/aws/__pycache__/
 tools/local-obs/
+
+# Local implementation plans — throwaway working docs; not part of the repo.
+plans/

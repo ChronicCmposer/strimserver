@@ -501,7 +501,7 @@ facade and the underlying `bazel` command it runs):
 
 ```bash
 # A) Build a redistributable bundle + SHA-256 locally (no upload).
-#    Output: bazel-bin/strimserver-deployment.checked.tar(.sha256)
+#    Output: bazel-bin/strimserver-deployment.tar(.sha256)
 make package
 bazel build //:package
 
@@ -591,6 +591,44 @@ make generate          # bazel run //core/controller:generate -- regenerate stri
 make check-generated   # bazel test //core/controller:generate_test -- fail if those files are stale in git
 make publish-iperf3    # bazel run //tools/bandwidth-test:publish_iperf3 -- build and publish the iperf3 bandwidth-test bundle to S3
 ```
+
+### Versioning and releases
+
+Git tags (`vX.Y.Z`) are the source of truth for the release
+version — there is no `VERSION` file. `make release` /
+`bazel run //:release` reads the current tag via `git describe
+--tags --exact-match`, so a release is always attached to an
+existing, pushed tag.
+
+Bump the latest tag and push it in one step:
+
+```bash
+make bump-version LEVEL=patch    # v1.0.3 -> v1.0.4
+make bump-version LEVEL=minor    # v1.0.3 -> v1.1.0
+make bump-version LEVEL=major    # v1.0.3 -> v2.0.0
+```
+
+(`bazel run //:bump_version -- patch` is the underlying command.)
+The script validates `LEVEL` (`major|minor|patch`), finds the
+highest existing `vX.Y.Z` tag, and refuses to run unless:
+
+- the working tree is clean (`git status --porcelain` is empty);
+- you are on the `dev` branch;
+- local `dev` is synced with `origin/dev`;
+- the tag being bumped from is on the `origin/dev` or
+  `origin/release/*` line — so a release line can't be forked
+  off an arbitrary branch.
+
+The very first tag must be created manually — there is nothing
+to bump from yet:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+Then `make release GIT_TAG=v1.0.0` (or `bazel run //:release`)
+attaches the deployment bundle + checksum (and the Stream Deck
+plugin bundles) to the GitHub release.
 
 On non-x86_64 hosts, `make test-controller` additionally
 requires `qemu-user`/`qemu-user-binfmt` to be installed and
