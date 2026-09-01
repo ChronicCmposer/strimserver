@@ -1,10 +1,9 @@
 """Extracts a single file, preserving its mode, from a deb package's
 :data content tar (see @rules_distroless//apt). Used to hand-pick exactly
-the files the scratch images need, matching core/Dockerfile's and
-core/controller/Dockerfile's explicit `COPY --from=libs <one file>` lines,
-without pulling in a package's full (sometimes surprisingly large, and not
-necessarily relevant -- see nice's actual ldd vs coreutils' apt Depends:)
-transitive closure for a single binary or .so.
+the files the FROM-scratch rules_oci images need out of the @trixie apt
+snapshot (MODULE.bazel), without pulling in a package's full (sometimes
+surprisingly large, and not necessarily relevant -- see nice's actual ldd
+vs coreutils' apt Depends:) transitive closure for a single binary or .so.
 """
 
 def deb_file(name, data, path, out = None):

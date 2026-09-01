@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Replicates core/Dockerfile's ffmpeg RUN smoke test (lines 217-222), which
-# only ran as a Docker build layer and would otherwise be dropped once the
-# image is assembled by Bazel instead of `docker build`. Also asserts every
-# DT_NEEDED soname of /ffmpeg is packaged -- the hand-picked .so set is easy
-# to get subtly wrong, and the Dockerfile had no such check.
+# Replicates the ffmpeg RUN smoke test the old Dockerfile ran as a build
+# layer, which would otherwise be dropped now that the image is assembled by
+# Bazel instead of `docker build`. Also asserts every DT_NEEDED soname of
+# /ffmpeg is packaged -- the hand-picked .so set is easy to get subtly
+# wrong, and the old Dockerfile had no such check.
 set -euo pipefail
 
 tar="$1"

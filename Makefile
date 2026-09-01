@@ -1,18 +1,18 @@
-# Thin facade over the Bazel build (see plans/buildkit-to-bazel-migration.md
-# and MODULE.bazel/BUILD.bazel). Kept for muscle memory; `bazel` is the real
-# build system now -- run its targets directly for anything not covered here.
+# Thin facade over the Bazel build (see MODULE.bazel/BUILD.bazel). Kept for
+# muscle memory; `bazel` is the real build system now -- run its targets
+# directly for anything not covered here.
 
 S3_BUCKET ?=s3://<bucket-name>
 
--include feature-toggles.env
-
-ENABLE_EXPERIMENTAL_OPENSSH	?=false
-BAZEL_OPENSSH_FLAG := --//:enable_experimental_openssh=$(subst ",,$(ENABLE_EXPERIMENTAL_OPENSSH))
-
 .DEFAULT_GOAL := package
 
-.PHONY: generate check-generated controller test-controller package release \
+.PHONY: prepare generate check-generated controller test-controller package release \
 	check-no-twitch-key publish-strimserver publish-iperf3
+
+# Bootstrap: copy the example env into place for the first local checkout
+# (never overwrite an existing, possibly customized, core/strimserver.env).
+prepare:
+	if [ ! -f core/strimserver.env ]; then cp core/strimserver.env.example core/strimserver.env; fi
 
 generate:
 	bazel run //core/controller:generate
@@ -30,19 +30,19 @@ check-no-twitch-key:
 	bazel build //:check_no_twitch_key
 
 package:
-	bazel build $(BAZEL_OPENSSH_FLAG) //:package
+	bazel build //:package
 
 # Attach the bundle + checksum to an existing tag's GitHub Release.
 # Requires the GitHub CLI (`gh auth login`).
 GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null)
 release:
-	GIT_TAG=$(GIT_TAG) bazel run $(BAZEL_OPENSSH_FLAG) //:release
+	GIT_TAG=$(GIT_TAG) bazel run //:release
 
 publish-strimserver:
-# --//:offline_segment now defaults to the S3-fetched clip (MODULE.bazel's
-# s3_http_file(offline_segment_dist)); override with a locally-generated clip via
-# --//:offline_segment=//local/video:my_local_clip
-	S3_BUCKET=$(S3_BUCKET) bazel run $(BAZEL_OPENSSH_FLAG) //:publish_strimserver
+# The offline fallback clip is bundled directly from MODULE.bazel's
+# s3_http_file(offline_segment_dist); regenerate + republish a new clip via
+# tools/brb-screen/publish.sh.
+	S3_BUCKET=$(S3_BUCKET) bazel run //:publish_strimserver
 
 publish-iperf3:
 	S3_BUCKET=$(S3_BUCKET) bazel run //tools/bandwidth-test:publish_iperf3

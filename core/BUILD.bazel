@@ -28,19 +28,19 @@ write_source_files(
 )
 
 # =============================================================================
-# mediamtx image (FROM scratch). Ports core/Dockerfile's `mediamtx` target
-# (lines 226-261). The ffmpeg image lives right below, assembled from the
-# pinned @ffmpeg_dist artifact; libfdk-aac is ffmpeg-only and isn't needed
-# here.
+# mediamtx image (FROM scratch). Assembled by rules_oci from the pinned
+# @mediamtx_dist tarball plus Debian trixie donor packages from @trixie (the
+# apt extension in MODULE.bazel). The ffmpeg image lives right below,
+# assembled from the pinned @ffmpeg_dist artifact; libfdk-aac is ffmpeg-only
+# and isn't needed here.
 # =============================================================================
 
-# The mediamtx binary is linux/amd64. core/Dockerfile's mediamtx-fetch stage
-# stripped it inside an amd64 container; here the host `strip` is used, which
-# cannot cross-strip (e.g. an amd64 binary on an arm64 build host -- the
-# Dockerfile's binutils was amd64-native). Stripping is a pure size
-# optimization for this static Go binary, so on a cross-arch host we skip it
-# with a loud note instead of failing the whole build; the amd64 bytes are
-# otherwise identical, and the smoke test does not depend on stripping.
+# The mediamtx binary is linux/amd64. Stripping is done with the host `strip`,
+# which cannot cross-strip (e.g. an amd64 binary on an arm64 build host).
+# Stripping is a pure size optimization for this static Go binary, so on a
+# cross-arch host we skip it with a loud note instead of failing the whole
+# build; the amd64 bytes are otherwise identical, and the smoke test does not
+# depend on stripping.
 genrule(
     name = "mediamtx_bin_stripped",
     srcs = ["@mediamtx_dist//:mediamtx"],
@@ -224,10 +224,10 @@ sh_test(
 )
 
 # =============================================================================
-# ffmpeg image (FROM scratch). Ports core/Dockerfile's `ffmpeg` target (lines
-# 184-222). The binary comes from the pinned, checksummed @ffmpeg_dist
-# artifact (built out-of-band by tools/ffmpeg-dist/publish.sh); the runtime
-# debs below (libc6 set + libfdk-aac2t64) serve both images.
+# ffmpeg image (FROM scratch). The binary comes from the pinned, checksummed
+# @ffmpeg_dist artifact (built out-of-band by tools/ffmpeg-dist/publish.sh);
+# the runtime debs below (libc6 set + libfdk-aac2t64) come from the @trixie
+# apt snapshot and serve both images.
 # =============================================================================
 
 deb_file(
@@ -258,7 +258,7 @@ deb_file(
 # deb_file (tar -xzf of a single member + cp -p) cannot copy a dangling symlink
 # (the target member is not extracted). Extract the real versioned file here and
 # recreate the soname symlink in :ffmpeg_files_tar -- matching the Debian
-# package layout (and core/Dockerfile's COPY of the symlink).
+# package layout (and the soname symlink the Debian package ships).
 deb_file(
     name = "libfdk_aac_real",
     data = "@trixie//libfdk-aac2t64/amd64:data",

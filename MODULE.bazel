@@ -1,4 +1,4 @@
-"""strimserver: five OCI images + a Stream Deck plugin, built with Bazel."""
+"""strimserver: four OCI images + a Stream Deck plugin, built with Bazel."""
 
 module(
     name = "strimserver",
@@ -19,20 +19,6 @@ bazel_dep(name = "rules_pkg", version = "1.3.0")
 bazel_dep(name = "aspect_rules_js", version = "3.4.1")
 bazel_dep(name = "aspect_rules_ts", version = "3.10.1")
 
-# aspect_rules_js 3.4.1's npm_translate_lock bzlmod extension has a bug:
-# _npm_translate_lock_bzlmod unconditionally reads attr.pnpm_lock.repo_name
-# to compute link_workspace, crashing with "'NoneType' value has no field or
-# method 'repo_name'" for any npm_translate_lock configured with
-# npm_package_lock (this repo's case) or yarn_lock instead of pnpm_lock.
-# Verified against the pristine 3.4.1 release source, not just the fetched
-# copy. Patches the same bug fixed upstream would need: read whichever lock
-# attribute is actually set.
-single_version_override(
-    module_name = "aspect_rules_js",
-    version = "3.4.1",
-    patches = ["//tools/bazel/patches:aspect_rules_js_npm_package_lock_link_workspace.patch"],
-    patch_strip = 1,
-)
 bazel_dep(name = "rules_nodejs", version = "6.7.3")
 
 # aspect_bazel_lib's own MODULE.bazel unconditionally registers a bats-core
@@ -43,9 +29,9 @@ bazel_dep(name = "rules_nodejs", version = "6.7.3")
 # out rather than let an unused toolchain block every build.
 single_version_override(
     module_name = "aspect_bazel_lib",
-    version = "2.22.5",
-    patches = ["//tools/bazel/patches:aspect_bazel_lib_no_bats.patch"],
     patch_strip = 1,
+    patches = ["//tools/bazel/patches:aspect_bazel_lib_no_bats.patch"],
+    version = "2.22.5",
 )
 
 # aspect_bazel_lib depends on its own renamed successor module, which
@@ -56,9 +42,9 @@ single_version_override(
 # has to track whatever the highest real requirement in the graph is.
 single_version_override(
     module_name = "bazel_lib",
-    version = "3.7.0",
-    patches = ["//tools/bazel/patches:bazel_lib_no_bats.patch"],
     patch_strip = 1,
+    patches = ["//tools/bazel/patches:bazel_lib_no_bats.patch"],
+    version = "3.7.0",
 )
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
@@ -79,91 +65,111 @@ use_repo(
 # golangci-lint pinned as a downloaded release tarball (checksummed) instead
 # of `go install`ed over the network on every lint-enabled build.
 #
-# core/controller/Dockerfile:29 (and feature-toggles.env's ENABLE_LINT path)
-# pins v1.64.8, but that predates Go 1.26 entirely: golangci-lint refuses to
-# analyze a go.mod declaring a newer Go version than it was built with, so
-# v1.64.8 cannot lint this module's `go 1.26.4` (verified: it fails with
-# "the Go language version (go1.24) ... is lower than the targeted Go version
-# (1.26.4)"). golangci-lint v1 stopped at v1.64.8; v2+ is a different module
-# path (github.com/golangci/golangci-lint/v2) with a new config schema, so
-# picking up Go 1.26 support means moving to v2 -- see the "version: 2" line
-# added to .golangci.yml alongside this pin.
+# v2.13.2 (module path github.com/golangci/golangci-lint/v2) is required: the
+# old v1 line stopped at v1.64.8 and refuses to analyze a go.mod declaring a
+# newer Go version than it was built with, so it cannot lint this module's
+# `go 1.26.4`. See the "version: 2" line added to .golangci.yml alongside
+# this pin.
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
 s3_http_archive = use_repo_rule("//tools/bazel:s3_download.bzl", "s3_http_archive")
+
 s3_http_file = use_repo_rule("//tools/bazel:s3_download.bzl", "s3_http_file")
 
 http_archive(
     name = "golangci_lint_linux_amd64",
-    url = "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-amd64.tar.gz",
+    build_file_content = "exports_files([\"golangci-lint\"])",
     sha256 = "2277d43b98ec0054280f2ac26b53268bae97682444678a59a657dd565da021d6",
     strip_prefix = "golangci-lint-2.13.2-linux-amd64",
-    build_file_content = "exports_files([\"golangci-lint\"])",
+    url = "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-amd64.tar.gz",
 )
 
 # --- Debian donor packages for the FROM-scratch images ----------------------
-# Matches core/Dockerfile's and core/controller/Dockerfile's `libs` stages
-# (both `debian:trixie-20260824-slim`). Pinned to a snapshot.debian.org
-# timestamp near that image's build date instead of a rolling mirror, per
-# rules_distroless's own reproducibility guidance.
+# The runtime debs below come from a snapshot.debian.org timestamp instead of
+# a rolling mirror, per rules_distroless's own reproducibility guidance.
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
-
 apt.sources_list(
+    architectures = ["amd64"],
+    components = [
+        "main",
+        "contrib",
+        "non-free",
+        "non-free-firmware",
+    ],
+    suites = ["trixie"],
     types = ["deb"],
     uris = ["https://snapshot.debian.org/archive/debian/20260824T082821Z"],
-    suites = ["trixie"],
-    components = ["main", "contrib", "non-free", "non-free-firmware"],
-    architectures = ["amd64"],
 )
-
 apt.install(
     dependency_set = "trixie",
-    suites = ["trixie"],
     packages = [
-        # core/controller/Dockerfile's libs stage.
+        # Runtime shell for the controller image.
         "dash",
-        # core/Dockerfile's libs stage. These runtime debs now serve BOTH
-        # FROM-scratch images: the ffmpeg image (assembled from the pinned
-        # @ffmpeg_dist artifact below -- libfdk-aac2t64 resolves because the
-        # sources_list above already declares non-free) and the mediamtx image.
+        # Runtime debs for the ffmpeg and mediamtx images (libfdk-aac2t64
+        # resolves because the sources_list above already declares non-free).
         "busybox-static",
         "gettext-base",
         "ca-certificates",
         "libfdk-aac2t64",
         # glibc (ld-linux, libc/libm/libpthread/libresolv.so) and nice (a
-        # coreutils binary the base debian:trixie-slim image ships
-        # pre-installed, so the Dockerfile never apt-get installs it
-        # explicitly -- Bazel has to ask for it by name).
+        # coreutils binary a debian:trixie-slim image ships pre-installed;
+        # Bazel has to ask for it by name).
         "libc6",
         "coreutils",
     ],
+    suites = ["trixie"],
 )
-
 use_repo(apt, "trixie")
 
+# --- iperf3 image (rules_oci, keeping the alpine base) ----------------------
+# Bazel assembles the image from the digest-pinned alpine base plus two tar
+# layers (see tools/bandwidth-test/BUILD.bazel). fish is dropped: the
+# entrypoint only runs `iperf3 -s`, and fish's closure would add 5 packages.
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+oci.pull(
+    name = "alpine",
+    digest = "sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659",
+    image = "docker.io/library/alpine",
+    platforms = ["linux/amd64"],
+)
+use_repo(oci, "alpine", "alpine_linux_amd64")
+
+# The iperf3 package (3.19.1-r1) as a single .apk. Its only runtime deps
+# (musl, libcrypto.so.3) are already in the alpine base, so one apk + the base
+# is the whole closure; the genrule in tools/bandwidth-test/BUILD.bazel
+# extracts the apk's data.tar.gz payload into the image's first layer.
+http_file(
+    name = "iperf3_apk",
+    sha256 = "c8fa78ac30761d2dc47d5db7b9056a3b5cfdd565af173a4be1e4449a6b7fd664",
+    urls = ["https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/iperf3-3.19.1-r1.apk"],
+)
+
 # --- MediaMTX ----------------------------------------------------------
-# core/Dockerfile:142,150 fetched this with a bare `wget` and no checksum
-# (bug #8) -- http_archive requires one, closing that gap.
+# Fetched via http_archive so the binary download is checksummed (a bare
+# `wget` would not verify it).
 http_archive(
     name = "mediamtx_dist",
-    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.17.0/mediamtx_v1.17.0_linux_amd64.tar.gz",
-    sha256 = "97165888845f3a0a9bfeaa4b34bd19d72aa3f8d9abd39f9a02042c9fa434fb5a",
     build_file_content = "exports_files([\"mediamtx\"])",
+    sha256 = "97165888845f3a0a9bfeaa4b34bd19d72aa3f8d9abd39f9a02042c9fa434fb5a",
+    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.17.0/mediamtx_v1.17.0_linux_amd64.tar.gz",
 )
 
 # --- FFmpeg -------------------------------------------------------------
 # The ffmpeg binary is built out-of-band by tools/ffmpeg-dist/publish.sh
-# (compiling FFmpeg against CUDA needs nvcc, not a GPU -- see
-# plans/ffmpeg-prebuilt-artifact.md). S3 is the canonical source; the GitHub
-# Release asset is a mirror. The sha256 is the integrity pin. The S3 bucket
-# and region come from the STRIMSERVER_S3_BUCKET / STRIMSERVER_S3_REGION env
-# vars (no committed defaults); when they are unset, the GitHub Release
-# mirror below is used.
+# (compiling FFmpeg against CUDA needs nvcc, not a GPU; see README.md's
+# "FFmpeg reproducibility and artifact pipeline" section). S3 is the
+# canonical source; the GitHub Release asset is a mirror. The sha256 is the
+# integrity pin. The S3 bucket and region come from the STRIMSERVER_S3_BUCKET
+# / STRIMSERVER_S3_REGION env vars (no committed defaults); when they are
+# unset, the GitHub Release mirror below is used.
 s3_http_archive(
     name = "ffmpeg_dist",
+    build_file_content = 'exports_files(["ffmpeg", "BUILD-INFO.txt"])',
+    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/ffmpeg-artifacts/ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz"],
     s3_key = "ffmpeg/ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz",
     sha256 = "2df93667c7e12f2666be244772a41c653a02cab74880e685623770bd9c86ac34",
-    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/ffmpeg-artifacts/ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz"],
-    build_file_content = 'exports_files(["ffmpeg", "BUILD-INFO.txt"])',
 )
 
 # --- Offline fallback segment ----------------------------------------------
@@ -176,38 +182,50 @@ s3_http_archive(
 # bucket and region come from the STRIMSERVER_S3_BUCKET / STRIMSERVER_S3_REGION
 # env vars (no committed defaults); when they are unset, the GitHub Release
 # mirror below is used.
-# Pin updated by running the two-phase publish; see
-# plans/buildkit-to-bazel-migration.md and README.
+# Pin updated by running the two-phase publish; see README's Build
+# instructions.
 s3_http_file(
     name = "offline_segment_dist",
+    downloaded_file_name = "strimserver-offline-2160p60.mp4",
+    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/offline-segment/strimserver-offline-2160p60.mp4"],
     s3_key = "offline/strimserver-offline-2160p60.mp4",
     sha256 = "05ff15e41a61e9478b005135699a130e21a7efab21b6a1bcae1aa30bd3182f7d",
-    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/offline-segment/strimserver-offline-2160p60.mp4"],
-    downloaded_file_name = "strimserver-offline-2160p60.mp4",
+)
+
+# --- OpenSSH RPM -----------------------------------------------------------
+# The experimental OpenSSH RPM is built out-of-band by tools/openssh/build.sh
+# inside an amazonlinux:2023 chroot run by tools/openssh/publish.sh (the
+# rpmbuild pipeline cannot be expressed in rules_oci -- the same reason
+# @ffmpeg_dist is prebuilt); on non-amd64 hosts the chroot runs under a
+# buildkit-direct-execve patched qemu-x86_64 pinned to qemu 9.2.4. S3 is the
+# canonical source; the GitHub Release asset (tag openssh-dist) is a mirror.
+# The sha256 is the integrity pin. The S3 bucket and region come from the
+# STRIMSERVER_S3_BUCKET / STRIMSERVER_S3_REGION env vars (no committed
+# defaults); when they are unset, the GitHub Release mirror below is used.
+s3_http_file(
+    name = "openssh_dist",
+    downloaded_file_name = "openssh-experimental.rpm",
+    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental.rpm"],
+    s3_key = "openssh/openssh-experimental.rpm",
+    sha256 = "d3d1a2775eb8ee694bfd9b7a704594121743b30d397d0d726d9a2fd8ddad6deb",
 )
 
 # --- Stream Deck plugin (rollup) ------------------------------------------
-# node_version_from_nvmrc can't parse tools/streamdeck-plugin/.nvmrc's bare
-# major-version-only content ("24", a form nvm/fnm both accept and resolve
-# to the latest matching release, but rules_nodejs's own parser requires a
-# full major.minor.patch and crashes on anything less specific). Pinned
-# explicitly instead of changing a file real developers run `nvm use`
-# against; matches .nvmrc's own major version and package.json's ">=24".
+# Node version comes from tools/streamdeck-plugin/.nvmrc via
+# node_version_from_nvmrc (rules_nodejs 6.7.3 supports it; its
+# _verify_version_is_valid requires a full major.minor.patch, so .nvmrc now
+# carries "24.13.0" rather than a bare major like "24"). Matches
+# package.json's ">=24".
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
-node.toolchain(node_version = "24.13.0")
+node.toolchain(node_version_from_nvmrc = "//tools/streamdeck-plugin:.nvmrc")
 
-# npm_translate_lock's npm_package_lock path has real bugs in 3.4.1 (see the
-# patch above) and appears to be a much less exercised code path than
-# pnpm_lock -- hit a second, distinct failure (node_modules/typescript,
-# tslib, and @types/node link targets pointing at files that were never
-# actually populated) after patching the first. Rather than keep patching an
-# upstream ecosystem this deep, generated tools/streamdeck-plugin/pnpm-lock.yaml
-# from the committed package-lock.json via `pnpm import` (a standard,
-# non-destructive, lossless conversion -- verified the package/version graph
-# is identical) and used the well-supported pnpm_lock path instead.
-# package-lock.json stays as the source of truth for plain `npm install`/
-# `npm run build`; pnpm-lock.yaml is Bazel-only and regenerated the same way
-# whenever package-lock.json changes.
+# npm_translate_lock uses pnpm_lock (pnpm-lock.yaml) because aspect_rules_js
+# 3.4.1's npm_package_lock path is broken in two distinct ways: the bzlmod
+# extension crashes on npm_package_lock, and even patched, the link targets
+# for node_modules/typescript, tslib, and @types/node point at files that are
+# never populated. pnpm_lock is the well-supported path. The lockfile is
+# generated from package.json via `pnpm import` (the npm lockfile was deleted
+# when the plugin consolidated on pnpm alone).
 npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
 npm.npm_translate_lock(
     name = "npm",

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# The controller's runtime Dockerfile stage never had a RUN smoke test (only
-# the mediamtx/ffmpeg targets in core/Dockerfile did), but since the binary
-# is genuinely runnable without a live containerd socket via its codegen
-# flags, this exercises the assembled image's exact file layout the same way.
+# The controller's runtime image never had a RUN smoke test (only the
+# mediamtx/ffmpeg targets in the old Dockerfile did), but since the
+# binary is genuinely runnable without a live containerd socket via its
+# codegen flags, this exercises the assembled image's exact file layout the
+# same way.
 set -euo pipefail
 
 tar="$1"

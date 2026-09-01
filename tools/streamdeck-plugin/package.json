@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Stream Deck control for the strimserver controller",
   "type": "module",
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c -w"

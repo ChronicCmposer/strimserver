@@ -6,7 +6,7 @@
 # opens an issue rather than only going red, so it is actually noticed. The
 # Tier 2 fallback -- compare a semantic fingerprint instead (`ffmpeg
 # -buildconf`, the `readelf -d` NEEDED set, and the `-encoders` / `-filters`
-# lists) -- is documented in plans/ffmpeg-prebuilt-artifact.md.
+# lists) -- is documented in README.md (#ffmpeg-reproducibility-and-artifact-pipeline).
 #
 # The build needs no GPU: nvcc compiles and never runs on a GPU, so the
 # github-hosted ubuntu-latest runner (amd64) is sufficient: publish.sh runs
@@ -73,4 +73,4 @@ jobs:
               '' \
               'This is the Tier 1 (bit-identical) canary failing. Before relaxing anything, check whether the recipe itself drifted (FFmpeg point release, nv-codec-headers tag, Debian snapshot, or CUDA redistributable).' \
               '' \
-              'Tier 2 fallback (documented in plans/ffmpeg-prebuilt-artifact.md): compare a semantic fingerprint instead -- `ffmpeg -buildconf`, the `readelf -d` NEEDED set, and the `-encoders` / `-filters` lists. Weaker, but still catches a pin drift that silently drops libfdk_aac.')"
+              'Tier 2 fallback (documented in README.md, #ffmpeg-reproducibility-and-artifact-pipeline): compare a semantic fingerprint instead -- `ffmpeg -buildconf`, the `readelf -d` NEEDED set, and the `-encoders` / `-filters` lists. Weaker, but still catches a pin drift that silently drops libfdk_aac.')"

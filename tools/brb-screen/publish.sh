@@ -22,7 +22,7 @@
 #
 # The mp4 is uploaded to $S3_BUCKET/offline/ with no ACL modification
 # (objects get the bucket's default private ACL; the IP-scoped HTTPS-only
-# bucket policy from bucket-cidr-policy.sh is the only access gate), then the
+# bucket policy from scripts/bucket-cidr-policy.sh is the only access gate), then the
 # s3_http_file block is printed for MODULE.bazel (name = "offline_segment_dist")
 # along with the `gh release upload` command for the GitHub Release mirror.
 #

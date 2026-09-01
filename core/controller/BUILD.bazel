@@ -38,10 +38,10 @@ go_library(
     ],
 )
 
-# Matches core/controller/Dockerfile's
-# `CGO_ENABLED=0 GOOS=linux go build -v -trimpath -ldflags='-s -w'`.
-# -trimpath is a rules_go default; pure=on matches CGO_ENABLED=0 (verified:
-# no `import "C"` and no os/user anywhere in this package).
+# Built as a pure-Go static linux/amd64 binary: pure=on matches the old
+# CGO_ENABLED=0 (verified: no `import "C"` and no os/user anywhere in this
+# package); -trimpath is a rules_go default; the old -ldflags='-s -w' becomes
+# gc_linkopts below.
 go_binary(
     name = "strimserver-controller",
     embed = [":controller_lib"],
@@ -105,7 +105,7 @@ test_suite(
 # --- Lint --------------------------------------------------------------
 # golangci-lint pinned as a downloaded, checksummed Bazel tool (see
 # @golangci_lint_linux_amd64 in MODULE.bazel) instead of `go install`ed over
-# the network on every lint-enabled image build (core/controller/Dockerfile:29).
+# the network on every lint-enabled build.
 
 go_bin(name = "go_bin")
 
@@ -134,8 +134,8 @@ sh_test(
 )
 
 # =============================================================================
-# controller image (FROM scratch). Ports core/controller/Dockerfile's
-# `runtime` target (lines 44-55).
+# controller image (FROM scratch). Assembled by rules_oci from the Go binary
+# plus dash + libc6 donor packages from the @trixie apt snapshot.
 # =============================================================================
 
 deb_file(

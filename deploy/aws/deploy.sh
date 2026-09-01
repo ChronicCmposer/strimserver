@@ -15,10 +15,6 @@ trap cleanup EXIT INT TERM
 : "${S3_BUCKET:=<S3_BUCKET>}"
 : "${TARGET_HOSTNAME:=strimserver}"
 
-set -a
-. feature-toggles.env
-set +a
-
 # metadata / diagnostics
 source /mnt/nvme/imdslib.sh 
 export PUBLIC_IP=$(get_public_ip)
@@ -111,23 +107,16 @@ rm -f /mnt/nvme/fish-deploy.sh
 printf "installing remaining tools...\n"
 sudo dnf install -y htop
 
-enable_openssh="${ENABLE_EXPERIMENTAL_OPENSSH:-false}"
-enable_openssh="${enable_openssh//\"/}"   # drop double quotes
-enable_openssh="${enable_openssh//\'/}"   # drop single quotes
-enable_openssh="${enable_openssh,,}"      # lowercase (bash 4+)
+# The experimental OpenSSH RPM is always bundled (fetched from the pinned
+# @openssh_dist artifact by the Bazel package build).
+if [ -f /mnt/nvme/openssh-experimental.rpm ]; then
+   sudo dnf install -y /mnt/nvme/openssh-experimental.rpm
+   rm -f /mnt/nvme/openssh-experimental.rpm
 
-if [ "$enable_openssh" = "true" ]; then
-   if [ -f /mnt/nvme/openssh-experimental.rpm ]; then
-      sudo dnf install -y /mnt/nvme/openssh-experimental.rpm
-      rm -f /mnt/nvme/openssh-experimental.rpm
-
-      sudo /usr/local/bin/ssh-keygen -A
-      sudo /usr/local/sbin/sshd
-   else
-      printf "\n*** WARNING: ENABLE_EXPERIMENTAL_OPENSSH is true but\n"
-      printf "openssh-experimental.rpm is not in this bundle; skipping.\n"
-      printf "Rebuild with the toggle enabled so the RPM gets packaged. ***\n\n"
-   fi
+   sudo /usr/local/bin/ssh-keygen -A
+   sudo /usr/local/sbin/sshd
+else
+   printf "\n*** WARNING: openssh-experimental.rpm is not in this bundle; skipping. ***\n\n"
 fi
 
 # put other package installations here

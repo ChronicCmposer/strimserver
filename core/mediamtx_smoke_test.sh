@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Replicates core/Dockerfile's mediamtx RUN smoke test (lines 254-259), which
-# only ran as a Docker build layer and would otherwise be dropped once the
-# image is assembled by Bazel instead of `docker build`.
+# Replicates the mediamtx RUN smoke test the old Dockerfile ran as a
+# build layer, which would otherwise be dropped now that the image is
+# assembled by Bazel instead of `docker build`.
 set -euo pipefail
 
 tar="$1"

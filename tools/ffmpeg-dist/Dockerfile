@@ -7,8 +7,8 @@
 # forwards the pin ARGs as env vars, and exposes the two artifact files via the
 # scratch `out` stage. It is kept as an equivalent alternative for hosts that
 # do have docker; the default path is tools/ffmpeg-dist/publish.sh, which
-# builds the same artifact directly via chroot+qemu with no docker and no
-# buildctl. The sha256 of the resulting tarball is the contract MODULE.bazel
+# builds the same artifact directly via chroot+qemu with no docker. The sha256
+# of the resulting tarball is the contract MODULE.bazel
 # pins against -- both paths must (and do) produce identical output.
 #
 # Pinned inputs (all overridable as --build-arg / env):
@@ -20,7 +20,7 @@
 #   CUDA_COMPONENTS      cuda_nvcc cuda_cudart cuda_crt libnvvm
 #   DEBIAN_SNAPSHOT      20260824T082821Z
 #   GENCODE              arch=compute_75,code=sm_75
-#   NPROC                8
+#   NPROC                host nproc (empty ARG default; build.sh derives it)
 #
 # Output (stage `out`): /out/ffmpeg (stripped) + /out/BUILD-INFO.txt
 # =============================================================================
@@ -39,7 +39,7 @@ ARG CUDA_MANIFEST_URL="https://developer.download.nvidia.com/compute/cuda/redist
 ARG DEBIAN_SNAPSHOT="20260824T082821Z"
 ARG CUDA_COMPONENTS="cuda_nvcc cuda_cudart cuda_crt libnvvm"
 ARG GENCODE="arch=compute_75,code=sm_75"
-ARG NPROC=8
+ARG NPROC=""
 
 # Forward every pin as an env var so the shared build.sh sees them; build.sh
 # applies the same defaults when an ARG is left unset. (Legacy ENV form: the

@@ -7,7 +7,7 @@
 #   * inside a docker build (tools/ffmpeg-dist/Dockerfile is a thin wrapper
 #     that COPYs this file to /build.sh and executes it), and
 #   * inside the chroot that tools/ffmpeg-dist/publish.sh provisions from the
-#     Docker Hub registry API (no docker, no buildctl): the guest executes
+#     Docker Hub registry API (no docker): the guest executes
 #     /build.sh via chroot (+ qemu-x86_64 when the host is not amd64).
 #
 # Every pin is an env var with the same default as the Dockerfile ARG, so a
@@ -24,7 +24,7 @@
 #   DEBIAN_SNAPSHOT        20260824T082821Z
 #   CUDA_COMPONENTS        cuda_nvcc cuda_cudart cuda_crt libnvvm
 #   GENCODE                arch=compute_75,code=sm_75
-#   NPROC                  8
+#   NPROC                  host nproc (env-overridable)
 #
 # Output: /opt/ffmpeg-dist/usr/local/bin/ffmpeg (stripped) +
 #         /opt/ffmpeg-dist/BUILD-INFO.txt
@@ -69,9 +69,9 @@ fi
 : "${DEBIAN_SNAPSHOT:=20260824T082821Z}"
 : "${CUDA_COMPONENTS:=cuda_nvcc cuda_cudart cuda_crt libnvvm}"
 : "${GENCODE:=arch=compute_75,code=sm_75}"
-: "${NPROC:=8}"
+: "${NPROC:=$(nproc)}"
 
-# --- build env (mirrors core/Dockerfile:50-52, minus LD_DEBUG) ---------------
+# --- build env (locale + CUDA paths; LD_DEBUG intentionally omitted) --------
 export DEBIAN_FRONTEND=noninteractive
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
@@ -144,10 +144,12 @@ rm -rf /opt/nv-codec-headers
 git clone --depth 1 --branch "$NV_CODEC_HEADERS_TAG" \
     https://github.com/FFmpeg/nv-codec-headers.git /opt/nv-codec-headers
 git -C /opt/nv-codec-headers checkout "$NV_CODEC_HEADERS_COMMIT"
-make -C /opt/nv-codec-headers install PREFIX=/usr
+make -j"${NPROC}" -C /opt/nv-codec-headers install PREFIX=/usr
 
 # --- Phase 4: FFmpeg at the exact pinned commit (blobless clone), build ------
-# The ./configure flags are copied verbatim from core/Dockerfile:64-128.
+# The ./configure flags below are the frozen contract for the artifact
+# (documented in README.md's "FFmpeg reproducibility and artifact pipeline"
+# section and recorded per-build in BUILD-INFO.txt).
 rm -rf /opt/ffmpeg-src /opt/ffmpeg-dist
 git clone --filter=blob:none --no-checkout \
     https://github.com/FFmpeg/FFmpeg.git /opt/ffmpeg-src
@@ -222,7 +224,7 @@ configure_flags=(
 )
 ./configure "${configure_flags[@]}"
 make -j"${NPROC}"
-make install DESTDIR=/opt/ffmpeg-dist
+make -j"${NPROC}" install DESTDIR=/opt/ffmpeg-dist
 strip /opt/ffmpeg-dist/usr/local/bin/ffmpeg
 /opt/ffmpeg-dist/usr/local/bin/ffmpeg -version >/dev/null
 

@@ -1,26 +1,85 @@
-load("//tools/bazel:buildctl.bzl", "buildctl_build")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files", "strip_prefix")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
-# iperf3 image: `apk add` needs RUN, which rules_oci cannot express any more
-# than the openssh RPM build can -- same buildctl hybrid as
-# //tools/openssh:openssh_rpm. (This comment used to cite
-# //core:ffmpeg_image_tarball too, but that buildctl target was deleted: the
-# ffmpeg image is now assembled by rules_oci from the pinned @ffmpeg_dist
-# artifact.)
-# Single-stage Dockerfile, so no --opt target= (matches the Makefile's
-# `$(call buildctl_oci,$(BANDWIDTH_TEST_DIR),$(IPERF3_IMAGE_NAME),)` --
-# empty third argument).
-buildctl_build(
-    name = "iperf3_image_tarball",
-    dockerfile = "Dockerfile",
+# --- iperf3 image (Bazel-native rules_oci, KEEPING the alpine base) ----------
+# The image is assembled from the digest-pinned alpine base
+# (@alpine_linux_amd64 in MODULE.bazel) plus two tar layers:
+#   1. iperf3_apk_layer.tar -- the iperf3 .apk payload (usr/bin/iperf3 +
+#      usr/lib/libiperf.so.0*), extracted from the pinned @iperf3_apk, and
+#   2. iperf3_env_tar -- the entrypoint + env files at /opt/.
+# fish is dropped entirely: nothing at runtime uses it (entrypoint.sh only
+# runs `iperf3 -s`), and its closure would add 5 packages (~13MB).
+
+# The .apk (Alpine v3.23 format) is a gzipped tar carrying .PKGINFO, a .SIGN*
+# signature, and the payload under usr/. Exclude the metadata members and
+# re-tar the payload into a single layer. The apk's payload is already owned
+# by root:root with correct modes (0755 bin/lib); --owner/--group re-assert
+# root ownership and --sort=name gives deterministic member order.
+genrule(
+    name = "iperf3_apk_layer",
+    srcs = ["@iperf3_apk//file"],
+    outs = ["iperf3_apk_layer.tar"],
+    cmd = """
+      apk="$(location @iperf3_apk//file)"
+      tmp="$$(mktemp -d)"
+      tar -xzf "$$apk" --exclude='.PKGINFO' --exclude='.SIGN*' -C "$$tmp" 2>/dev/null
+      test -f "$$tmp/usr/bin/iperf3" || { echo "error: iperf3 apk extraction produced no usr/bin/iperf3" >&2; exit 1; }
+      tar -cf "$@" --owner=0 --group=0 --numeric-owner --sort=name -C "$$tmp" usr
+      rm -rf "$$tmp"
+    """,
+)
+
+pkg_files(
+    name = "iperf3_entrypoint",
+    srcs = ["entrypoint.sh"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/opt",
+    renames = {"entrypoint.sh": "iperf3-entrypoint.sh"},
+)
+
+pkg_files(
+    name = "iperf3_env",
+    srcs = ["iperf3.env"],
+    attributes = pkg_attributes(mode = "0644"),
+    prefix = "/opt",
+)
+
+pkg_tar(
+    name = "iperf3_env_tar",
     srcs = [
-        "Dockerfile",
-        "entrypoint.sh",
-        "iperf3.env",
+        ":iperf3_entrypoint",
+        ":iperf3_env",
     ],
-    image_name = "docker.io/library/iperf3:latest",
-    output_type = "oci_tar",
-    out = "iperf3-container.tar",
+)
+
+# os/architecture come from the alpine base and cannot be overridden when
+# `base` is set (rules_oci fails on the attempt); the base is amd64, matching
+# .bazelrc's --platforms=//tools/bazel:linux_amd64.
+oci_image(
+    name = "iperf3_image",
+    base = "@alpine_linux_amd64",
+    tars = [
+        ":iperf3_apk_layer",
+        ":iperf3_env_tar",
+    ],
+    entrypoint = ["/opt/iperf3-entrypoint.sh"],
+)
+
+oci_load(
+    name = "iperf3_image_tarball",
+    image = ":iperf3_image",
+    repo_tags = ["docker.io/library/iperf3:latest"],
+)
+
+# Promotes oci_load's named "tarball" output group (the raw OCI tar) into a
+# plain filegroup so the deployment bundle can depend on it normally.
+filegroup(
+    name = "iperf3_image_tar_file",
+    srcs = [":iperf3_image_tarball"],
+    output_group = "tarball",
+    visibility = ["//visibility:public"],
 )
 
 # --- iperf3 standalone deployment bundle (`make publish-iperf3`) -----------
@@ -32,9 +91,6 @@ buildctl_build(
 # imdslib.sh` / `source fish-deploy.sh` lines are generic and work identically
 # against the deploy/aws/ copies (verified: those files have no
 # strimserver-specific content).
-
-load("@rules_pkg//pkg:mappings.bzl", "pkg_files", "strip_prefix")
-load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 
 # All bundle entries land flat at the tar root, matching the Makefile's
 # `tar --transform='s#iperf-deploy\.sh$#deploy.sh#'` (no directory transform
@@ -59,7 +115,7 @@ pkg_files(
 
 pkg_files(
     name = "iperf3_deploy_image",
-    srcs = [":iperf3_image_tarball"],
+    srcs = [":iperf3_image_tar_file"],
     strip_prefix = strip_prefix.files_only(),
 )
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# upload-artifact.sh -- upload the built FFmpeg artifact to S3 so MODULE.bazel's
-# s3_http_archive (name = "ffmpeg_dist") can fetch it. Usage: ./upload-artifact.sh
-# [ARTIFACT] (default: the single ffmpeg-*.tar.gz under tools/ffmpeg-dist/).
+# scripts/upload-artifact.sh -- upload the built FFmpeg artifact to S3 so
+# MODULE.bazel's s3_http_archive (name = "ffmpeg_dist") can fetch it. Usage:
+# ./scripts/upload-artifact.sh [ARTIFACT] (default: the single ffmpeg-*.tar.gz
+# under tools/ffmpeg-dist/).
 # Env overrides (required): S3_BUCKET_NAME, S3_KEY_PREFIX (ffmpeg), AWS_REGION,
 # EXPECTED_SHA256 (MODULE.bazel pin), SKIP_SHA_CHECK (unset; 1 = skip the sha256
 # contract). Uploads without any ACL modification (objects get the bucket's default
-# private ACL; the IP-scoped HTTPS-only bucket policy from bucket-cidr-policy.sh is
-# the only access gate). Prints the path-style public URL
+# private ACL; the IP-scoped HTTPS-only bucket policy from scripts/bucket-cidr-policy.sh
+# is the only access gate). Prints the path-style public URL
 # (https://s3.<region>.amazonaws.com/<bucket>/<key>), with the region from $AWS_REGION.
 set -euo pipefail
 
@@ -32,7 +33,7 @@ if [[ -z "$artifact" ]]; then
   if [[ "${#matches[@]}" -ne 1 ]]; then
     echo "error: expected exactly one ffmpeg-*.tar.gz under tools/ffmpeg-dist/, found ${#matches[@]}:" >&2
     printf '       %s\n' "${matches[@]}" >&2
-    echo "       pass the artifact explicitly: ./upload-artifact.sh /path/to/artifact.tar.gz" >&2
+    echo "       pass the artifact explicitly: ./scripts/upload-artifact.sh /path/to/artifact.tar.gz" >&2
     exit 1
   fi
   artifact="${matches[0]}"
@@ -57,7 +58,7 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
   exit 1
 fi
 
-# --- upload: no ACL modification (objects get the bucket's default private ACL; the IP-scoped bucket policy from bucket-cidr-policy.sh is the only access gate); region from $AWS_REGION ---
+# --- upload: no ACL modification (objects get the bucket's default private ACL; the IP-scoped bucket policy from scripts/bucket-cidr-policy.sh is the only access gate); region from $AWS_REGION ---
 s3_key="${S3_KEY_PREFIX}/$(basename "$artifact")"
 aws s3 cp "$artifact" "s3://${S3_BUCKET_NAME}/${s3_key}" --region "$AWS_REGION"
 

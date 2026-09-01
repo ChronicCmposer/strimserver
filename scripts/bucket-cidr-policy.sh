@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bucket-cidr-policy.sh -- scope HTTPS-only read access to the S3 bucket
+# scripts/bucket-cidr-policy.sh -- scope HTTPS-only read access to the S3 bucket
 # S3_BUCKET_NAME (required) to a single IPv4 CIDR by applying a
 # BUCKET POLICY (aws s3api put-bucket-policy) -- deliberately NOT a bucket ACL.
 #
@@ -11,7 +11,7 @@
 # access is HTTPS-only, and add an "OwnerFullAccess" statement so the bucket owner
 # keeps full control even though the CIDR statement uses Principal "*".
 #
-# Usage: ./bucket-cidr-policy.sh [CIDR]
+# Usage: ./scripts/bucket-cidr-policy.sh [CIDR]
 #   CIDR: CLI arg wins over $ALLOWED_CIDR. Env (required): S3_BUCKET_NAME,
 #   ALLOWED_CIDR, AWS_REGION (used only as a fallback when get-bucket-location
 #   reports no region), APPLY (unset = DRY-RUN; 1 = put), MAKE_PRIVATE (unset;
@@ -22,10 +22,10 @@
 # IP-scoped bucket policy -- the policy alone will NOT revoke that public access.
 # Rerun with MAKE_PRIVATE=1 to flip every object to a private ACL so the bucket
 # policy becomes the only gate. New uploads (tools/ffmpeg-dist/publish.sh and
-# upload-artifact.sh) set no object ACL.
+# scripts/upload-artifact.sh) set no object ACL.
 set -euo pipefail
 
-# --- env-override reads (required; mirror upload-artifact.sh style) ---
+# --- env-override reads (required; mirror scripts/upload-artifact.sh style) ---
 S3_BUCKET_NAME="${S3_BUCKET_NAME:?S3_BUCKET_NAME is required (e.g. your-bucket-name)}"
 ALLOWED_CIDR="${ALLOWED_CIDR:?ALLOWED_CIDR is required (your home IP CIDR)}"
 AWS_REGION="${AWS_REGION:?AWS_REGION is required}"
@@ -144,7 +144,7 @@ cat >&2 <<'WARN'
 !! IP-scoped bucket policy -- the policy alone will NOT revoke that public
 !! access. Rerun with MAKE_PRIVATE=1 to flip every object to a private ACL so
 !! the bucket policy becomes the only gate. New uploads (publish.sh and
-!! upload-artifact.sh) set no object ACL.
+!! scripts/upload-artifact.sh) set no object ACL.
 !!
 WARN
 

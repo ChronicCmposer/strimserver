@@ -13,10 +13,8 @@
 # bazel-*, build artifacts like tools/ffmpeg-dist/out.log) hold real
 # identifiers but can never be committed, so they must not block commits.
 #
-# Excluded paths: plans/ (holds an untracked working-plan doc that
-# legitimately discusses the identifiers being scrubbed) and the guard's own
-# file (its pattern definitions must contain the very strings it detects;
-# otherwise it could never pass).
+# Excluded path: the guard's own file (its pattern definitions must contain
+# the very strings it detects; otherwise it could never pass).
 set -euo pipefail
 
 # Run from the repo root so the scan is location-independent.
@@ -25,7 +23,6 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 identifier_pattern='strimserver\.cvbn\.cc|104\.218\.148|\bconnor\b|s3://strimserver'
 
 files="$(git ls-files -c -o --exclude-standard \
-  ':(exclude)plans' \
   ':(exclude)tools/check-no-infra-identifiers.sh')"
 if [[ -z "$files" ]]; then
   echo "ok: no infra identifiers found"
