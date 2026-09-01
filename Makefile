@@ -9,7 +9,7 @@ S3_BUCKET ?=s3://<bucket-name>
 .DEFAULT_GOAL := package
 
 .PHONY: prepare generate check-generated controller test-controller package release \
-	check-no-twitch-key publish-strimserver publish-iperf3
+	check-no-twitch-key publish-strimserver publish-iperf3 publish-streamdeck
 
 # Bootstrap: copy the example env into place for the first local checkout
 # (never overwrite an existing, possibly customized, core/strimserver.env).
@@ -44,7 +44,13 @@ publish-strimserver:
 # The offline fallback clip is bundled directly from MODULE.bazel's
 # s3_http_file(offline_segment_dist); regenerate + republish a new clip via
 # tools/brb-screen/publish.sh.
+# Also uploads the Stream Deck plugin bundle (strimserver-streamdeck-plugin.zip).
 	S3_BUCKET=$(S3_BUCKET) bazel run //:publish_strimserver
 
 publish-iperf3:
 	S3_BUCKET=$(S3_BUCKET) bazel run //tools/bandwidth-test:publish_iperf3
+
+# Publish ONLY the Stream Deck plugin bundle to S3 (same object key as
+# publish-strimserver).
+publish-streamdeck:
+	S3_BUCKET=$(S3_BUCKET) bazel run //tools/streamdeck-plugin:publish_streamdeck

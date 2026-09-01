@@ -155,7 +155,15 @@ gracefully on shutdown.
   redistributable bundle plus SHA-256 checksum locally),
   `make release` (attach the bundle and checksum to a GitHub
   release via the GitHub CLI), and `make publish-strimserver`
-  (build and upload a single-tenant bundle to S3).
+  (build and upload a single-tenant bundle to S3). The Stream
+  Deck plugin is published alongside the deployment tar as its
+  own distributable: `make release` uploads
+  `com.chroniccmposer.strimserver.sdPlugin.zip` (+ checksum)
+  to the GitHub release, and `make publish-strimserver` /
+  `make publish-streamdeck` upload it to
+  `strimserver-streamdeck-plugin.zip` on S3. It is a separate
+  artifact — `make package` never includes it inside
+  `strimserver-deployment.tar`.
 - EC2 setup automation for formatting and mounting NVMe
   ephemeral storage at `/mnt/nvme`, installing the systemd
   unit, importing the OCI images into containerd, generating
@@ -506,7 +514,29 @@ make publish-strimserver
 bazel run //:publish_strimserver   # reads S3_BUCKET from the environment
 ```
 
-All three build the same three OCI images —
+The Stream Deck plugin ships as its own distributable,
+published **alongside** `strimserver-deployment.tar` — never
+inside it:
+
+- `make release` / `bazel run //:release` also attach
+  `com.chroniccmposer.strimserver.sdPlugin.zip` and its
+  `.sha256` to the GitHub release (in addition to the
+  deployment tar + checksum).
+- `make publish-strimserver` / `bazel run
+  //:publish_strimserver` also upload the plugin bundle to
+  `$S3_BUCKET/strimserver-streamdeck-plugin.zip` (the tar's
+  sha256 is not uploaded to S3, and neither is the plugin's —
+  parity with the existing convention).
+- `make publish-streamdeck` / `bazel run
+  //tools/streamdeck-plugin:publish_streamdeck` upload **only**
+  the plugin bundle, to the same `strimserver-streamdeck-plugin.zip`
+  key. This mirrors `make publish-iperf3`.
+- `make package` / `bazel build //:package` builds only the
+  deployment tar (+ checksum); the plugin bundle is a separate
+  artifact produced by `bazel build
+  //tools/streamdeck-plugin:streamdeck_plugin_bundle`.
+
+All three deployment paths build the same three OCI images —
 `strimserver-controller:latest`, `ffmpeg:latest`, and
 `mediamtx:latest` — all assembled natively by Bazel
 (`rules_oci`) from pinned inputs — then package those images

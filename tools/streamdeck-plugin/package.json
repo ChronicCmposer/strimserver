@@ -18,6 +18,7 @@
     "@rollup/plugin-commonjs": "^28",
     "@rollup/plugin-node-resolve": "^16",
     "@rollup/plugin-typescript": "^12",
+    "@rollup/rollup-linux-arm64-gnu": "4.62.2",
     "@types/node": "^24.13.2",
     "rollup": "^4",
     "tslib": "^2",

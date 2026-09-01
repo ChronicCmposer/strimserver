@@ -5,6 +5,8 @@ set -euo pipefail
 
 tar="$1"
 sha256="$2"
+streamdeck="$3"
+streamdeck_sha256="$4"
 
 git_tag="${GIT_TAG:-}"
 if [ -z "$git_tag" ] && [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
@@ -18,5 +20,7 @@ fi
 
 echo "Packaged: $tar"
 cat "$sha256"
+echo "Stream Deck plugin: $streamdeck"
+cat "$streamdeck_sha256"
 
-gh release upload "$git_tag" "$tar" "$sha256" --clobber
+gh release upload "$git_tag" "$tar" "$sha256" "$streamdeck" "$streamdeck_sha256" --clobber
