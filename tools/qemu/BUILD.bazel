@@ -1,0 +1,5 @@
+# The patched-qemu build script is consumed as a Bazel tool by the
+# @qemu_x86_64_patched repo rule (tools/bazel/qemu_x86_64.bzl); exposing it
+# here also lets the out-of-band artifact pipelines keep their direct
+# invocation of the script unchanged.
+exports_files(["build-qemu.sh"])

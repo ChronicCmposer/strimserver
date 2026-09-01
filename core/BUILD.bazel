@@ -35,15 +35,50 @@ write_source_files(
 # and isn't needed here.
 # =============================================================================
 
-# The mediamtx binary is linux/amd64. Stripping is done with the host `strip`,
-# which cannot cross-strip (e.g. an amd64 binary on an arm64 build host).
+# The mediamtx binary is linux/amd64. On an x86_64 host the native `strip`
+# (from PATH) handles it, exactly as before. On any other host, the amd64 GNU
+# strip from the pinned @trixie binutils deb is run under the
+# buildkit-direct-execve patched qemu-x86_64 (built by tools/qemu/build-qemu.sh
+# via the @qemu_x86_64_patched repo rule, with the amd64 loader + libc + the
+# strip binary's own libs supplied hermetically through qemu's -L sysroot).
 # Stripping is a pure size optimization for this static Go binary, so on a
-# cross-arch host we skip it with a loud note instead of failing the whole
-# build; the amd64 bytes are otherwise identical, and the smoke test does not
-# depend on stripping.
+# non-x86_64 host a missing/broken qemu or a strip failure falls back to
+# skipping with a loud note instead of failing the whole build; the amd64
+# bytes are otherwise identical, and the smoke test does not depend on
+# stripping. On x86_64 hosts nothing changes: the alias below resolves the
+# qemu tool to a local placeholder (its value is only ever expanded into an
+# unused shell variable), so @qemu_x86_64_patched is never fetched there.
+
+# The patched qemu-x86_64 as a genrule tool, selected away on x86_64 exec
+# hosts so amd64 builds never fetch the (source-built) emulator repo.
+alias(
+    name = "qemu_x86_64_patched_tool",
+    actual = select({
+        "//tools/bazel:is_x86_64_exec": ":qemu_x86_64_patched_placeholder",
+        "//conditions:default": "@qemu_x86_64_patched//:qemu-x86_64",
+    }),
+)
+
+genrule(
+    name = "qemu_x86_64_patched_placeholder",
+    outs = ["qemu-x86_64.placeholder"],
+    cmd = "touch $@",
+)
+
 genrule(
     name = "mediamtx_bin_stripped",
     srcs = ["@mediamtx_dist//:mediamtx"],
+    tools = [
+        ":amd64_strip_bin",
+        ":amd64_strip_libbfd",
+        ":amd64_strip_libsframe",
+        ":amd64_strip_libz",
+        ":amd64_strip_libzstd",
+        ":amd64_strip_libgcc_s",
+        ":ld_linux",
+        ":libc_so",
+        ":qemu_x86_64_patched_tool",
+    ],
     outs = ["mediamtx"],
     cmd = """
 set -eu
@@ -51,17 +86,39 @@ cp $(location @mediamtx_dist//:mediamtx) $@
 chmod +w $@
 host="$$(uname -m)"
 machine="$$(readelf -h $@ | awk -F': *' '/Machine:/{print $$2}' | tr '[:upper:]' '[:lower:]')"
-stripable=0
 case "$$machine" in
-  *x86-64*)  [ "$$host" = x86_64 ] && stripable=1 ;;
-  *AArch64*) [ "$$host" = aarch64 ] && stripable=1 ;;
-  *)         stripable=1 ;;
+  *x86-64*)
+    if [ "$$host" = x86_64 ]; then
+      # Native host strip: unchanged behavior.
+      strip $@
+    else
+      # Cross-strip on a non-x86_64 host: run the amd64 GNU strip under the
+      # patched qemu-x86_64, with the amd64 runtime closure (loader, libc,
+      # and the libs strip itself links against) supplied hermetically via
+      # qemu's -L sysroot. Fail-soft: any qemu/strip failure skips with a
+      # loud note -- the unstripped binary is fine.
+      qemu="$(location :qemu_x86_64_patched_tool)"
+      strip_tool="$(location :amd64_strip_bin)"
+      sysroot="$$(mktemp -d)"
+      trap 'rm -rf "$$sysroot"' EXIT
+      mkdir -p "$$sysroot/lib64" "$$sysroot/lib/x86_64-linux-gnu"
+      cp "$(location :ld_linux)" "$$sysroot/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+      ln -s ../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "$$sysroot/lib64/ld-linux-x86-64.so.2"
+      cp "$(location :libc_so)" "$$sysroot/lib/x86_64-linux-gnu/libc.so.6"
+      cp "$(location :amd64_strip_libbfd)" "$$sysroot/lib/x86_64-linux-gnu/libbfd-2.44-system.so"
+      cp "$(location :amd64_strip_libsframe)" "$$sysroot/lib/x86_64-linux-gnu/libsframe.so.1"
+      cp "$(location :amd64_strip_libz)" "$$sysroot/lib/x86_64-linux-gnu/libz.so.1"
+      cp "$(location :amd64_strip_libzstd)" "$$sysroot/lib/x86_64-linux-gnu/libzstd.so.1"
+      cp "$(location :amd64_strip_libgcc_s)" "$$sysroot/lib/x86_64-linux-gnu/libgcc_s.so.1"
+      if ! "$$qemu" -L "$$sysroot" "$$strip_tool" "$@"; then
+        echo "note: skipping strip of $$machine mediamtx on $$host host (qemu cross-strip failed)" >&2
+      fi
+    fi
+    ;;
+  *)
+    echo "note: skipping strip of $$machine mediamtx on $$host host (no cross strip)" >&2
+    ;;
 esac
-if [ "$$stripable" = 1 ]; then
-  strip $@
-else
-  echo "note: skipping strip of $$machine mediamtx on $$host host (no cross strip)" >&2
-fi
 """,
 )
 
@@ -111,6 +168,53 @@ deb_file(
     name = "libresolv_so",
     data = "@trixie//libc6/amd64:data",
     path = "usr/lib/x86_64-linux-gnu/libresolv.so.2",
+)
+
+# --- amd64 GNU strip tool ----------------------------------------------------
+# Used to cross-strip the amd64 @mediamtx_dist binary on non-x86_64 hosts by
+# running it under the patched qemu-x86_64 (see mediamtx_bin_stripped below).
+# The real ELF is x86_64-linux-gnu-strip (the /usr/bin/strip symlink in the
+# deb points at it, and deb_file cannot copy a dangling symlink); the libs are
+# the strip binary's own runtime closure. libsframe/libz/libzstd ship soname
+# symlinks in the deb, so the real versioned files are extracted here and
+# renamed to their sonames when the qemu sysroot is assembled in the genrule.
+# libgcc_s.so.1 is also in the closure (binutils links it for stack
+# unwinding); libgcc-s1 is already in the @trixie donor set transitively, so
+# it costs nothing extra to supply.
+deb_file(
+    name = "amd64_strip_bin",
+    data = "@trixie//binutils-x86-64-linux-gnu/amd64:data",
+    path = "usr/bin/x86_64-linux-gnu-strip",
+)
+
+deb_file(
+    name = "amd64_strip_libbfd",
+    data = "@trixie//libbinutils/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libbfd-2.44-system.so",
+)
+
+deb_file(
+    name = "amd64_strip_libsframe",
+    data = "@trixie//libsframe1/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libsframe.so.1.0.0",
+)
+
+deb_file(
+    name = "amd64_strip_libz",
+    data = "@trixie//zlib1g/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libz.so.1.3.1",
+)
+
+deb_file(
+    name = "amd64_strip_libzstd",
+    data = "@trixie//libzstd1/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libzstd.so.1.5.7",
+)
+
+deb_file(
+    name = "amd64_strip_libgcc_s",
+    data = "@trixie//libgcc-s1/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
 )
 
 cacerts(

@@ -102,7 +102,10 @@ artifact="ffmpeg-${FFMPEG_VERSION}-deb${deb_date}-cuda${cuda_version}-${sm_suffi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+# The privileged chroot harness bind-mounts the host's device nodes into
+# $work/rootfs/dev, so cleanup cannot remove the busy mounts; without the guard
+# that floods the log with 'Device or resource busy' lines and hides the real error.
+trap 'rm -rf "$work" 2>/dev/null || true' EXIT
 mkdir -p "$work/out"
 
 host_arch="$(uname -m)"

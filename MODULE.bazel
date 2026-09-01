@@ -18,7 +18,6 @@ bazel_dep(name = "rules_oci", version = "2.3.0")
 bazel_dep(name = "rules_pkg", version = "1.3.0")
 bazel_dep(name = "aspect_rules_js", version = "3.4.1")
 bazel_dep(name = "aspect_rules_ts", version = "3.10.1")
-
 bazel_dep(name = "rules_nodejs", version = "6.7.3")
 
 # aspect_bazel_lib's own MODULE.bazel unconditionally registers a bats-core
@@ -78,6 +77,14 @@ s3_http_archive = use_repo_rule("//tools/bazel:s3_download.bzl", "s3_http_archiv
 
 s3_http_file = use_repo_rule("//tools/bazel:s3_download.bzl", "s3_http_file")
 
+# The buildkit-direct-execve patched qemu-x86_64 as a Bazel tool (used by
+# core/BUILD.bazel's mediamtx cross-strip genrule on non-x86_64 hosts).
+# Lazily fetched: nothing references @qemu_x86_64_patched on amd64 builds
+# (the genrule selects it away), so an amd64 host never builds qemu.
+qemu_x86_64 = use_repo_rule("//tools/bazel:qemu_x86_64.bzl", "qemu_x86_64")
+
+qemu_x86_64(name = "qemu_x86_64_patched")
+
 http_archive(
     name = "golangci_lint_linux_amd64",
     build_file_content = "exports_files([\"golangci-lint\"])",
@@ -118,6 +125,20 @@ apt.install(
         # Bazel has to ask for it by name).
         "libc6",
         "coreutils",
+        # amd64 GNU strip (x86_64-linux-gnu-strip) plus its runtime closure
+        # (libbinutils/libsframe1/zlib1g/libzstd1/libgcc-s1): a Bazel tool
+        # used to cross-strip the amd64 mediamtx binary on non-x86_64 hosts,
+        # running under the patched qemu-x86_64. The whole closure is listed
+        # as direct packages because the apt extension only generates a
+        # package dir (with a :data target) for directly-listed packages; a
+        # package present only transitively yields a bare filemap repo with
+        # no :data to point a deb_file at.
+        "libbinutils",
+        "libsframe1",
+        "zlib1g",
+        "libzstd1",
+        "libgcc-s1",
+        "binutils-x86-64-linux-gnu",
     ],
     suites = ["trixie"],
 )
