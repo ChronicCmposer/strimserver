@@ -119,11 +119,34 @@ func main() {
 		extractorimpl.ExtractScripts,
 	}
 
+	classifier := common.NewClassifier(
+		[]common.TierPolicy{classifyFloatingBaseImage, classifyCIAction, classifyDateTag, classifySemver},
+		[]common.BaseTierRule{
+			{Category: common.CategoryBaseImage, Tier: common.TierT1},
+			{Category: common.CategoryRuntime, Tier: common.TierT1},
+			{Category: common.CategoryBazelModule, Tier: common.TierT2},
+			{Category: common.CategoryToolchain, Tier: common.TierT2},
+			{Category: common.CategoryCIAction, Tier: common.TierT2},
+			// tool-binary is T2 by default; the media server binary is the one
+			// security-critical exception.
+			{Category: common.CategoryToolBinary, Name: "mediamtx_dist", Tier: common.TierT1},
+			{Category: common.CategoryToolBinary, Tier: common.TierT2},
+			// script-pin: the network-facing parsers and crypto/security tooling are
+			// T1, the emulator is T2, everything else rests at T3.
+			{Category: common.CategoryScriptPin, Name: "openssh-portable", Tier: common.TierT1},
+			{Category: common.CategoryScriptPin, Name: "ffmpeg", Tier: common.TierT1},
+			{Category: common.CategoryScriptPin, Name: "CUDA", Tier: common.TierT1},
+			{Category: common.CategoryScriptPin, Name: "nv-codec-headers", Tier: common.TierT1},
+			{Category: common.CategoryScriptPin, Name: "qemu", Tier: common.TierT2},
+		},
+	)
+
 	err = run(
 		&opts,
 		newCache(&opts, root),
 		resolvers,
 		extractors,
+		classifier,
 	)
 	if err != nil {
 		fail("check-deps", err)
@@ -180,7 +203,7 @@ func warnf(format string, args ...any) {
 // (cache-aware, --fresh) -> native deps -> ignore load -> buildReport -> render
 // to the injected writers. Every collaborator is injected so the whole pipeline
 // is testable with fakes (the e2e tests call run directly).
-func run(opts *Options, cache *Cache, resolvers []common.ResolverEntry, extractors []common.Extractor) error {
+func run(opts *Options, cache *Cache, resolvers []common.ResolverEntry, extractors []common.Extractor, classifier *common.Classifier) error {
 	// A non-positive MaxConcurrentFetches would spawn a zero-width worker pool
 	// that deadlocks (no worker ever drains the job channel), so fail loudly
 	// before any work begins.
@@ -196,7 +219,7 @@ func run(opts *Options, cache *Cache, resolvers []common.ResolverEntry, extracto
 
 	deps, unknowns := extractAll(extractors, opts.Root)
 	guard := newCacheGuard(cache.Load())
-	all := resolveAll(opts, guard, resolvers, dedupe(deps))
+	all := resolveAll(opts, guard, resolvers, dedupe(deps), classifier)
 	if guard.changed {
 		cache.Save(guard.entries)
 	}

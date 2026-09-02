@@ -25,6 +25,14 @@ go_library(
     ],
     importpath = "strimserver-check-deps/common",
     visibility = ["//visibility:private"],
+    deps = [":utilities"],
+)
+
+go_library(
+    name = "utilities",
+    srcs = ["utilities/utilities.go"],
+    importpath = "strimserver-check-deps/utilities",
+    visibility = ["//visibility:private"],
 )
 
 go_test(
@@ -49,7 +57,10 @@ go_library(
     ],
     importpath = "strimserver-check-deps/resolverimpl",
     visibility = ["//visibility:private"],
-    deps = [":common"],
+    deps = [
+        ":common",
+        ":utilities",
+    ],
 )
 
 go_test(
@@ -70,7 +81,10 @@ go_library(
     ],
     importpath = "strimserver-check-deps/extractorimpl",
     visibility = ["//visibility:private"],
-    deps = [":common"],
+    deps = [
+        ":common",
+        ":utilities",
+    ],
 )
 
 go_test(
@@ -84,6 +98,7 @@ go_library(
     name = "check_deps_lib",
     srcs = [
         "cache.go",
+        "classify.go",
         "extract.go",
         "ignore.go",
         "main.go",
@@ -96,6 +111,7 @@ go_library(
         ":common",
         ":resolverimpl",
         ":extractorimpl",
+        ":utilities",
     ],
 )
 
@@ -110,6 +126,7 @@ go_test(
     srcs = [
         "app_e2e_test.go",
         "check_deps_test.go",
+        "classify_test.go",
         "main_test.go",
         "phase3_test.go",
         "warn_test.go",

@@ -41,6 +41,28 @@ var frozenNow = func() time.Time { return time.Date(2026, 9, 2, 12, 0, 0, 0, tim
 // mirrors a real run.
 const testCacheTTL = 24 * time.Hour
 
+// testClassifier builds the default classifier shared by the e2e harness and
+// the phase-3 unit tests.
+func testClassifier() *common.Classifier {
+	return common.NewClassifier(
+		[]common.TierPolicy{classifyFloatingBaseImage, classifyCIAction, classifyDateTag, classifySemver},
+		[]common.BaseTierRule{
+			{Category: common.CategoryBaseImage, Tier: common.TierT1},
+			{Category: common.CategoryRuntime, Tier: common.TierT1},
+			{Category: common.CategoryBazelModule, Tier: common.TierT2},
+			{Category: common.CategoryToolchain, Tier: common.TierT2},
+			{Category: common.CategoryCIAction, Tier: common.TierT2},
+			{Category: common.CategoryToolBinary, Name: "mediamtx_dist", Tier: common.TierT1},
+			{Category: common.CategoryToolBinary, Tier: common.TierT2},
+			{Category: common.CategoryScriptPin, Name: "openssh-portable", Tier: common.TierT1},
+			{Category: common.CategoryScriptPin, Name: "ffmpeg", Tier: common.TierT1},
+			{Category: common.CategoryScriptPin, Name: "CUDA", Tier: common.TierT1},
+			{Category: common.CategoryScriptPin, Name: "nv-codec-headers", Tier: common.TierT1},
+			{Category: common.CategoryScriptPin, Name: "qemu", Tier: common.TierT2},
+		},
+	)
+}
+
 // captureWarn returns a warn sink that appends every formatted warning to the
 // given slice, so tests can assert which warnings were emitted.
 func captureWarn(warns *[]string) func(string, ...any) {
@@ -124,6 +146,7 @@ type e2eRun struct {
 	cache      *Cache
 	resolvers  []common.ResolverEntry
 	extractors []common.Extractor
+	classifier *common.Classifier
 	stdout     *bytes.Buffer
 	stderr     *bytes.Buffer
 	warns      *[]string
@@ -177,6 +200,7 @@ func newE2EApp(t *testing.T, mode e2eMode, baseDir string, netCalls *int64) *e2e
 		cache:      cache,
 		resolvers:  resolvers,
 		extractors: extractors,
+		classifier: testClassifier(),
 		stdout:     opts.Stdout.(*bytes.Buffer),
 		stderr:     opts.Stderr.(*bytes.Buffer),
 		warns:      warns,
@@ -190,7 +214,7 @@ func newE2EApp(t *testing.T, mode e2eMode, baseDir string, netCalls *int64) *e2e
 // are stable.
 func TestE2ERegressionJSON(t *testing.T) {
 	e := newE2EApp(t, e2eJSON, "", nil)
-	if err := run(e.opts, e.cache, e.resolvers, e.extractors); err != nil {
+	if err := run(e.opts, e.cache, e.resolvers, e.extractors, e.classifier); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	want, err := os.ReadFile(filepath.Join("testdata", "golden-nonet.json"))
@@ -207,7 +231,7 @@ func TestE2ERegressionJSON(t *testing.T) {
 // console report goes to Stdout.
 func TestE2ERegressionConsole(t *testing.T) {
 	e := newE2EApp(t, e2eConsole, "", nil)
-	if err := run(e.opts, e.cache, e.resolvers, e.extractors); err != nil {
+	if err := run(e.opts, e.cache, e.resolvers, e.extractors, e.classifier); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	want, err := os.ReadFile(filepath.Join("testdata", "golden-nonet-console.txt"))
@@ -229,7 +253,7 @@ func TestE2ECacheHonoredAndFreshBypass(t *testing.T) {
 
 	// First run: empty cache forces every network resolver to fetch.
 	first := newE2EApp(t, e2eConsole, baseDir, netCalls)
-	if err := run(first.opts, first.cache, first.resolvers, first.extractors); err != nil {
+	if err := run(first.opts, first.cache, first.resolvers, first.extractors, first.classifier); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	if *netCalls != networkDeps {
@@ -243,7 +267,7 @@ func TestE2ECacheHonoredAndFreshBypass(t *testing.T) {
 	// Second run with the same cache: resolvers are NOT invoked again and the
 	// output is identical.
 	second := newE2EApp(t, e2eConsole, baseDir, netCalls)
-	if err := run(second.opts, second.cache, second.resolvers, second.extractors); err != nil {
+	if err := run(second.opts, second.cache, second.resolvers, second.extractors, second.classifier); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	if *netCalls != networkDeps {
@@ -256,7 +280,7 @@ func TestE2ECacheHonoredAndFreshBypass(t *testing.T) {
 	// --fresh bypasses the cache and refetches every network dep.
 	fresh := newE2EApp(t, e2eConsole, baseDir, netCalls)
 	fresh.opts.Fresh = true
-	if err := run(fresh.opts, fresh.cache, fresh.resolvers, fresh.extractors); err != nil {
+	if err := run(fresh.opts, fresh.cache, fresh.resolvers, fresh.extractors, fresh.classifier); err != nil {
 		t.Fatalf("fresh run: %v", err)
 	}
 	if *netCalls != 2*networkDeps {

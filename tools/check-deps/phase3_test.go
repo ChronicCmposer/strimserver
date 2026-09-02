@@ -296,7 +296,7 @@ func TestCacheKeyDerivationKeyedOnCurrent(t *testing.T) {
 	fresh := false
 	entries := map[string]cacheEntry{}
 	reg := []common.ResolverEntry{noopDep(common.Matches(common.CategoryToolchain, "Bazel"), resolverimpl.ToolchainResolve)}
-	r, changed := resolveOne(reg, common.Dependency{Category: common.CategoryToolchain, Name: "Bazel", Version: "9.2.0"}, entries, fresh)
+	r, changed := resolveOne(reg, common.Dependency{Category: common.CategoryToolchain, Name: "Bazel", Version: "9.2.0"}, entries, fresh, testClassifier())
 	if r.Status != common.StatusOK {
 		t.Errorf("toolchain resolveOne status = %s, want ok", r.Status)
 	}
@@ -329,7 +329,7 @@ func TestCommitFreshEvictsStaleEntryOnFailure(t *testing.T) {
 	// Fresh failure evicts the stale entry and reports the cache changed, so
 	// resolveAll saves the eviction to disk.
 	entries := map[string]cacheEntry{key: good}
-	r, changed := resolveOne(reg, dep, entries, true)
+	r, changed := resolveOne(reg, dep, entries, true, testClassifier())
 	if r.Status != common.StatusUnknown {
 		t.Errorf("fresh failure status = %s, want unknown", r.Status)
 	}
@@ -344,7 +344,7 @@ func TestCommitFreshEvictsStaleEntryOnFailure(t *testing.T) {
 	// entry, so a transient blip is not replayed and is not discarded.
 	entries = map[string]cacheEntry{key: good}
 	guard := newCacheGuard(entries)
-	guard.commit(dep, common.VersionInfo{Err: errTestNetwork}, false)
+	guard.commit(dep, common.VersionInfo{Err: errTestNetwork}, false, testClassifier())
 	if guard.changed {
 		t.Error("non-fresh failure must not report the cache changed")
 	}

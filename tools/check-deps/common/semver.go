@@ -1,8 +1,9 @@
 package common
 
 import (
-	"strconv"
 	"strings"
+
+	"strimserver-check-deps/utilities"
 )
 
 // This file holds the hand-rolled version comparison used across the whole
@@ -16,8 +17,8 @@ import (
 // core chunk-wise, and then applies semver prerelease precedence. Non-semver
 // strings are compared by their numeric/alpha chunks rather than rejected.
 func CompareSemver(a, b string) int {
-	aCore, aPre, hasPreA := splitCoreAndPre(a)
-	bCore, bPre, hasPreB := splitCoreAndPre(b)
+	aCore, aPre, hasPreA := utilities.SplitCoreAndPre(a)
+	bCore, bPre, hasPreB := utilities.SplitCoreAndPre(b)
 	if c := CompareChunks(aCore, bCore); c != 0 {
 		return c
 	}
@@ -30,26 +31,6 @@ func CompareSemver(a, b string) int {
 		return ComparePrerelease(aPre, bPre)
 	}
 	return 0
-}
-
-// coreVersion reduces a version string to its numeric core: it strips a
-// leading alphabetic tag prefix, drops build metadata after '+', and cuts the
-// prerelease suffix after '-'. Ordering and numeric-axis parsing both operate
-// on the core, so every caller normalizes through here and the
-// metadata/prerelease suffixes never skew an ordering or a parse.
-func coreVersion(s string) string {
-	core, _, _ := splitCoreAndPre(s)
-	return core
-}
-
-// splitCoreAndPre normalizes a version and splits it into its numeric core and
-// its prerelease suffix ("" and false when none). Build metadata after '+' is
-// dropped and a leading alphabetic tag prefix is stripped before the split, so
-// CompareSemver keeps the prerelease while coreVersion discards it.
-func splitCoreAndPre(s string) (core, pre string, hasPre bool) {
-	s = stripTagPrefix(s)
-	s, _, _ = strings.Cut(s, "+")
-	return strings.Cut(s, "-")
 }
 
 // CompareChunks compares two strings by walking numeric and alphabetic runs.
@@ -67,8 +48,8 @@ func CompareChunks(a, b string) int {
 		case b == "":
 			return 1
 		}
-		aNum := leadingDigits(a)
-		bNum := leadingDigits(b)
+		aNum := utilities.LeadingDigits(a)
+		bNum := utilities.LeadingDigits(b)
 		if aNum != "" || bNum != "" {
 			if c := compareBigInt(aNum, bNum); c != 0 {
 				return c
@@ -124,7 +105,7 @@ func ComparePrerelease(a, b string) int {
 }
 
 func comparePrereleaseIdent(a, b string) int {
-	aNum, bNum := isAllDigits(a), isAllDigits(b)
+	aNum, bNum := utilities.IsAllDigits(a), utilities.IsAllDigits(b)
 	switch {
 	case aNum && bNum:
 		return compareBigInt(a, b)
@@ -143,52 +124,12 @@ func comparePrereleaseIdent(a, b string) int {
 	}
 }
 
-// stripTagPrefix removes a leading run of non-digit characters so tag prefixes
-// like "v" (v2.13.2) or "n" (n13.0.19.0) do not skew the numeric compare.
-func stripTagPrefix(s string) string {
-	i := 0
-	for i < len(s) && !isDigit(s[i]) {
-		i++
-	}
-	return s[i:]
-}
-
-func leadingDigits(s string) string {
-	i := 0
-	for i < len(s) && isDigit(s[i]) {
-		i++
-	}
-	return s[:i]
-}
-
 func leadingLetters(s string) string {
 	i := 0
 	for i < len(s) && isLetter(s[i]) {
 		i++
 	}
 	return s[:i]
-}
-
-// leadingInt returns the integer parsed from the leading digit run of s and
-// whether it parsed successfully. A run that is absent or overflows int is not
-// a representable integer, so it returns (0, false); any in-range digit run
-// returns (value, true). Callers use the bool to distinguish a genuine 0 (e.g.
-// "0" or "000") from "no digit present", so missing and broken inputs stay
-// distinguishable rather than collapsing onto the same sentinel.
-func leadingInt(s string) (int, bool) {
-	digits := leadingDigits(s)
-	if digits == "" {
-		return 0, false // no digit run: not an integer
-	}
-	digits = strings.TrimLeft(digits, "0")
-	if digits == "" {
-		return 0, true // the run was all zeros; that is a valid 0
-	}
-	n, err := strconv.Atoi(digits)
-	if err != nil {
-		return 0, false // overflow: not representable
-	}
-	return n, true
 }
 
 // compareBigInt compares two decimal strings as integers (empty == 0),
@@ -210,22 +151,6 @@ func compareBigInt(a, b string) int {
 		return 1
 	}
 	return strings.Compare(a, b)
-}
-
-func isAllDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if !isDigit(s[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func isDigit(c byte) bool {
-	return c >= '0' && c <= '9'
 }
 
 func isLetter(c byte) bool {

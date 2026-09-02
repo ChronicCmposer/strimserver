@@ -268,19 +268,23 @@ func (rt *dockerHubHostRewrite) RoundTrip(req *http.Request) (*http.Response, er
 // main's matchResolver/resolveMatched wiring; those helpers live in the main
 // package now, so the contract is tested directly here: a digest-pinned dep
 // short-circuits through DigestResolve to ok/T1, and a dep no resolver claims
-// falls back to "unknown" via common.Classify with a resolution error.
+// falls back to "unknown" via the classifier with a resolution error.
 func TestResolveDepDispatch(t *testing.T) {
+	// Both cases hit Classify's resolution guards before any policy dispatch, so
+	// no policies are needed; only the base-image resting tier is required.
+	cl := common.NewClassifier(nil, []common.BaseTierRule{{Category: common.CategoryBaseImage, Tier: common.TierT1}})
+
 	// Digests short-circuit without network: alpine is digest-pinned and must
 	// resolve to ok regardless of network availability.
 	alpine := common.Dependency{Category: common.CategoryBaseImage, Name: "alpine", DigestPinned: true}
-	r := common.Classify(alpine, DigestResolve(alpine))
+	r := cl.Classify(alpine, DigestResolve(alpine))
 	if r.Status != common.StatusOK || r.Tier != common.TierT1 {
 		t.Errorf("alpine digest dispatch: got %s/%s, want ok/T1", r.Status, r.Tier)
 	}
 
 	// A dependency with no matching resolver becomes unknown, never a panic.
 	orphan := common.Dependency{Category: common.CategoryScriptPin, Name: "no-such-pin", Version: "1.0.0"}
-	r = common.Classify(orphan, common.VersionInfo{Err: errors.New("no resolver configured for this dependency")})
+	r = cl.Classify(orphan, common.VersionInfo{Err: errors.New("no resolver configured for this dependency")})
 	if r.Status != common.StatusUnknown {
 		t.Errorf("orphan dep: got %s, want unknown", r.Status)
 	}

@@ -12,7 +12,7 @@ import (
 func TestRunRejectsNonPositiveMaxConcurrentFetches(t *testing.T) {
 	e := newE2EApp(t, e2eConsole, "", nil)
 	e.opts.MaxConcurrentFetches = 0
-	err := run(e.opts, e.cache, e.resolvers, e.extractors)
+	err := run(e.opts, e.cache, e.resolvers, e.extractors, e.classifier)
 	if err == nil {
 		t.Fatal("run() succeeded, want error for non-positive MaxConcurrentFetches")
 	}

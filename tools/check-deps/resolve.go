@@ -11,7 +11,7 @@ import (
 // This file routes each Phase 1 dependency to the version-source resolver that
 // owns it and combines the resolver's answer with the classifier. Resolvers
 // live in the resolverimpl package (bcr.go, dockerhub.go, ...) and each returns
-// a common.VersionInfo; common.Classify in the common package turns that into a
+// a common.VersionInfo; the common package's classifier turns that into a
 // resolved record. The resolver slice holds the ordered set of resolvers; every
 // network-backed resolver is closure-bound to the Fetcher it should reach
 // through, so the slice is testable with an httptest-backed fetcher and free of
@@ -33,11 +33,11 @@ func matchResolver(resolvers []common.ResolverEntry, dep common.Dependency) (com
 // direct, never-cached path shared by guard.peek for no-op/missing resolvers;
 // the match is performed once by the caller and threaded in, so the entry is
 // never re-matched here.
-func resolveMatched(e common.ResolverEntry, ok bool, dep common.Dependency) common.Resolved {
+func resolveMatched(e common.ResolverEntry, ok bool, dep common.Dependency, classifier *common.Classifier) common.Resolved {
 	if !ok {
-		return common.Classify(dep, common.VersionInfo{Err: errors.New("no resolver configured for this dependency")})
+		return classifier.Classify(dep, common.VersionInfo{Err: errors.New("no resolver configured for this dependency")})
 	}
-	return common.Classify(dep, e.Resolve(dep))
+	return classifier.Classify(dep, e.Resolve(dep))
 }
 
 // cacheGuard owns the shared mutable cache state and the lock discipline
@@ -69,17 +69,17 @@ func newCacheGuard(entries map[string]cacheEntry) *cacheGuard {
 // resolver matched or the resolver is non-network; a network resolver's
 // present cache entry (and not fresh) also answers directly. The matched entry
 // is resolved once by the caller and threaded in, so peek never re-matches.
-func (g *cacheGuard) peek(e common.ResolverEntry, ok bool, dep common.Dependency, fresh bool) (common.Resolved, bool) {
+func (g *cacheGuard) peek(e common.ResolverEntry, ok bool, dep common.Dependency, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !ok || !e.Network {
-		return resolveMatched(e, ok, dep), true
+		return resolveMatched(e, ok, dep, classifier), true
 	}
 	if fresh {
 		return common.Resolved{}, false
 	}
 	if cached, hit := g.entries[cacheKey(dep)]; hit {
-		return common.Classify(dep, entryToVersionInfo(cached)), true
+		return classifier.Classify(dep, entryToVersionInfo(cached)), true
 	}
 	return common.Resolved{}, false
 }
@@ -92,9 +92,9 @@ func (g *cacheGuard) peek(e common.ResolverEntry, ok bool, dep common.Dependency
 // rate-limit blip is not replayed as "unknown" for the whole TTL; in fresh
 // mode a failed refetch instead evicts any stale entry, so the next non-fresh
 // run refetches rather than serving the stale value. The cache write and
-// classification only need the dependency and versionInfo, so the matched
-// resolver entry is not threaded in.
-func (g *cacheGuard) commit(dep common.Dependency, vi common.VersionInfo, fresh bool) (common.Resolved, bool) {
+// classification only need the dependency, versionInfo, and classifier, so the
+// matched resolver entry is not threaded in.
+func (g *cacheGuard) commit(dep common.Dependency, vi common.VersionInfo, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if vi.Err != nil {
@@ -103,14 +103,14 @@ func (g *cacheGuard) commit(dep common.Dependency, vi common.VersionInfo, fresh 
 			if _, present := g.entries[key]; present {
 				delete(g.entries, key)
 				g.changed = true
-				return common.Classify(dep, vi), true
+				return classifier.Classify(dep, vi), true
 			}
 		}
-		return common.Classify(dep, vi), false
+		return classifier.Classify(dep, vi), false
 	}
 	g.entries[cacheKey(dep)] = versionInfoToEntry(vi)
 	g.changed = true
-	return common.Classify(dep, vi), true
+	return classifier.Classify(dep, vi), true
 }
 
 // resolveOne resolves a single dependency and reports whether the cache was
@@ -119,11 +119,11 @@ func (g *cacheGuard) commit(dep common.Dependency, vi common.VersionInfo, fresh 
 // cache-orchestration implementation (peek under the lock, fetch outside it,
 // commit under the lock). The resolver entry is matched once here and threaded
 // through, so a dependency is never matched repeatedly.
-func resolveOne(resolvers []common.ResolverEntry, dep common.Dependency, cacheEntries map[string]cacheEntry, fresh bool) (common.Resolved, bool) {
+func resolveOne(resolvers []common.ResolverEntry, dep common.Dependency, cacheEntries map[string]cacheEntry, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
 	guard := newCacheGuard(cacheEntries)
 	results := make([]common.Resolved, 1)
 	e, ok := matchResolver(resolvers, dep)
-	resolveJobWithCache(guard, results, resolveJob{index: 0, dep: dep, entry: e, ok: ok}, fresh)
+	resolveJobWithCache(guard, results, resolveJob{index: 0, dep: dep, entry: e, ok: ok}, fresh, classifier)
 	return results[0], guard.changed
 }
 
@@ -138,13 +138,13 @@ func resolveOne(resolvers []common.ResolverEntry, dep common.Dependency, cacheEn
 // Results writes need no lock: each worker owns a distinct results slot that
 // is only read after the worker pool drains. The matched entry is threaded in
 // from the caller, so it is never re-matched here.
-func resolveJobWithCache(g *cacheGuard, results []common.Resolved, job resolveJob, fresh bool) {
-	if res, hit := g.peek(job.entry, job.ok, job.dep, fresh); hit {
+func resolveJobWithCache(g *cacheGuard, results []common.Resolved, job resolveJob, fresh bool, classifier *common.Classifier) {
+	if res, hit := g.peek(job.entry, job.ok, job.dep, fresh, classifier); hit {
 		results[job.index] = res
 		return
 	}
 	vi := job.entry.Resolve(job.dep) // network fetch happens OUTSIDE the lock
-	res, _ := g.commit(job.dep, vi, fresh)
+	res, _ := g.commit(job.dep, vi, fresh, classifier)
 	results[job.index] = res
 }
 
@@ -196,7 +196,7 @@ type resolveJob struct {
 // shared cache state (peek and commit), while each fetch runs outside the lock
 // so concurrent fetches stay parallel rather than serialized. Result order
 // mirrors the input order, so output stays deterministic.
-func resolveAll(opts *Options, guard *cacheGuard, resolvers []common.ResolverEntry, deps []common.Dependency) []common.Resolved {
+func resolveAll(opts *Options, guard *cacheGuard, resolvers []common.ResolverEntry, deps []common.Dependency, classifier *common.Classifier) []common.Resolved {
 	results := make([]common.Resolved, len(deps))
 
 	// Spawn the bounded worker pool up front, then feed every dependency from
@@ -214,7 +214,7 @@ func resolveAll(opts *Options, guard *cacheGuard, resolvers []common.ResolverEnt
 				// shared cache state, while the network fetch runs outside it
 				// so concurrent fetches stay bounded by the worker pool rather
 				// than serialized.
-				resolveJobWithCache(guard, results, job, opts.Fresh)
+				resolveJobWithCache(guard, results, job, opts.Fresh, classifier)
 			}
 		}()
 	}
@@ -229,7 +229,7 @@ func resolveAll(opts *Options, guard *cacheGuard, resolvers []common.ResolverEnt
 	wg.Wait()
 
 	if opts.NativeTools {
-		results = append(results, resolverimpl.ResolveNativeDeps(opts.Root, opts.NativeToolTimeout)...)
+		results = append(results, resolverimpl.ResolveNativeDeps(opts.Root, opts.NativeToolTimeout, classifier)...)
 	}
 	return results
 }

@@ -24,10 +24,10 @@ import (
 // not extract (their pins live in lockfiles, not the build files) and returns
 // them already classified. It matches the common.BatchResolver shape so main's
 // wiring can register it alongside the per-client resolvers.
-func ResolveNativeDeps(root string, timeout time.Duration) []common.Resolved {
+func ResolveNativeDeps(root string, timeout time.Duration, classifier *common.Classifier) []common.Resolved {
 	var out []common.Resolved
-	out = append(out, resolveGoModules(root, timeout)...)
-	out = append(out, resolvePNPM(root, timeout)...)
+	out = append(out, resolveGoModules(root, timeout, classifier)...)
+	out = append(out, resolvePNPM(root, timeout, classifier)...)
 	return out
 }
 
@@ -42,7 +42,7 @@ type goModuleJSON struct {
 
 // resolveGoModules runs `go list -u -m all -json` in core/controller and turns
 // each module into a classified record with current vs latest.
-func resolveGoModules(root string, timeout time.Duration) []common.Resolved {
+func resolveGoModules(root string, timeout time.Duration, classifier *common.Classifier) []common.Resolved {
 	workDir := filepath.Join(root, "core", "controller")
 	out, err := runNativeTool(workDir, []string{"go", "list", "-m", "-u", "-json", "all"}, timeout)
 	if err != nil {
@@ -78,7 +78,7 @@ func resolveGoModules(root string, timeout time.Duration) []common.Resolved {
 			vi.Version = mod.Update.Version
 			vi.Date = mod.Update.Time
 		}
-		res = append(res, common.Classify(dep, vi))
+		res = append(res, classifier.Classify(dep, vi))
 	}
 	return res
 }
@@ -93,7 +93,7 @@ type pnpmOutdated map[string]struct {
 // each outdated package into a classified record. `pnpm outdated` exits 1 when
 // anything is outdated, which is the expected success signal here; only other
 // exit codes are failures.
-func resolvePNPM(root string, timeout time.Duration) []common.Resolved {
+func resolvePNPM(root string, timeout time.Duration, classifier *common.Classifier) []common.Resolved {
 	workDir := filepath.Join(root, "tools", "streamdeck-plugin")
 	out, err := runNativeTool(workDir, []string{"pnpm", "outdated", "--json"}, timeout)
 	if err != nil && !isOutdatedExitOne(err) {
@@ -119,7 +119,7 @@ func resolvePNPM(root string, timeout time.Duration) []common.Resolved {
 			Version:  info.Current,
 			File:     "tools/streamdeck-plugin/package.json",
 		}
-		r := common.Classify(dep, common.VersionInfo{Version: info.Latest})
+		r := classifier.Classify(dep, common.VersionInfo{Version: info.Latest})
 		res = append(res, r)
 	}
 	return res

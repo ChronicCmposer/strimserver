@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"strimserver-check-deps/common"
+	"strimserver-check-deps/utilities"
 )
 
 // pinSpec describes one version pin to scrape from a shell script. The first
@@ -221,9 +222,9 @@ func scrapeFfmpeg(data []byte, file string) ([]common.Dependency, []common.Extra
 
 // debianBaseImageNote renders the ffmpeg-dist chroot base image tag from the
 // pinned Debian snapshot, e.g. 20260824T082821Z -> "trixie-20260824-slim". It
-// extracts the 8-digit YYYYMMDD date bounds-safely via common.ExtractDate, so
-// a short or malformed snapshot yields an empty date instead of panicking.
+// extracts the 8-digit YYYYMMDD date bounds-safely via utilities.ExtractDate,
+// so a short or malformed snapshot yields an empty date instead of panicking.
 func debianBaseImageNote(snapshot string) string {
-	date := common.ExtractDate(snapshot) // "YYYYMMDD"
+	date := utilities.ExtractDate(snapshot) // "YYYYMMDD"
 	return "base image debian:trixie-" + date + "-slim"
 }

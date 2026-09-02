@@ -7,6 +7,7 @@ import (
 	"regexp"
 
 	"strimserver-check-deps/common"
+	"strimserver-check-deps/utilities"
 )
 
 // Docker Hub tags client. Used for the Debian trixie date-stamped base image
@@ -94,9 +95,9 @@ func DebianResolve(f *common.Fetcher) common.ResolverFunc {
 			vi.Err = errors.New("no trixie-YYYYMMDD-slim tag found on Docker Hub")
 			return vi
 		}
-		vi.Version = common.ExtractDate(tag.Name)
+		vi.Version = utilities.ExtractDate(tag.Name)
 		if snap := newestDebianSnapshot(f); snap != "" {
-			if cur := common.ExtractDate(dep.Version); cur != "" && snap > cur {
+			if cur := utilities.ExtractDate(dep.Version); cur != "" && snap > cur {
 				vi.Infos = append(vi.Infos,
 					"snapshot.debian.org has newer snapshot "+snap+" (T3 informational)")
 			}
