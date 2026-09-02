@@ -37,7 +37,10 @@ go_library(
 
 go_test(
     name = "common_test",
-    srcs = ["common/classify_test.go"],
+    srcs = [
+        "common/classify_test.go",
+        "common/client_test.go",
+    ],
     embed = [":common"],
 )
 

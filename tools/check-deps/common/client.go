@@ -20,15 +20,9 @@ import (
 // and a fake clock; every resolver is closure-bound to the fetcher it should
 // reach through in the composition-root wiring.
 
-const (
-	httpTimeout         = 20 * time.Second
-	maxResponseBytes    = 16 << 20
-	userAgent           = "strimserver-check-deps"
-	rateLimitRetryDelay = 750 * time.Millisecond
-)
-
 // Fetcher performs bounded, retrying GET requests. The zero value is not
-// usable: build one with NewFetcher or populate every field explicitly.
+// usable: every field must be populated, and the production defaults are wired
+// by the main package's constructor.
 type Fetcher struct {
 	Client     *http.Client
 	UserAgent  string
@@ -39,19 +33,6 @@ type Fetcher struct {
 	Sleep func(time.Duration)
 	// Warn receives non-fatal warnings; injected so tests capture them.
 	Warn func(string, ...any)
-}
-
-// NewFetcher wires the production defaults: a 20s-timeout client, the standard
-// user agent, a 16MiB response cap, and a 750ms rate-limit backoff.
-func NewFetcher(warn func(string, ...any)) *Fetcher {
-	return &Fetcher{
-		Client:     &http.Client{Timeout: httpTimeout},
-		UserAgent:  userAgent,
-		MaxBytes:   maxResponseBytes,
-		RetryDelay: rateLimitRetryDelay,
-		Sleep:      time.Sleep,
-		Warn:       warn,
-	}
 }
 
 // FetchBytes GETs rawURL and returns the response body. A rate-limited attempt

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -57,6 +58,14 @@ type Options struct {
 	// to true; the e2e test sets it false to keep the pipeline deterministic
 	// without a machine-dependent toolchain.
 	NativeTools bool
+	// HTTPTimeout bounds each upstream GET performed by the shared Fetcher.
+	HTTPTimeout time.Duration
+	// MaxResponseBytes caps the largest response body the Fetcher will accept.
+	MaxResponseBytes int64
+	// UserAgent is sent on every Fetcher request.
+	UserAgent string
+	// RateLimitRetryDelay is the backoff before the Fetcher's single rate-limit retry.
+	RateLimitRetryDelay time.Duration
 }
 
 // main is the composition root: it parses flags into Options, resolves the repo
@@ -74,6 +83,10 @@ func main() {
 		NativeToolTimeout:    60 * time.Second,
 		MaxConcurrentFetches: runtime.NumCPU(),
 		NativeTools:          true,
+		HTTPTimeout:          20 * time.Second,
+		MaxResponseBytes:     16 << 20,
+		UserAgent:            "strimserver-check-deps",
+		RateLimitRetryDelay:  750 * time.Millisecond,
 	}
 	opts.JSON = *jsonFlag
 	opts.Console = *consoleFlag
@@ -90,7 +103,7 @@ func main() {
 	}
 	opts.Root = root
 
-	fetcher := common.NewFetcher(warnf)
+	fetcher := newFetcher(&opts)
 
 	resolvers := []common.ResolverEntry{
 		{Match: isBazelModule, Resolve: resolverimpl.BCRResolve(fetcher), Network: true},
@@ -152,6 +165,21 @@ func main() {
 		fail("check-deps", err)
 	}
 	os.Exit(0)
+}
+
+// newFetcher wires the shared common.Fetcher from the run's Options: the HTTP
+// timeout, user agent, response-size cap, and rate-limit backoff all come from
+// the injected configuration so tests and the composition root control them
+// explicitly. common owns the Fetcher type and FetchBytes.
+func newFetcher(opts *Options) *common.Fetcher {
+	return &common.Fetcher{
+		Client:     &http.Client{Timeout: opts.HTTPTimeout},
+		UserAgent:  opts.UserAgent,
+		MaxBytes:   opts.MaxResponseBytes,
+		RetryDelay: opts.RateLimitRetryDelay,
+		Sleep:      time.Sleep,
+		Warn:       opts.Warn,
+	}
 }
 
 // repoRoot resolves the repository root. The caller injects the Bazel

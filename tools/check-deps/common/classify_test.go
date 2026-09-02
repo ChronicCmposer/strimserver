@@ -1,9 +1,6 @@
 package common
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"strimserver-check-deps/utilities"
@@ -118,31 +115,3 @@ var errTestNetwork = errorString("test network failure")
 type errorString string
 
 func (e errorString) Error() string { return string(e) }
-
-// --- fetcher size cap ------------------------------------------------------
-
-func TestFetchBytesRejectsOversizedBody(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("0123456789ABCDEF")) // 16 bytes
-	}))
-	defer ts.Close()
-
-	f := &Fetcher{Client: ts.Client(), MaxBytes: 8}
-	_, err := f.FetchBytes(ts.URL)
-	if err == nil || !strings.Contains(err.Error(), "exceeds") {
-		t.Errorf("oversized body: got err=%v, want one mentioning 'exceeds'", err)
-	}
-}
-
-func TestFetchBytesAcceptsWithinLimit(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("small"))
-	}))
-	defer ts.Close()
-
-	f := &Fetcher{Client: ts.Client(), MaxBytes: 1024}
-	data, err := f.FetchBytes(ts.URL)
-	if err != nil || string(data) != "small" {
-		t.Errorf("within-limit body: data=%q err=%v", data, err)
-	}
-}

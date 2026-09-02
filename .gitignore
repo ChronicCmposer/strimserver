@@ -18,6 +18,7 @@ tools/local-obs/
 
 # Local implementation plans — throwaway working docs; not part of the repo.
 plans/
+playbooks/
 
 # check-deps version-check cache (populated by later phases).
 tools/check-deps/.cache/
