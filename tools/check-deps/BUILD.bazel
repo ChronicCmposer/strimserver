@@ -39,6 +39,7 @@ go_test(
     srcs = [
         "common/classify_test.go",
         "common/client_test.go",
+        "common/extract_test.go",
     ],
     embed = [":common"],
 )
