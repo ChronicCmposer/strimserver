@@ -641,6 +641,93 @@ lint, generated-file staleness, and the image smoke tests
 and `//core:ffmpeg_smoke_test` — the latter also asserts every
 `DT_NEEDED` library is packaged in the image).
 
+## Dependency check
+
+`tools/check-deps` inventories **every pinned dependency** in the
+repo — Bazel modules, Go modules, npm packages, container base
+images, downloaded artifacts, toolchain versions, CI actions, and
+script pins — resolves the latest upstream version, and emits a
+tiered report so stale or drifting pins are noticed instead of
+silently rotting. It is **report-only**: it never modifies pins and
+never gates a build.
+
+Run it locally (the `make` facade and the underlying `bazel`
+command are equivalent):
+
+```bash
+make check-deps                                  # console report (default)
+bazel run //tools/check-deps:check-deps -- --json   # JSON report to stdout
+bazel run //tools/check-deps:check-deps -- --fresh  # bypass the cache, refetch
+bazel run //tools/check-deps:check-deps -- --ignore # apply deps-ignore.json
+```
+
+The console report lists T1 and T2 findings individually and
+collapses T3 into a count; `--json` emits the full structured
+report (`{ "findings": [...], "counts": {...}, "unknowns": [...] }`).
+
+Each dependency is classified into a **tier** (review priority)
+and a **status** (current state):
+
+| Tier | Meaning |
+|------|---------|
+| T1 (security) | Security-critical surface: network services, base images, media/emulation parsers. Listed individually, highest priority. |
+| T2 (review) | Build graph, toolchain, and supply chain. Listed individually. |
+| T3 (minor) | Everything else. Collapsed into a count in the console report. |
+
+| Status | Meaning |
+|--------|---------|
+| update | A newer upstream version exists; the pin should be reviewed. |
+| unknown | The latest version could not be determined. |
+| ok | The pin is current (or properly pinned with no tag to float). |
+| hygiene | The pin is valid but floats upstream (a rolling tag, no digest). |
+
+### Ignore file (`deps-ignore.json`)
+
+Intentional pins that a plain run would flag as updates can be
+collapsed with `--ignore`. The file sits at the repo root and each
+rule is `{ "id", "reason", "until" }`, where `id` is
+`category/name` (e.g. `npm/@rollup/rollup-linux-arm64-gnu`) and
+`until` (`YYYY-MM-DD`, optional) expires the rule:
+
+```json
+[
+  {
+    "id": "npm/@rollup/rollup-linux-arm64-gnu",
+    "reason": "Upstream publishes this platform binary as an exact tag; no newer tag expected.",
+    "until": "2026-12-31"
+  }
+]
+```
+
+A rule with no `until` never expires. Expired rules no longer
+match, so an intentional pin that outlives its grace period
+surfaces again as `update`.
+
+### Cache
+
+Network-backed resolvers cache upstream results under
+`tools/check-deps/.cache/deps-cache.json` for 24 hours, so
+repeated runs are fast and offline-friendly. Use `--fresh` to
+bypass the cache and refetch. The cache is git-ignored and only
+network resolvers are cached — native resolvers (`go list -u`,
+`pnpm outdated`) always resolve live.
+
+### CI
+
+A weekly workflow (`.github/workflows/deps-check.yml`) runs every
+Monday at 03:00 UTC (and on demand via `workflow_dispatch`). It
+uses `--ignore` so intentional pins are collapsed, and uploads
+`deps-report.json` and the console log as the `deps-check`
+artifact. Because updates don't change the exit code, a normal run
+succeeds; only an operational failure (exit 1) fails the job so it
+is noticed. The check-deps unit tests run on every PR via the
+`controller-ci` workflow.
+
+### Exit codes
+
+- `0` — the tool ran successfully (updates may exist; check the report).
+- `1` — operational failure (repo root unresolvable, JSON serialization failed).
+
 ## AWS EC2 deployment target
 
 The intended deployment target is an AWS EC2 GPU instance

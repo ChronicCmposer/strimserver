@@ -1,0 +1,7 @@
+[
+  {
+    "id": "npm/@rollup/rollup-linux-arm64-gnu",
+    "reason": "Intentional platform-locked pin: @rollup/rollup-linux-arm64-gnu is forced to 4.62.2 to match the rollup version declared elsewhere, so pnpm outdated reports it as outdated. Keep it; bump rollup as a unit.",
+    "until": ""
+  }
+]

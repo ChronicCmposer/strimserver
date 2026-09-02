@@ -9,7 +9,7 @@ S3_BUCKET ?=s3://<bucket-name>
 .DEFAULT_GOAL := package
 
 .PHONY: prepare generate check-generated controller test-controller package release \
-	bump-version check-no-twitch-key publish-all publish-strimserver publish-iperf3 publish-streamdeck
+	bump-version check-no-twitch-key check-deps publish-all publish-strimserver publish-iperf3 publish-streamdeck
 
 # Bootstrap: copy the example env into place for the first local checkout
 # (never overwrite an existing, possibly customized, core/strimserver.env).
@@ -30,6 +30,11 @@ test-controller:
 
 check-no-twitch-key:
 	bazel build //:check_no_twitch_key
+
+# Phase 1 stub: list every pinned dependency in the repo (Bazel modules,
+# toolchain versions, downloaded artifacts, CI actions, and script pins).
+check-deps:
+	bazel run //tools/check-deps:check-deps
 
 package:
 	bazel build //:package

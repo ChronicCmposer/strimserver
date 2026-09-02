@@ -1,0 +1,55 @@
+# gazelle:prefix strimserver-check-deps
+
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+# Stdlib-only Go module (no go_deps wiring; see MODULE.bazel). Phase 1
+# extracts dependency pins; Phase 2 resolves upstream versions via registry
+# clients, scrapers, and native tools, then classifies each dep by tier.
+go_library(
+    name = "check_deps_lib",
+    srcs = [
+        "alpine.go",
+        "bcr.go",
+        "cache.go",
+        "client.go",
+        "debian_snapshot.go",
+        "dockerhub.go",
+        "extract.go",
+        "github.go",
+        "go_mod.go",
+        "ignore.go",
+        "main.go",
+        "module_bazel.go",
+        "nativetools.go",
+        "nvidia.go",
+        "output.go",
+        "pypi.go",
+        "resolved.go",
+        "resolve.go",
+        "scrapers.go",
+        "scripts.go",
+        "semver.go",
+        "tier.go",
+        "toolchain.go",
+        "types.go",
+        "workflows.go",
+    ],
+    importpath = "strimserver-check-deps",
+    visibility = ["//visibility:private"],
+)
+
+go_binary(
+    name = "check-deps",
+    embed = [":check_deps_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "check_deps_test",
+    srcs = [
+        "check_deps_test.go",
+        "phase2_test.go",
+        "phase3_test.go",
+    ],
+    embed = [":check_deps_lib"],
+)
