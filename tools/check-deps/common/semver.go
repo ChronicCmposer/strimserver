@@ -1,6 +1,7 @@
-package main
+package common
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -9,20 +10,15 @@ import (
 // semver semantics are implemented here with a chunked, numeric-aware compare
 // that degrades gracefully on non-semver strings.
 
-// compareSemver compares two version strings and returns -1, 0, or 1 when a
+// CompareSemver compares two version strings and returns -1, 0, or 1 when a
 // sorts before, equal to, or after b. It strips a leading alphabetic tag
 // prefix (v, n, ...), ignores build metadata after '+', compares the numeric
 // core chunk-wise, and then applies semver prerelease precedence. Non-semver
 // strings are compared by their numeric/alpha chunks rather than rejected.
-func compareSemver(a, b string) int {
-	a = stripTagPrefix(a)
-	b = stripTagPrefix(b)
-	// Build metadata never participates in ordering.
-	a, _, _ = strings.Cut(a, "+")
-	b, _, _ = strings.Cut(b, "+")
-	aCore, aPre, hasPreA := strings.Cut(a, "-")
-	bCore, bPre, hasPreB := strings.Cut(b, "-")
-	if c := compareChunks(aCore, bCore); c != 0 {
+func CompareSemver(a, b string) int {
+	aCore, aPre, hasPreA := splitCoreAndPre(a)
+	bCore, bPre, hasPreB := splitCoreAndPre(b)
+	if c := CompareChunks(aCore, bCore); c != 0 {
 		return c
 	}
 	switch {
@@ -31,17 +27,37 @@ func compareSemver(a, b string) int {
 	case hasPreA && !hasPreB:
 		return -1
 	case hasPreA && hasPreB:
-		return comparePrerelease(aPre, bPre)
+		return ComparePrerelease(aPre, bPre)
 	}
 	return 0
 }
 
-// compareChunks compares two strings by walking numeric and alphabetic runs.
+// coreVersion reduces a version string to its numeric core: it strips a
+// leading alphabetic tag prefix, drops build metadata after '+', and cuts the
+// prerelease suffix after '-'. Ordering and numeric-axis parsing both operate
+// on the core, so every caller normalizes through here and the
+// metadata/prerelease suffixes never skew an ordering or a parse.
+func coreVersion(s string) string {
+	core, _, _ := splitCoreAndPre(s)
+	return core
+}
+
+// splitCoreAndPre normalizes a version and splits it into its numeric core and
+// its prerelease suffix ("" and false when none). Build metadata after '+' is
+// dropped and a leading alphabetic tag prefix is stripped before the split, so
+// CompareSemver keeps the prerelease while coreVersion discards it.
+func splitCoreAndPre(s string) (core, pre string, hasPre bool) {
+	s = stripTagPrefix(s)
+	s, _, _ = strings.Cut(s, "+")
+	return strings.Cut(s, "-")
+}
+
+// CompareChunks compares two strings by walking numeric and alphabetic runs.
 // Numeric runs compare as integers (so 1.4.19 > 1.4.9) and alphabetic runs
 // compare lexically; a separator like '.' advances both sides equally. This
 // gives sort -V style ordering for the date tags, alpine revisions, and the
 // nv-codec-header / CUDA tags the registry clients rely on.
-func compareChunks(a, b string) int {
+func CompareChunks(a, b string) int {
 	for {
 		switch {
 		case a == "" && b == "":
@@ -63,21 +79,30 @@ func compareChunks(a, b string) int {
 		aAlpha := leadingLetters(a)
 		bAlpha := leadingLetters(b)
 		if aAlpha != "" || bAlpha != "" {
-			if c := compareStrings(aAlpha, bAlpha); c != 0 {
+			if c := strings.Compare(aAlpha, bAlpha); c != 0 {
 				return c
 			}
 			a, b = a[len(aAlpha):], b[len(bAlpha):]
 			continue
 		}
-		// Both sides sit on a separator (e.g. '.'). Versions in this tool use
-		// '.' uniformly, so advance one character from each.
+		// Both sides sit on a separator (e.g. '.'); neither is a digit or
+		// letter run. Versions in this tool use '.' uniformly, so advance one
+		// character from each. When the separators diverge (e.g. '.' vs '-'),
+		// order by the separator byte so ordering stays well-defined and no
+		// slice can underflow (a and b are both non-empty here).
+		if a[0] != b[0] {
+			if a[0] < b[0] {
+				return -1
+			}
+			return 1
+		}
 		a, b = a[1:], b[1:]
 	}
 }
 
-// comparePrerelease orders prerelease identifiers per semver: numeric
+// ComparePrerelease orders prerelease identifiers per semver: numeric
 // identifiers compare as integers and sort before alphanumeric identifiers.
-func comparePrerelease(a, b string) int {
+func ComparePrerelease(a, b string) int {
 	as := strings.Split(a, ".")
 	bs := strings.Split(b, ".")
 	short := len(as)
@@ -108,7 +133,13 @@ func comparePrereleaseIdent(a, b string) int {
 	case !aNum && bNum:
 		return 1
 	default:
-		return compareStrings(a, b)
+		// Alphanumeric identifiers: compare the full strings chunk-wise, the
+		// same way CompareChunks orders version cores. Numeric runs compare as
+		// integers and alphabetic runs lexically, so interior content is never
+		// dropped and multi-run identifiers like "r10foo2" sort after "r9foo10"
+		// (both run "r", then 10 > 9) instead of being mis-ordered by their
+		// trailing digits.
+		return CompareChunks(a, b)
 	}
 }
 
@@ -138,6 +169,28 @@ func leadingLetters(s string) string {
 	return s[:i]
 }
 
+// leadingInt returns the integer parsed from the leading digit run of s and
+// whether it parsed successfully. A run that is absent or overflows int is not
+// a representable integer, so it returns (0, false); any in-range digit run
+// returns (value, true). Callers use the bool to distinguish a genuine 0 (e.g.
+// "0" or "000") from "no digit present", so missing and broken inputs stay
+// distinguishable rather than collapsing onto the same sentinel.
+func leadingInt(s string) (int, bool) {
+	digits := leadingDigits(s)
+	if digits == "" {
+		return 0, false // no digit run: not an integer
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return 0, true // the run was all zeros; that is a valid 0
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil {
+		return 0, false // overflow: not representable
+	}
+	return n, true
+}
+
 // compareBigInt compares two decimal strings as integers (empty == 0),
 // ignoring leading zeros.
 func compareBigInt(a, b string) int {
@@ -156,17 +209,7 @@ func compareBigInt(a, b string) int {
 		}
 		return 1
 	}
-	return compareStrings(a, b)
-}
-
-func compareStrings(a, b string) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
+	return strings.Compare(a, b)
 }
 
 func isAllDigits(s string) bool {

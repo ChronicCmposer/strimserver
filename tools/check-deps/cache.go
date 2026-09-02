@@ -2,29 +2,52 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
+
+	"strimserver-check-deps/common"
 )
 
-// This file owns the 24h TTL cache of upstream registry results. The cache
-// stores, per dependency, the versionInfo a resolver produced, keyed by the
-// pinned current version so that bumping a pin invalidates that entry. A cache
-// read failure is never fatal (we fall back to live fetches); a write failure
-// is warned, never fatal.
+// This file owns the TTL cache of upstream registry results. The cache stores,
+// per dependency, the versionInfo a resolver produced, keyed by the pinned
+// current version so that bumping a pin invalidates that entry. The freshness
+// TTL is injected via Options.CacheTTL; a cache read failure is never fatal (we
+// fall back to live fetches); a write failure is warned, never fatal.
 
-const (
-	cacheSchema = 1
-	cacheTTL    = 24 * time.Hour
-)
+// cacheSchema is the on-disk format version of deps-cache.json.
+const cacheSchema = 1
+
+// Cache reads and writes the on-disk dependency cache. All collaborators
+// (path, TTL, clock, warning sink) are injected so the behavior is testable
+// and free of package-global state. Read/write failures are never fatal: they
+// warn through Warn and fall back to live fetches.
+type Cache struct {
+	Path string
+	TTL  time.Duration
+	Now  func() time.Time
+	Warn func(string, ...any)
+}
+
+// newCache builds the cache for a run from the options main already has. It
+// derives the on-disk path from root and the cacheFileRel constant, and takes
+// TTL, Now, and Warn from opts, so main never re-derives them and tests can
+// build the same cache from the same fakes they feed the rest of the pipeline.
+func newCache(opts *Options, root string) *Cache {
+	return &Cache{
+		Path: filepath.Join(root, cacheFileRel),
+		TTL:  opts.CacheTTL,
+		Now:  opts.Now,
+		Warn: opts.Warn,
+	}
+}
 
 // cacheEntry is the serialized form of a resolver's versionInfo.
 type cacheEntry struct {
 	Version string   `json:"version"`
 	Date    string   `json:"date,omitempty"`
 	Infos   []string `json:"infos,omitempty"`
-	Err     string   `json:"err,omitempty"`
 }
 
 // cacheFile is the on-disk shape of deps-cache.json.
@@ -42,95 +65,104 @@ const (
 
 // cacheKey derives the stable cache key for a dependency. It keys on the
 // pinned current version so a pin bump yields a fresh cache slot, and on the
-// category/name/source so distinct dependencies never collide.
-func cacheKey(dep dependency) string {
-	return dep.Category + "\x1f" + dep.Name + "\x1f" + dep.Source + "\x1f" + dep.Version
+// category/name/source so distinct dependencies never collide. The key is
+// produced by common.DepIdentity, so dedupe and the cache share one identity
+// definition.
+func cacheKey(dep common.Dependency) string {
+	return common.DepIdentity(dep).String()
 }
 
 // versionInfoToEntry converts a versionInfo into a serializable cacheEntry.
-func versionInfoToEntry(vi versionInfo) cacheEntry {
-	e := cacheEntry{
-		Version: vi.version,
-		Date:    vi.date,
-		Infos:   append([]string(nil), vi.infos...),
+// Only successful resolutions are ever cached, so the error field is never
+// written.
+func versionInfoToEntry(vi common.VersionInfo) cacheEntry {
+	return cacheEntry{
+		Version: vi.Version,
+		Date:    vi.Date,
+		Infos:   slices.Clone(vi.Infos),
 	}
-	if vi.err != nil {
-		e.Err = vi.err.Error()
-	}
-	return e
 }
 
-// entryToVersionInfo converts a cached entry back into a versionInfo.
-func entryToVersionInfo(e cacheEntry) versionInfo {
-	vi := versionInfo{
-		version: e.Version,
-		date:    e.Date,
-		infos:   append([]string(nil), e.Infos...),
+// entryToVersionInfo converts a cached entry back into a versionInfo. A
+// cached entry is always a successful resolution, so no error is recovered.
+func entryToVersionInfo(e cacheEntry) common.VersionInfo {
+	return common.VersionInfo{
+		Version: e.Version,
+		Date:    e.Date,
+		Infos:   slices.Clone(e.Infos),
 	}
-	if e.Err != "" {
-		vi.err = errors.New(e.Err)
-	}
-	return vi
 }
 
-// loadCache reads and decodes the cache file, returning the live entries. A
-// missing, corrupt, or expired cache yields an empty entry map plus a loud
-// warning: the caller always proceeds with live fetches (never fatal).
-func loadCache(path string) map[string]cacheEntry {
-	data, err := os.ReadFile(path)
+// Load reads and decodes the cache file, returning the live entries. A missing,
+// corrupt, or expired cache yields an empty entry map: a missing file is silent
+// (as before), while corruption, schema mismatch, and expiry warn loudly. The
+// caller always proceeds with live fetches (never fatal).
+func (c *Cache) Load() map[string]cacheEntry {
+	data, err := os.ReadFile(c.Path)
 	if err != nil {
-		return map[string]cacheEntry{}
+		return emptyCacheEntries()
 	}
 	var cf cacheFile
 	if err := json.Unmarshal(data, &cf); err != nil {
-		warnf("cache unreadable (%v); refetching live", err)
-		return map[string]cacheEntry{}
+		c.Warn("cache unreadable (%v); refetching live", err)
+		return emptyCacheEntries()
 	}
 	if cf.Schema != cacheSchema {
-		warnf("cache schema %d unsupported; refetching live", cf.Schema)
-		return map[string]cacheEntry{}
+		c.Warn("cache schema %d unsupported; refetching live", cf.Schema)
+		return emptyCacheEntries()
 	}
-	if time.Since(cf.Written) > cacheTTL {
-		return map[string]cacheEntry{}
+	if c.Now().Sub(cf.Written) > c.TTL {
+		c.Warn("cache expired; refetching live")
+		return emptyCacheEntries()
+	}
+	if cf.Entries == nil {
+		return emptyCacheEntries()
 	}
 	return cf.Entries
 }
 
-// saveCache writes the entries atomically (temp file + rename) so a crash
-// never leaves a half-written cache. A write failure is warned, never fatal.
-func saveCache(path string, entries map[string]cacheEntry) {
+// emptyCacheEntries is the single empty-entry fallback every Load early-exit
+// shares, so the empty map is constructed in exactly one place.
+func emptyCacheEntries() map[string]cacheEntry {
+	return map[string]cacheEntry{}
+}
+
+// Save writes the entries atomically (temp file + rename) so a crash never
+// leaves a half-written cache. A write failure is warned through Warn, never
+// fatal.
+func (c *Cache) Save(entries map[string]cacheEntry) {
 	cf := cacheFile{
 		Schema:  cacheSchema,
-		Written: time.Now(),
+		Written: c.Now(),
 		Entries: entries,
 	}
 	data, err := json.Marshal(cf)
 	if err != nil {
-		warnf("cannot encode cache: %v", err)
+		c.Warn("cannot encode cache: %v", err)
 		return
 	}
-	dir := filepath.Dir(path)
+	dir := filepath.Dir(c.Path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		warnf("cannot create cache dir %s: %v", dir, err)
+		c.Warn("cannot create cache dir %s: %v", dir, err)
 		return
 	}
 	tmp, err := os.CreateTemp(dir, "deps-cache-*.tmp")
 	if err != nil {
-		warnf("cannot create temp cache file: %v", err)
+		c.Warn("cannot create temp cache file: %v", err)
 		return
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		warnf("cannot write cache: %v", err)
+		c.Warn("cannot write cache: %v", err)
 		return
 	}
 	if err := tmp.Close(); err != nil {
-		warnf("cannot close cache: %v", err)
+		c.Warn("cannot close cache: %v", err)
 		return
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		warnf("cannot rename cache into place: %v", err)
+	if err := os.Rename(tmpName, c.Path); err != nil {
+		c.Warn("cannot rename cache into place: %v", err)
 	}
 }

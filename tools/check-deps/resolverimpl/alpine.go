@@ -1,4 +1,4 @@
-package main
+package resolverimpl
 
 import (
 	"archive/tar"
@@ -7,8 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
+
+	"strimserver-check-deps/common"
 )
 
 // Alpine APKINDEX client. iperf3 is pinned from a specific Alpine branch
@@ -43,9 +44,9 @@ func parseAPKIndex(data []byte) (map[string]string, error) {
 
 // fetchAPKIndexVersion downloads and extracts the APKINDEX for one Alpine
 // branch and returns the version of pkg within it.
-func fetchAPKIndexVersion(branch, pkg string) (string, error) {
+func fetchAPKIndexVersion(branch, pkg string, f *common.Fetcher) (string, error) {
 	url := fmt.Sprintf("https://dl-cdn.alpinelinux.org/alpine/%s/main/x86_64/APKINDEX.tar.gz", branch)
-	data, err := fetchBytes(url)
+	data, err := f.FetchBytes(url)
 	if err != nil {
 		return "", err
 	}
@@ -86,28 +87,38 @@ func fetchAPKIndexVersion(branch, pkg string) (string, error) {
 	return version, nil
 }
 
-var alpineBranchNoteRe = regexp.MustCompile(`alpine (v[0-9.]+) branch`)
+// alpineLatestStableBranch is the newest Alpine stable branch used for the
+// iperf3 staleness note. Bump this when Alpine releases a new stable branch.
+const alpineLatestStableBranch = "v3.24"
 
-// alpineResolve resolves the iperf3 pin: the version in the pinned branch
-// drives the update check, and a newer iperf3 on the latest-stable branch is
-// recorded as informational branch staleness.
-func alpineResolve(dep dependency) versionInfo {
-	branch := "v3.23"
-	if m := alpineBranchNoteRe.FindStringSubmatch(dep.Note); m != nil {
-		branch = m[1]
-	}
-	vi := versionInfo{}
-	pinned, err := fetchAPKIndexVersion(branch, "iperf3")
-	if err != nil {
-		vi.err = err
+// alpinePinnedDefaultBranch is the Alpine branch the repo's iperf3 apk is
+// pinned from when the extractor recorded no structured branch.
+const alpinePinnedDefaultBranch = "v3.23"
+
+// AlpineResolve builds a resolver for the iperf3 pin: the version in the
+// pinned branch drives the update check, and a newer iperf3 on the
+// latest-stable branch is recorded as informational branch staleness. The
+// pinned branch comes from the structured dependency.Branch field, falling
+// back to the default v3.23 when the extractor did not record one.
+func AlpineResolve(f *common.Fetcher) common.ResolverFunc {
+	return func(dep common.Dependency) common.VersionInfo {
+		branch := dep.Branch
+		if branch == "" {
+			branch = alpinePinnedDefaultBranch
+		}
+		vi := common.VersionInfo{}
+		pinned, err := fetchAPKIndexVersion(branch, "iperf3", f)
+		if err != nil {
+			vi.Err = err
+			return vi
+		}
+		vi.Version = pinned
+		if stable, err := fetchAPKIndexVersion(alpineLatestStableBranch, "iperf3", f); err == nil {
+			if common.CompareSemver(stable, pinned) > 0 {
+				vi.Infos = append(vi.Infos,
+					"latest-stable alpine "+alpineLatestStableBranch+" has iperf3 "+stable+" (branch staleness, T3 informational)")
+			}
+		}
 		return vi
 	}
-	vi.version = pinned
-	if stable, err := fetchAPKIndexVersion("v3.24", "iperf3"); err == nil {
-		if compareSemver(stable, pinned) > 0 {
-			vi.infos = append(vi.infos,
-				"latest-stable alpine v3.24 has iperf3 "+stable+" (branch staleness, T3 informational)")
-		}
-	}
-	return vi
 }

@@ -6,36 +6,97 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 # extracts dependency pins; Phase 2 resolves upstream versions via registry
 # clients, scrapers, and native tools, then classifies each dep by tier.
 go_library(
+    name = "common",
+    srcs = [
+        "common/classify.go",
+        "common/client.go",
+        "common/depkey.go",
+        "common/dispatch.go",
+        "common/extract.go",
+        "common/extractor.go",
+        "common/resolved.go",
+        "common/resolver.go",
+        "common/semver.go",
+        "common/snapshot.go",
+        "common/status.go",
+        "common/tier.go",
+        "common/types.go",
+        "common/version.go",
+    ],
+    importpath = "strimserver-check-deps/common",
+    visibility = ["//visibility:private"],
+)
+
+go_test(
+    name = "common_test",
+    srcs = ["common/classify_test.go"],
+    embed = [":common"],
+)
+
+go_library(
+    name = "resolverimpl",
+    srcs = [
+        "resolverimpl/alpine.go",
+        "resolverimpl/bcr.go",
+        "resolverimpl/debian_snapshot.go",
+        "resolverimpl/dockerhub.go",
+        "resolverimpl/github.go",
+        "resolverimpl/nativetools.go",
+        "resolverimpl/nvidia.go",
+        "resolverimpl/pypi.go",
+        "resolverimpl/resolve.go",
+        "resolverimpl/scrapers.go",
+    ],
+    importpath = "strimserver-check-deps/resolverimpl",
+    visibility = ["//visibility:private"],
+    deps = [":common"],
+)
+
+go_test(
+    name = "resolverimpl_test",
+    srcs = ["resolverimpl/registry_test.go"],
+    embed = [":resolverimpl"],
+    deps = [":common"],
+)
+
+go_library(
+    name = "extractorimpl",
+    srcs = [
+        "extractorimpl/go_mod.go",
+        "extractorimpl/module_bazel.go",
+        "extractorimpl/scripts.go",
+        "extractorimpl/toolchain.go",
+        "extractorimpl/workflows.go",
+    ],
+    importpath = "strimserver-check-deps/extractorimpl",
+    visibility = ["//visibility:private"],
+    deps = [":common"],
+)
+
+go_test(
+    name = "extractorimpl_test",
+    srcs = ["extractorimpl/extract_test.go"],
+    embed = [":extractorimpl"],
+    deps = [":common"],
+)
+
+go_library(
     name = "check_deps_lib",
     srcs = [
-        "alpine.go",
-        "bcr.go",
         "cache.go",
-        "client.go",
-        "debian_snapshot.go",
-        "dockerhub.go",
         "extract.go",
-        "github.go",
-        "go_mod.go",
         "ignore.go",
         "main.go",
-        "module_bazel.go",
-        "nativetools.go",
-        "nvidia.go",
         "output.go",
-        "pypi.go",
-        "resolved.go",
         "resolve.go",
-        "scrapers.go",
-        "scripts.go",
-        "semver.go",
-        "tier.go",
-        "toolchain.go",
-        "types.go",
-        "workflows.go",
     ],
     importpath = "strimserver-check-deps",
     visibility = ["//visibility:private"],
+    deps = [
+        ":common",
+        ":resolverimpl",
+        ":extractorimpl",
+    ],
 )
 
 go_binary(
@@ -47,9 +108,12 @@ go_binary(
 go_test(
     name = "check_deps_test",
     srcs = [
+        "app_e2e_test.go",
         "check_deps_test.go",
-        "phase2_test.go",
+        "main_test.go",
         "phase3_test.go",
+        "warn_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":check_deps_lib"],
 )

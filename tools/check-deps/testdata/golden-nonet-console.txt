@@ -1,0 +1,22 @@
+== strimserver check-deps ==
+repo root: /repo
+
+T1 (security) — 2
+  - alpine  (digest) -> -  (docker.io/library/alpine)  [MODULE.bazel]  [ok]  | digest-pinned; no tag to compare  | digest-pinned base image
+  - debian  20260824T082821Z -> 20260824  (https://snapshot.debian.org/archive/debian)  [MODULE.bazel]  [ok]
+
+T2 (review) — 5
+  - rules_go  0.63.0 -> 0.64.0  (https://bcr.bazel.build/modules/rules_go)  [MODULE.bazel]  [update]
+  - actions/checkout  v4 -> v7.0.1  (https://github.com/actions/checkout)  [.github/workflows/controller-ci.yml]  [update]
+  - qemu  9.2.4 -> 11.1.1  (https://download.qemu.org)  [tools/qemu/build-qemu.sh]  [update]
+  - golangci_lint_linux_amd64  2.13.2 -> 2.13.2  (https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-amd64.tar.gz)  [MODULE.bazel]  [ok]
+  - Bazel  9.2.0 -> 9.2.0  (.bazelversion)  [.bazelversion]  [ok]  | toolchain pin; no upstream endpoint configured
+
+T3 (minor) — 1
+  names: no-such-pin
+
+Unknown — 2
+  - tools/ffmpeg-dist/build.sh: cannot read file: open tools/ffmpeg-dist/build.sh: no such file or directory
+  - no-such-pin: no resolver configured for this dependency
+
+Ignored — 0

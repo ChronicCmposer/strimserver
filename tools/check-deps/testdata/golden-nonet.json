@@ -1,0 +1,144 @@
+{
+  "findings": [
+    {
+      "category": "base-image",
+      "name": "alpine",
+      "current": "",
+      "wanted": "",
+      "latest": "",
+      "tier": "T1",
+      "source": "docker.io/library/alpine",
+      "url": "",
+      "status": "ok",
+      "ignored": false,
+      "file": "MODULE.bazel",
+      "reasons": [
+        "digest-pinned; no tag to compare"
+      ],
+      "infos": [
+        "digest-pinned base image"
+      ]
+    },
+    {
+      "category": "base-image",
+      "name": "debian",
+      "current": "20260824T082821Z",
+      "wanted": "20260824",
+      "latest": "20260824",
+      "tier": "T1",
+      "source": "https://snapshot.debian.org/archive/debian",
+      "url": "https://snapshot.debian.org/archive/debian",
+      "status": "ok",
+      "ignored": false,
+      "file": "MODULE.bazel"
+    },
+    {
+      "category": "bazel-module",
+      "name": "rules_go",
+      "current": "0.63.0",
+      "wanted": "0.64.0",
+      "latest": "0.64.0",
+      "tier": "T2",
+      "source": "https://bcr.bazel.build/modules/rules_go",
+      "url": "https://bcr.bazel.build/modules/rules_go",
+      "status": "update",
+      "ignored": false,
+      "file": "MODULE.bazel"
+    },
+    {
+      "category": "ci-action",
+      "name": "actions/checkout",
+      "current": "v4",
+      "wanted": "v7.0.1",
+      "latest": "v7.0.1",
+      "tier": "T2",
+      "source": "https://github.com/actions/checkout",
+      "url": "https://github.com/actions/checkout",
+      "releaseDate": "2026-07-20T15:10:05Z",
+      "status": "update",
+      "ignored": false,
+      "file": ".github/workflows/controller-ci.yml"
+    },
+    {
+      "category": "script-pin",
+      "name": "no-such-pin",
+      "current": "1.0.0",
+      "wanted": "",
+      "latest": "",
+      "tier": "T3",
+      "source": "x",
+      "url": "",
+      "status": "unknown",
+      "ignored": false,
+      "file": "tools/x/build.sh",
+      "reasons": [
+        "no resolver configured for this dependency"
+      ]
+    },
+    {
+      "category": "script-pin",
+      "name": "qemu",
+      "current": "9.2.4",
+      "wanted": "11.1.1",
+      "latest": "11.1.1",
+      "tier": "T2",
+      "source": "https://download.qemu.org",
+      "url": "https://download.qemu.org",
+      "status": "update",
+      "ignored": false,
+      "file": "tools/qemu/build-qemu.sh"
+    },
+    {
+      "category": "tool-binary",
+      "name": "golangci_lint_linux_amd64",
+      "current": "2.13.2",
+      "wanted": "2.13.2",
+      "latest": "2.13.2",
+      "tier": "T2",
+      "source": "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-amd64.tar.gz",
+      "url": "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-amd64.tar.gz",
+      "status": "ok",
+      "ignored": false,
+      "file": "MODULE.bazel"
+    },
+    {
+      "category": "toolchain",
+      "name": "Bazel",
+      "current": "9.2.0",
+      "wanted": "9.2.0",
+      "latest": "9.2.0",
+      "tier": "T2",
+      "source": ".bazelversion",
+      "url": "",
+      "status": "ok",
+      "ignored": false,
+      "file": ".bazelversion",
+      "infos": [
+        "toolchain pin; no upstream endpoint configured"
+      ]
+    }
+  ],
+  "unknowns": [
+    {
+      "file": "tools/ffmpeg-dist/build.sh",
+      "reason": "cannot read file: open tools/ffmpeg-dist/build.sh: no such file or directory"
+    },
+    {
+      "name": "no-such-pin",
+      "file": "tools/x/build.sh",
+      "reason": "no resolver configured for this dependency"
+    }
+  ],
+  "counts": {
+    "total": 8,
+    "t1": 2,
+    "t2": 5,
+    "t3": 1,
+    "update": 3,
+    "unknown": 1,
+    "ok": 4,
+    "hygiene": 0,
+    "ignored": 0,
+    "unknowns": 2
+  }
+}
