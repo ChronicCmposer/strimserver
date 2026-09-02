@@ -11,7 +11,6 @@ go_library(
         "common/classify.go",
         "common/client.go",
         "common/depkey.go",
-        "common/dispatch.go",
         "common/extract.go",
         "common/extractor.go",
         "common/resolved.go",
