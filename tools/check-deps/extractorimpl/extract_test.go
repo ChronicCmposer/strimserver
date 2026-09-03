@@ -47,7 +47,7 @@ single_version_override(
     module_name = "bazel_lib",
     patch_strip = 1,
     patches = ["//tools/bazel/patches:bazel_lib_no_bats.patch"],
-    version = "3.7.0",
+    version = "3.7.2",
 )
 http_archive(
     name = "golangci_lint_linux_amd64",
@@ -84,7 +84,7 @@ oci.pull(
 	if got := findDep(t, deps, "bazel-module", "rules_go"); got == nil || got.Version != "0.63.0" {
 		t.Errorf("bazel_dep rules_go not extracted: %v", got)
 	}
-	if got := findDep(t, deps, "bazel-module", "bazel_lib"); got == nil || got.Version != "3.7.0" || got.Note != "pinned by single_version_override" {
+	if got := findDep(t, deps, "bazel-module", "bazel_lib"); got == nil || got.Version != "3.7.2" || got.Note != "pinned by single_version_override" {
 		t.Errorf("single_version_override bazel_lib not extracted: %v", got)
 	}
 	if got := findDep(t, deps, "tool-binary", "golangci_lint_linux_amd64"); got == nil || got.Version != "2.13.2" {

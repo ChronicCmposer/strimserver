@@ -18,7 +18,7 @@ jobs:
   controller-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - uses: bazelbuild/setup-bazelisk@v3
 
@@ -31,7 +31,7 @@ jobs:
   package-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - uses: bazelbuild/setup-bazelisk@v3
 
