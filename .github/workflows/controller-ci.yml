@@ -18,17 +18,20 @@ jobs:
   controller-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - uses: bazelbuild/setup-bazelisk@v3
 
       - name: Run controller tests
         run: bazel test //core/controller:all
 
+      - name: Run check-deps tests
+        run: bazel test //tools/check-deps:all
+
   package-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       - uses: bazelbuild/setup-bazelisk@v3
 

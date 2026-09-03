@@ -21,9 +21,9 @@
 # `gh release upload` command for the GitHub Release mirror (tag openssh-dist).
 #
 # Env vars (defaults mirror the build.sh pins):
-#   OPENSSH_TAG        default V_10_3_P1
-#   OPENSSH_VERSION    default 10.3p1
-#   AMAZONLINUX_TAG    default 2023 (the Docker Hub tag pulled for the rootfs)
+#   OPENSSH_TAG        default V_10_5_P1
+#   OPENSSH_VERSION    default 10.5p1
+#   AMAZONLINUX_TAG    default 2023.12.20260817.0 (pinned date-stamped Docker Hub tag pulled for the rootfs; resolves the floating-2023 hygiene note)
 #   QEMU_VERSION       default 9.2.4 (this consumer's qemu pin; fixes the
 #                      linux-user open_self_maps SIGSEGV that crashed
 #                      amazonlinux:2023 grep/awk/m4). Passed to
@@ -53,9 +53,9 @@
 set -euo pipefail
 
 # --- inputs (defaults mirror the build.sh pins) ---
-OPENSSH_TAG="${OPENSSH_TAG:-V_10_3_P1}"
-OPENSSH_VERSION="${OPENSSH_VERSION:-10.3p1}"
-AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023}"
+OPENSSH_TAG="${OPENSSH_TAG:-V_10_5_P1}"
+OPENSSH_VERSION="${OPENSSH_VERSION:-10.5p1}"
+AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023.12.20260817.0}"
 S3_BUCKET="${S3_BUCKET:-s3://<bucket-name>}"
 AWS_REGION="${AWS_REGION:-}"
 GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}"
@@ -66,11 +66,11 @@ OPENSSH_DIST_ROOTFS="${OPENSSH_DIST_ROOTFS:-}"
 
 # --- guard clauses: refuse to build with a malformed pin ---
 if [[ -z "$OPENSSH_TAG" ]]; then
-  echo "error: OPENSSH_TAG must be a git tag/branch (e.g. V_10_3_P1), got ''" >&2
+  echo "error: OPENSSH_TAG must be a git tag/branch (e.g. V_10_5_P1), got ''" >&2
   exit 1
 fi
 if [[ -z "$OPENSSH_VERSION" ]]; then
-  echo "error: OPENSSH_VERSION must be a version string (e.g. 10.3p1), got ''" >&2
+  echo "error: OPENSSH_VERSION must be a version string (e.g. 10.5p1), got ''" >&2
   exit 1
 fi
 
@@ -230,7 +230,7 @@ if [[ -z "$OPENSSH_DIST_ROOTFS" ]]; then
   if ! provision_rootfs "$rootfs" "library/amazonlinux" "$AMAZONLINUX_TAG"; then
     echo "error: failed to pull 'amazonlinux:${AMAZONLINUX_TAG}' from Docker Hub via the registry API." >&2
     echo "       Reuse an already-extracted rootfs instead:" >&2
-    echo "       OPENSSH_DIST_ROOTFS=/var/tmp/amazonlinux-rootfs-2023 ./publish.sh" >&2
+    echo "       OPENSSH_DIST_ROOTFS=/var/tmp/amazonlinux-rootfs-2023.12.20260817.0 ./publish.sh" >&2
     exit 1
   fi
 fi

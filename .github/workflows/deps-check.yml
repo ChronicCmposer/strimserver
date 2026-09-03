@@ -1,0 +1,59 @@
+# Weekly dependency check (report-only; never gates a build).
+#
+# Every Monday at 03:00 UTC (and on demand via workflow_dispatch) this runs
+# tools/check-deps, which inventories every pinned build/deployment/runtime/
+# tooling dependency in the repo, resolves the latest upstream versions, and
+# emits a tiered report (T1 security / T2 review / T3 minor) with per-dependency
+# status (update | unknown | ok | hygiene). Stale pins do NOT break a build --
+# the tool exits 0 even when updates exist -- so a normal run always succeeds
+# and the JSON report is simply attached as an artifact for review. Only a real
+# operational failure (exit 1) fails the job, so it is actually noticed.
+#
+# The cron mirrors the ffmpeg reproducibility canary's pattern
+# (.github/workflows/ffmpeg-reproducibility.yml).
+name: deps-check
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  deps-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: bazelbuild/setup-bazelisk@v3
+
+      # Go version taken from the `go` directive in core/controller/go.mod
+      # (go 1.26.4; mirrored as PROJECT_GO_VERSION_TAG in .env).
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.26.4
+
+      # Node version from tools/streamdeck-plugin/.nvmrc (Node 24.13.0).
+      # pnpm availability comes from Node 24 bundling corepack plus the
+      # package.json `packageManager` field auto-activating it (Node 24.13.0
+      # per .nvmrc), not from a setup-node input. `pnpm outdated` is one of
+      # check-deps' native resolvers.
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: tools/streamdeck-plugin/.nvmrc
+          cache: pnpm
+          cache-dependency-path: tools/streamdeck-plugin/pnpm-lock.yaml
+
+      # `make check-deps` runs `bazel run //tools/check-deps:check-deps` with no
+      # extra args, so call bazel directly to pass -- --json. --ignore collapses
+      # intentional pins (deps-ignore.json) so the report shows only real drift.
+      - name: Run check-deps and capture the report
+        run: bazel run //tools/check-deps:check-deps -- --json --ignore > deps-report.json 2> deps-console.log
+
+      - name: Upload the dependency report
+        uses: actions/upload-artifact@v4
+        with:
+          name: deps-check
+          path: |
+            deps-report.json
+            deps-console.log
+          if-no-files-found: error

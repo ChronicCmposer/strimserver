@@ -3,7 +3,7 @@
 # notify.sh <path> <status>
 #
 # POSTs a controller-compatible PathEvent to the local controller /event
-# endpoint. Intended to be called from mediamtx runOnReady/runOnNotReady hooks
+# endpoint. Intended to be called from mediamtx runOnAvailable/runOnUnavailable hooks
 # inside the FROM scratch image, where /bin/sh and wget are busybox applets.
 #
 #   path   -- ingress0 | normalized

@@ -9,7 +9,9 @@ S3_BUCKET ?=s3://<bucket-name>
 .DEFAULT_GOAL := package
 
 .PHONY: prepare generate check-generated controller test-controller package release \
-	bump-version check-no-twitch-key publish-all publish-strimserver publish-iperf3 publish-streamdeck
+	bump-version check-no-twitch-key check-deps check-deps-json \
+	check-ffmpeg-dist-deps check-openssh-dist-deps \
+	publish-all publish-strimserver publish-iperf3 publish-streamdeck publish-ffmpeg-dist publish-openssh-dist
 
 # Bootstrap: copy the example env into place for the first local checkout
 # (never overwrite an existing, possibly customized, core/strimserver.env).
@@ -30,6 +32,16 @@ test-controller:
 
 check-no-twitch-key:
 	bazel build //:check_no_twitch_key
+
+# Phase 1 stub: list every pinned dependency in the repo (Bazel modules,
+# toolchain versions, downloaded artifacts, CI actions, and script pins).
+check-deps:
+	bazel run //tools/check-deps:check-deps
+
+# LLM/automation-readable form: JSON report to stdout (the console report and
+# bazel INFO logs both go to stderr, so stdout stays pure JSON).
+check-deps-json:
+	@bazel run //tools/check-deps:check-deps -- --json --ignore
 
 package:
 	bazel build //:package
@@ -71,3 +83,17 @@ publish-iperf3:
 # publish-strimserver). Publishes both the .zip and .tar.gz variants.
 publish-streamdeck:
 	S3_BUCKET=$(S3_BUCKET) bazel run //tools/streamdeck-plugin:publish_streamdeck
+
+check-ffmpeg-dist-deps:
+	./tools/ffmpeg-dist/check-deps.sh
+
+check-openssh-dist-deps:
+	./tools/openssh/check-deps.sh
+
+# Builds + uploads the pinned FFmpeg artifact (chroot+qemu), printing the MODULE.bazel s3_http_archive stanza.
+publish-ffmpeg-dist: check-ffmpeg-dist-deps
+	S3_BUCKET=$(S3_BUCKET) ./tools/ffmpeg-dist/publish.sh
+
+# Builds + uploads the pinned OpenSSH RPM (chroot+qemu), printing the MODULE.bazel s3_http_file stanza.
+publish-openssh-dist: check-openssh-dist-deps
+	S3_BUCKET=$(S3_BUCKET) ./tools/openssh/publish.sh

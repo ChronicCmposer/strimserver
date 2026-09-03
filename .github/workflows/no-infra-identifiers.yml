@@ -4,7 +4,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       # The INFRA_IDENTIFIERS repository secret must hold the pipe-separated
       # identifier regex (real infra identifiers are never committed).
       - name: Check for AWS-infra identifiers

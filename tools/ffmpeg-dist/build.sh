@@ -13,11 +13,11 @@
 # path is referenced (every path is a guest path).
 #
 # Pinned inputs (env, defaults defined in this script):
-#   FFMPEG_VERSION         8.0
-#   FFMPEG_COMMIT          281c902aa1a83fe759011097cb005b555034c151
-#   NV_CODEC_HEADERS_TAG   n13.0.19.0
-#   NV_CODEC_HEADERS_COMMIT e844e5b26f46bb77479f063029595293aa8f812d
-#   CUDA_MANIFEST_URL      https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.0.2.json
+#   FFMPEG_VERSION         8.1
+#   FFMPEG_COMMIT          1a748fe2cd43e3ead22fafb1b5b7d77f153898a8
+#   NV_CODEC_HEADERS_TAG   n13.0.19.1
+#   NV_CODEC_HEADERS_COMMIT 88fee5c37318c991a8762d423530f91681e32e3a
+#   CUDA_MANIFEST_URL      https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json
 #   DEBIAN_SNAPSHOT        20260824T082821Z
 #   CUDA_COMPONENTS        cuda_nvcc cuda_cudart cuda_crt libnvvm
 #   GENCODE                arch=compute_75,code=sm_75
@@ -40,7 +40,7 @@
 #     with gpgv. (The reference harness hand-copied a gpgv binary into its
 #     rootfs; this bootstrap makes that step reproducible. Both produce the
 #     identical gpgv package.)
-#   * CUDA_COMPONENTS includes cuda_crt and libnvvm (nvcc 13.0.2 needs both).
+#   * CUDA_COMPONENTS includes cuda_crt and libnvvm (nvcc 13.2.2 needs both).
 #   * LD_DEBUG is never set (runtime-only noise that slows qemu).
 # =============================================================================
 set -eux -o pipefail
@@ -58,11 +58,11 @@ if ! /bin/sh -c 'exit 0' >/dev/null 2>&1; then
 fi
 
 # --- pins (env, defaults defined in this script) ----------------------------
-: "${FFMPEG_VERSION:=8.0}"
-: "${FFMPEG_COMMIT:=281c902aa1a83fe759011097cb005b555034c151}"
-: "${NV_CODEC_HEADERS_TAG:=n13.0.19.0}"
-: "${NV_CODEC_HEADERS_COMMIT:=e844e5b26f46bb77479f063029595293aa8f812d}"
-: "${CUDA_MANIFEST_URL:=https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.0.2.json}"
+: "${FFMPEG_VERSION:=8.1}"
+: "${FFMPEG_COMMIT:=1a748fe2cd43e3ead22fafb1b5b7d77f153898a8}"
+: "${NV_CODEC_HEADERS_TAG:=n13.0.19.1}"
+: "${NV_CODEC_HEADERS_COMMIT:=88fee5c37318c991a8762d423530f91681e32e3a}"
+: "${CUDA_MANIFEST_URL:=https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json}"
 : "${DEBIAN_SNAPSHOT:=20260824T082821Z}"
 : "${CUDA_COMPONENTS:=cuda_nvcc cuda_cudart cuda_crt libnvvm}"
 : "${GENCODE:=arch=compute_75,code=sm_75}"
@@ -135,7 +135,7 @@ test -L /usr/local/cuda/lib64
 /usr/local/cuda/bin/nvcc --version
 
 # --- Phase 3: nv-codec-headers (tag for readability, exact commit as pin) ----
-# The n13.0.19.0 tag is annotated and currently resolves to the pinned commit;
+# The n13.0.19.1 tag is annotated and currently resolves to the pinned commit;
 # the explicit checkout guards determinism if the tag is ever force-moved.
 rm -rf /opt/nv-codec-headers
 git clone --depth 1 --branch "$NV_CODEC_HEADERS_TAG" \
@@ -185,7 +185,7 @@ configure_flags=(
     --enable-cuda-nvcc
     --enable-cuvid
     --enable-decoder=hevc_cuvid
-    --enable-hwaccel=hevc_cuda
+    --enable-hwaccel=hevc_nvdec
     --enable-filter=hwupload_cuda
     --enable-filter=scale_cuda
     \

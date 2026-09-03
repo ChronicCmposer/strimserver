@@ -189,14 +189,14 @@ gracefully on shutdown.
 
 | Component | Version / source | Where used |
 | --- | --- | --- |
-| NVIDIA CUDA redistributables | `13.0.2` (`cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm`; per-component sha256 pinned via the `redistrib_13.0.2.json` manifest) | Compile the FFmpeg artifact in `tools/ffmpeg-dist` (producer-only; not needed for a normal package build) |
-| Prebuilt FFmpeg artifact | `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz` (sha256 pinned in `MODULE.bazel` via `s3_http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
-| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | `8.0` at commit `281c902` (tip of `release/8.0`, 2026-08-14; pinned and baked into the prebuilt artifact) | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
-| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.0` at commit `e844e5b2` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
+| NVIDIA CUDA redistributables | `13.2.2` (`cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm`; per-component sha256 pinned via the `redistrib_13.2.2.json` manifest) | Compile the FFmpeg artifact in `tools/ffmpeg-dist` (producer-only; not needed for a normal package build) |
+| Prebuilt FFmpeg artifact | `ffmpeg-8.1-deb20260824-cuda13.2.2-sm75-1a748fe.tar.gz` (sha256 pinned in `MODULE.bazel` via `s3_http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
+| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | `8.1` at commit `1a748fe` (tip of `release/8.1`, 2026-08-28; pinned and baked into the prebuilt artifact) | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
+| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.1` at commit `88fee5c` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
 | FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
 | Intermediate Debian image | `debian:trixie` snapshot `20260824T082821Z` | Base for the artifact producer (`tools/ffmpeg-dist`: pulled via the Docker Hub registry API into a rootfs by `publish.sh`); the same snapshot supplies the scratch-image runtime libs via the `@trixie` rules_distroless apt extension |
 | Go toolchain | `go 1.26.4` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
-| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.17.0`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
+| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.20.1`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
 | `libfdk-aac` | `libfdk-aac2t64` (Debian trixie package from `@trixie`) | AAC encode support through FFmpeg (`libfdk-aac.so.2` in the ffmpeg image) |
 | busybox / `gettext-base` (`envsubst`) | Debian trixie packages from `@trixie` | Shell + tools for the scratch runtime images and MediaMTX template rendering |
 | iperf3 | `3.19.1-r1` `.apk` (`@iperf3_apk` http_file) on alpine `3.23.3` (digest-pinned `@alpine_linux_amd64` oci.pull) | Optional bandwidth-test image |
@@ -475,7 +475,7 @@ qemu. An already-extracted rootfs can be reused by setting
 `FFMPEG_DIST_ROOTFS`. `publish.sh` then extracts the stripped
 `ffmpeg` binary plus its `BUILD-INFO.txt` provenance record, writes
 `ffmpeg-<ffver>-deb<date>-cuda<ver>-sm<N>-<shortsha>.tar.gz`
-(e.g. `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz`),
+(e.g. `ffmpeg-8.1-deb20260824-cuda13.2.2-sm75-1a748fe.tar.gz`),
 uploads it to the `s3://<bucket>/ffmpeg/` prefix with no ACL
 modification (objects get the bucket's default private ACL; the
 IP-scoped HTTPS-only bucket policy from `scripts/bucket-cidr-policy.sh` is
@@ -640,6 +640,93 @@ lint, generated-file staleness, and the image smoke tests
 (`//core/controller:image_smoke_test`, `//core:mediamtx_smoke_test`,
 and `//core:ffmpeg_smoke_test` — the latter also asserts every
 `DT_NEEDED` library is packaged in the image).
+
+## Dependency check
+
+`tools/check-deps` inventories **every pinned dependency** in the
+repo — Bazel modules, Go modules, npm packages, container base
+images, downloaded artifacts, toolchain versions, CI actions, and
+script pins — resolves the latest upstream version, and emits a
+tiered report so stale or drifting pins are noticed instead of
+silently rotting. It is **report-only**: it never modifies pins and
+never gates a build.
+
+Run it locally (the `make` facade and the underlying `bazel`
+command are equivalent):
+
+```bash
+make check-deps                                  # console report (default)
+bazel run //tools/check-deps:check-deps -- --json   # JSON report to stdout
+bazel run //tools/check-deps:check-deps -- --fresh  # bypass the cache, refetch
+bazel run //tools/check-deps:check-deps -- --ignore # apply deps-ignore.json
+```
+
+The console report lists T1 and T2 findings individually and
+collapses T3 into a count; `--json` emits the full structured
+report (`{ "findings": [...], "counts": {...}, "unknowns": [...] }`).
+
+Each dependency is classified into a **tier** (review priority)
+and a **status** (current state):
+
+| Tier | Meaning |
+|------|---------|
+| T1 (security) | Security-critical surface: network services, base images, media/emulation parsers. Listed individually, highest priority. |
+| T2 (review) | Build graph, toolchain, and supply chain. Listed individually. |
+| T3 (minor) | Everything else. Collapsed into a count in the console report. |
+
+| Status | Meaning |
+|--------|---------|
+| update | A newer upstream version exists; the pin should be reviewed. |
+| unknown | The latest version could not be determined. |
+| ok | The pin is current (or properly pinned with no tag to float). |
+| hygiene | The pin is valid but floats upstream (a rolling tag, no digest). |
+
+### Ignore file (`deps-ignore.json`)
+
+Intentional pins that a plain run would flag as updates can be
+collapsed with `--ignore`. The file sits at the repo root and each
+rule is `{ "id", "reason", "until" }`, where `id` is
+`category/name` (e.g. `npm/@rollup/rollup-linux-arm64-gnu`) and
+`until` (`YYYY-MM-DD`, optional) expires the rule:
+
+```json
+[
+  {
+    "id": "npm/@rollup/rollup-linux-arm64-gnu",
+    "reason": "Upstream publishes this platform binary as an exact tag; no newer tag expected.",
+    "until": "2026-12-31"
+  }
+]
+```
+
+A rule with no `until` never expires. Expired rules no longer
+match, so an intentional pin that outlives its grace period
+surfaces again as `update`.
+
+### Cache
+
+Network-backed resolvers cache upstream results under
+`tools/check-deps/.cache/deps-cache.json` for 24 hours, so
+repeated runs are fast and offline-friendly. Use `--fresh` to
+bypass the cache and refetch. The cache is git-ignored and only
+network resolvers are cached — native resolvers (`go list -u`,
+`pnpm outdated`) always resolve live.
+
+### CI
+
+A weekly workflow (`.github/workflows/deps-check.yml`) runs every
+Monday at 03:00 UTC (and on demand via `workflow_dispatch`). It
+uses `--ignore` so intentional pins are collapsed, and uploads
+`deps-report.json` and the console log as the `deps-check`
+artifact. Because updates don't change the exit code, a normal run
+succeeds; only an operational failure (exit 1) fails the job so it
+is noticed. The check-deps unit tests run on every PR via the
+`controller-ci` workflow.
+
+### Exit codes
+
+- `0` — the tool ran successfully (updates may exist; check the report).
+- `1` — operational failure (repo root unresolvable, JSON serialization failed).
 
 ## AWS EC2 deployment target
 
@@ -933,7 +1020,7 @@ Core dependencies:
   media server used for SRT ingest, RTSP routing, the Unix
   MPEG-TS source, and recording.
 - [FFmpeg](https://github.com/FFmpeg/FFmpeg) — the normalize
-  and scale/egress stages run a pinned prebuilt FFmpeg 8.0
+  and scale/egress stages run a pinned prebuilt FFmpeg 8.1
   artifact (see *FFmpeg reproducibility and artifact
   pipeline*).
 - [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers)

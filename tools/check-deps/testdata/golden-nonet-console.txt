@@ -1,0 +1,17 @@
+== strimserver check-deps ==
+repo root: /repo
+
+T1 (security) — 0
+T2 (review) — 3
+  - rules_go  0.63.0 -> 0.64.0  (https://bcr.bazel.build/modules/rules_go)  [MODULE.bazel]  [update]
+  - actions/checkout  v4 -> v7.0.1  (https://github.com/actions/checkout)  [.github/workflows/controller-ci.yml]  [update]
+  - qemu  9.2.4 -> 11.1.1  (https://download.qemu.org)  [tools/qemu/build-qemu.sh]  [update]
+
+T3 (minor) — 1
+  names: no-such-pin
+
+Unknown — 2
+  - tools/ffmpeg-dist/build.sh: cannot read file: open tools/ffmpeg-dist/build.sh: no such file or directory
+  - no-such-pin: no resolver configured for this dependency
+
+Ignored — 0

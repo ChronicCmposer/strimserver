@@ -17,4 +17,12 @@ deploy/aws/__pycache__/
 tools/local-obs/
 
 # Local implementation plans — throwaway working docs; not part of the repo.
+ideas/
 plans/
+playbooks/
+
+# check-deps version-check cache (populated by later phases).
+tools/check-deps/.cache/
+
+# Compiled check-deps binary (built locally via Bazel; not committed).
+tools/check-deps/strimserver-check-deps

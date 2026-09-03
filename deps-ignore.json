@@ -1,0 +1,194 @@
+[
+  {
+    "id": "script-pin/CUDA",
+    "file": "tools/ffmpeg-dist/build.sh",
+    "reason": "CUDA upgrade to 13.3.1 requires NVIDIA driver 610 to be present in the latest AWS dlami for Amazon Linux 2023; must wait until that happens.",
+    "until": "2026-12-31"
+  },
+  {
+    "id": "script-pin/CUDA",
+    "file": "tools/ffmpeg-dist/publish.sh",
+    "reason": "CUDA upgrade to 13.3.1 requires NVIDIA driver 610 to be present in the latest AWS dlami for Amazon Linux 2023; must wait until that happens.",
+    "until": "2026-12-31"
+  },
+  {
+    "id": "script-pin/nv-codec-headers",
+    "file": "tools/ffmpeg-dist/build.sh",
+    "reason": "nv-codec-headers upgrade to 13.1.x requires NVIDIA driver 610 to be present in the latest AWS dlami for Amazon Linux 2023; must wait until that happens.",
+    "until": "2026-12-31"
+  },
+  {
+    "id": "script-pin/nv-codec-headers",
+    "file": "tools/ffmpeg-dist/publish.sh",
+    "reason": "nv-codec-headers upgrade to 13.1.x requires NVIDIA driver 610 to be present in the latest AWS dlami for Amazon Linux 2023; must wait until that happens.",
+    "until": "2026-12-31"
+  },
+  {
+    "id": "script-pin/qemu",
+    "file": "tools/ffmpeg-dist/publish.sh",
+    "reason": "qemu 8.2.2 is the byte-identity pin for the ffmpeg-dist artifact and is required to build ffmpeg with nvcc and cicc; qemu 9.2.4+ fails to build successfully per prior investigation. The upstream 11.1.1 would be a major jump that breaks the committed buildkit-direct-execve patch series and the guest-CPUID/codegen identity contract. Re-evaluate only when the ffmpeg pin advances.",
+    "until": "2027-12-31"
+  },
+  {
+    "id": "npm/typescript",
+    "file": "tools/streamdeck-plugin/package.json",
+    "reason": "typescript upgrade to 7.x has breaking changes per previous investigation; wait until at least 7.1 before investigating again.",
+    "until": "2027-01-31"
+  },
+  {
+    "id": "npm/@types/node",
+    "file": "tools/streamdeck-plugin/package.json",
+    "reason": "@types/node upgrade doesn't matter until the .nvmrc is bumped to node 26+; must wait for that.",
+    "until": "2026-12-31"
+  },
+  {
+    "id": "go/github.com/containerd/typeurl/v2",
+    "file": "core/controller/go.mod",
+    "reason": "typeurl v2.3.0 removes gogo support but is not yet coordinated by a containerd release; containerd/v2 v2.3.4 still pins v2.2.3. Wait for a containerd release that coordinates these satellite modules.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/containerd/ttrpc",
+    "file": "core/controller/go.mod",
+    "reason": "ttrpc v1.2.9 forces grpc 1.80->1.81.1 and is not yet coordinated by a containerd release; containerd/v2 v2.3.4 still pins v1.2.8. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/containerd/platforms",
+    "file": "core/controller/go.mod",
+    "reason": "platforms v1.0.0-rc.5 is a Windows-only compat fix, irrelevant to the linux/amd64 controller, and not yet coordinated by a containerd release. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/Microsoft/hcsshim",
+    "file": "core/controller/go.mod",
+    "reason": "hcsshim is an indirect Windows-container runtime dep pinned by containerd/v2 v2.3.4's go.mod requirements; v0.15.0-rc.4 is not yet coordinated by a containerd release. Resolved via MVS, not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/felixge/httpsnoop",
+    "file": "core/controller/go.mod",
+    "reason": "httpsnoop is an indirect dep required by the otelhttp instrumentation and grpc's HTTP layer; it is resolved via MVS from those direct deps' go.mod requirements and not independently editable. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/fsnotify/fsnotify",
+    "file": "core/controller/go.mod",
+    "reason": "fsnotify is an indirect dep used by containerd's watch-based event handling; it is pinned by containerd/v2 v2.3.4's go.mod requirements and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/go-logr/logr",
+    "file": "core/controller/go.mod",
+    "reason": "logr is the standard Go logging abstraction used by otel and grpc; it is pinned transitively via those direct deps' go.mod requirements and not independently editable. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/klauspost/compress",
+    "file": "core/controller/go.mod",
+    "reason": "klauspost/compress is an indirect dep pinned by containerd/v2 v2.3.4 (snappy/zstd layer compression); it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/moby/sys/sequential",
+    "file": "core/controller/go.mod",
+    "reason": "moby/sys/sequential is a Windows file-sequencing helper pinned by containerd/v2 v2.3.4's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/moby/sys/user",
+    "file": "core/controller/go.mod",
+    "reason": "moby/sys/user is a user-namespace helper pinned by containerd/v2 v2.3.4's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/moby/sys/userns",
+    "file": "core/controller/go.mod",
+    "reason": "moby/sys/userns is a user-namespace helper pinned by containerd/v2 v2.3.4's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/sirupsen/logrus",
+    "file": "core/controller/go.mod",
+    "reason": "logrus is containerd's logging library, pinned by containerd/v2 v2.3.4's go.mod requirements; v1.10.2 is not yet coordinated. Resolved via MVS, not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp",
+    "file": "core/controller/go.mod",
+    "reason": "otelhttp is part of the otel instrumentation family pinned transitively via grpc's go.mod; the otel modules must move together as one version set. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/go.opentelemetry.io/otel",
+    "file": "core/controller/go.mod",
+    "reason": "otel SDK is pinned transitively via grpc's go.mod; the otel family (otel/metric/trace/otelhttp) must move together as one version set. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/go.opentelemetry.io/otel/metric",
+    "file": "core/controller/go.mod",
+    "reason": "otel/metric must move in lockstep with the rest of the otel family (otel/trace/otelhttp), all pinned transitively via grpc's go.mod. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/go.opentelemetry.io/otel/trace",
+    "file": "core/controller/go.mod",
+    "reason": "otel/trace must move in lockstep with the rest of the otel family (otel/metric/otelhttp), all pinned transitively via grpc's go.mod. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/go.yaml.in/yaml/v2",
+    "file": "core/controller/go.mod",
+    "reason": "yaml/v2 is an indirect dep pinned by containerd/v2 v2.3.4 (cri/plugin config parsing); it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/golang.org/x/mod",
+    "file": "core/controller/go.mod",
+    "reason": "x/mod is pinned transitively via grpc's and containerd's go.mod requirements (module tooling); it is resolved via MVS and not independently editable. Wait for grpc/containerd coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/golang.org/x/net",
+    "file": "core/controller/go.mod",
+    "reason": "x/net is pinned transitively via grpc's HTTP/2 transport and containerd's go.mod requirements; it is resolved via MVS and not independently editable. Wait for grpc/containerd coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/golang.org/x/sync",
+    "file": "core/controller/go.mod",
+    "reason": "x/sync (errgroup/semaphore) is pinned transitively via grpc's and containerd's go.mod requirements; it is resolved via MVS and not independently editable. Wait for grpc/containerd coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/golang.org/x/sys",
+    "file": "core/controller/go.mod",
+    "reason": "x/sys is pinned transitively via grpc's and containerd's go.mod requirements (platform syscalls); it is resolved via MVS and not independently editable. Wait for grpc/containerd coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/golang.org/x/text",
+    "file": "core/controller/go.mod",
+    "reason": "x/text is pinned transitively via grpc's and containerd's go.mod requirements (unicode tables); it is resolved via MVS and not independently editable. Wait for grpc/containerd coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/google.golang.org/genproto/googleapis/rpc",
+    "file": "core/controller/go.mod",
+    "reason": "genproto/rpc is the generated stub set pinned by grpc's go.mod requirements; it must move with grpc and is not independently editable. Wait for a grpc release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/google.golang.org/grpc",
+    "file": "core/controller/go.mod",
+    "reason": "grpc is pinned by containerd/v2 v2.3.4's go.mod requirements (containerd's RPC layer); bumping to v1.83.2 must be coordinated by a containerd release and with the otel family. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/google.golang.org/protobuf",
+    "file": "core/controller/go.mod",
+    "reason": "protobuf is the message runtime pinned transitively via grpc's go.mod requirements; the current pseudo-version tracks grpc's own pin and is not independently editable. Wait for a grpc release.",
+    "until": "2027-03-31"
+  }
+]
