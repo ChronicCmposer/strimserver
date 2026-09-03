@@ -23,7 +23,6 @@ type ignoreRule struct {
 	Until  string `json:"until,omitempty"`
 }
 
-// ignoreSet is the raw JSON-decoded collection of ignore rules.
 type ignoreSet []ignoreRule
 
 // ignoredRule is the load-time parsed form of an ignoreRule: the until date is
@@ -44,8 +43,6 @@ type ignoredRule struct {
 // parse boundary.
 type parsedIgnoreSet []ignoredRule
 
-// parsed validates every rule's until date exactly once and returns the
-// matching form. A malformed until fails the rule closed to expired.
 func (s ignoreSet) parsed() parsedIgnoreSet {
 	out := make(parsedIgnoreSet, 0, len(s))
 	for _, rule := range s {
@@ -62,7 +59,6 @@ func (s ignoreSet) parsed() parsedIgnoreSet {
 	return out
 }
 
-// ignoreFileName is the checked-in file name at the repo root.
 const ignoreFileName = "deps-ignore.json"
 
 // dateLayout is the YYYY-MM-DD calendar-date layout. Both the ignore until
@@ -70,16 +66,11 @@ const ignoreFileName = "deps-ignore.json"
 // string is defined exactly once.
 const dateLayout = "2006-01-02"
 
-// calendarDate formats a time as the YYYY-MM-DD calendar-date string the
-// ignore expiry rules compare against. The formatted today and the until dates
-// are both plain strings in dateLayout, so matching never re-parses.
 func calendarDate(t time.Time) string {
 	return t.Format(dateLayout)
 }
 
 // parseIgnore decodes a deps-ignore.json body into the parsed matching form.
-// Pure: takes the raw bytes and returns typed rules, failing loudly on
-// malformed input.
 func parseIgnore(data []byte) (parsedIgnoreSet, error) {
 	var raw ignoreSet
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -134,7 +125,6 @@ func (s parsedIgnoreSet) isIgnoredOn(id, calToday string) bool {
 			continue
 		}
 		if rule.untilStr != "" && calToday > rule.untilStr {
-			// Expired: the pin is no longer a tolerated intentional choice.
 			continue
 		}
 		return true

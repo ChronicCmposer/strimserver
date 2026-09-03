@@ -34,14 +34,10 @@ var (
 )
 
 // ExtractScripts scrapes version pins out of the pinned-build shell scripts.
-// The same pins are declared in both a build.sh and its publish.sh, so the
-// combined result is deduplicated by (category, name, version). Each file is
-// scraped only for the pins it is expected to carry: amazonlinux lives in
-// publish.sh, the m4 tarball lives in build.sh, and both declare the shared
-// OpenSSH pin.
+// Each file is scraped only for the pins it is expected to carry: amazonlinux
+// lives in publish.sh, the m4 tarball lives in build.sh, and both declare the
+// shared OpenSSH pin.
 func ExtractScripts(root string) ([]common.Dependency, []common.ExtractionUnknown) {
-	// Script groups (e.g. build.sh + publish.sh) declare the same pins;
-	// resolveAll dedupes the aggregate, so each pin is reported exactly once.
 	return common.RunSourceSpecs(root, []common.SourceSpec{
 		{RelPath: "tools/qemu/build-qemu.sh", Parse: scrapeQemu},
 		{RelPath: "tools/openssh/build.sh", Parse: func(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
@@ -152,8 +148,6 @@ var opensshPublishSpecs = []pinSpec{
 	},
 }
 
-// scrapeOpenssh extracts the OpenSSH source pin (version + git tag) plus the
-// file-specific specs passed in from the openssh build and publish scripts.
 func scrapeOpenssh(data []byte, file string, specs []pinSpec) ([]common.Dependency, []common.ExtractionUnknown) {
 	content := string(data)
 	var deps []common.Dependency

@@ -5,8 +5,6 @@ import "testing"
 // These tests exercise only the version-comparison closure in semver.go. The
 // string/date/snapshot helpers in utilities.go moved to utilities_test.go.
 
-// --- semver compare ---------------------------------------------------------
-
 func TestCompareSemver(t *testing.T) {
 	cases := []struct {
 		a, b string

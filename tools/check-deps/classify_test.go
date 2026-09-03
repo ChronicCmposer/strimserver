@@ -7,54 +7,44 @@ import (
 	"strimserver-check-deps/common"
 )
 
-// Policy-behavior tests moved to the main package with the concrete classifier
+// Policy-behavior tests live in the main package with the concrete classifier
 // configuration they exercise (see classify.go). They build a classifier from
 // the real default policies and base-tier rules via testClassifier().
 
-func TestClassifyBazelModuleZeroXMinorAsMajor(t *testing.T) {
-	c := testClassifier()
-	dep := common.Dependency{Category: "bazel-module", Name: "rules_go", Version: "0.63.0"}
-	// 0.x minor bump is breaking -> T2 review.
-	r := c.Classify(dep, common.VersionInfo{Version: "0.64.0"})
-	if r.Status != common.StatusUpdate || r.Tier != common.TierT2 {
-		t.Errorf("0.x minor bump: got %s/%s, want update/T2", r.Status, r.Tier)
-	}
-	// 0.x patch bump is non-breaking -> T3.
-	r = c.Classify(dep, common.VersionInfo{Version: "0.63.1"})
-	if r.Status != common.StatusUpdate || r.Tier != common.TierT3 {
-		t.Errorf("0.x patch bump: got %s/%s, want update/T3", r.Status, r.Tier)
-	}
-	// current at latest -> ok.
-	r = c.Classify(dep, common.VersionInfo{Version: "0.63.0"})
-	if r.Status != common.StatusOK {
-		t.Errorf("current == latest: got %s, want ok", r.Status)
+func assertClassify(t *testing.T, c *common.Classifier, dep common.Dependency, latest string, wantStatus common.Status, wantTier common.Tier) {
+	t.Helper()
+	r := c.Classify(dep, common.VersionInfo{Version: latest})
+	if r.Status != wantStatus || r.Tier != wantTier {
+		t.Errorf("classify(%s/%s %s -> %s) = %s/%s, want %s/%s", dep.Category, dep.Name, dep.Version, latest, r.Status, r.Tier, wantStatus, wantTier)
 	}
 }
 
-func TestClassifyBazelModuleOneXMajor(t *testing.T) {
+func TestClassifyBazelModuleTiering(t *testing.T) {
 	c := testClassifier()
-	dep := common.Dependency{Category: "bazel-module", Name: "gazelle", Version: "1.2.0"}
-	// 1.x major bump -> T2 review.
-	r := c.Classify(dep, common.VersionInfo{Version: "2.0.0"})
-	if r.Status != common.StatusUpdate || r.Tier != common.TierT2 {
-		t.Errorf("1.x major bump: got %s/%s, want update/T2", r.Status, r.Tier)
+	cases := []struct {
+		name       string
+		dep        common.Dependency
+		latest     string
+		wantStatus common.Status
+		wantTier   common.Tier
+	}{
+		{name: "0.x minor bump is breaking", dep: common.Dependency{Category: common.CategoryBazelModule, Name: "rules_go", Version: "0.63.0"}, latest: "0.64.0", wantStatus: common.StatusUpdate, wantTier: common.TierT2},
+		{name: "0.x patch bump is non-breaking", dep: common.Dependency{Category: common.CategoryBazelModule, Name: "rules_go", Version: "0.63.0"}, latest: "0.63.1", wantStatus: common.StatusUpdate, wantTier: common.TierT3},
+		{name: "current equals latest is ok", dep: common.Dependency{Category: common.CategoryBazelModule, Name: "rules_go", Version: "0.63.0"}, latest: "0.63.0", wantStatus: common.StatusOK, wantTier: common.TierT2},
+		{name: "1.x major bump is breaking", dep: common.Dependency{Category: common.CategoryBazelModule, Name: "gazelle", Version: "1.2.0"}, latest: "2.0.0", wantStatus: common.StatusUpdate, wantTier: common.TierT2},
+		{name: "1.x minor bump is non-breaking", dep: common.Dependency{Category: common.CategoryBazelModule, Name: "gazelle", Version: "1.2.0"}, latest: "1.3.0", wantStatus: common.StatusUpdate, wantTier: common.TierT3},
+		{name: "0 to 1 transition is a major bump", dep: common.Dependency{Category: common.CategoryBazelModule, Name: "rules_oci", Version: "0.9.0"}, latest: "1.0.0", wantStatus: common.StatusUpdate, wantTier: common.TierT2},
 	}
-	// 1.x minor/patch bump -> T3.
-	r = c.Classify(dep, common.VersionInfo{Version: "1.3.0"})
-	if r.Status != common.StatusUpdate || r.Tier != common.TierT3 {
-		t.Errorf("1.x minor bump: got %s/%s, want update/T3", r.Status, r.Tier)
-	}
-	// 0 -> 1 transition is a major bump -> T2.
-	dep = common.Dependency{Category: "bazel-module", Name: "rules_oci", Version: "0.9.0"}
-	r = c.Classify(dep, common.VersionInfo{Version: "1.0.0"})
-	if r.Status != common.StatusUpdate || r.Tier != common.TierT2 {
-		t.Errorf("0 -> 1 transition: got %s/%s, want update/T2", r.Status, r.Tier)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertClassify(t, c, tc.dep, tc.latest, tc.wantStatus, tc.wantTier)
+		})
 	}
 }
 
 func TestClassifyFloatingBaseImageHygiene(t *testing.T) {
 	c := testClassifier()
-	dep := common.Dependency{Category: "base-image", Name: "amazonlinux", Version: "2023", File: "tools/openssh/publish.sh"}
+	dep := common.Dependency{Category: common.CategoryBaseImage, Name: "amazonlinux", Version: "2023", File: "tools/openssh/publish.sh"}
 	r := c.Classify(dep, common.VersionInfo{Version: "2023"})
 	if r.Status != common.StatusHygiene || r.Tier != common.TierT2 {
 		t.Errorf("floating base image: got %s/%s, want hygiene/T2", r.Status, r.Tier)
@@ -67,7 +57,7 @@ func TestClassifyFloatingBaseImageHygiene(t *testing.T) {
 func TestClassifyFloatingLiteralBaseImageHygiene(t *testing.T) {
 	c := testClassifier()
 	for _, v := range []string{"latest", "stable"} {
-		dep := common.Dependency{Category: "base-image", Name: "example", Version: v}
+		dep := common.Dependency{Category: common.CategoryBaseImage, Name: "example", Version: v}
 		r := c.Classify(dep, common.VersionInfo{Version: "2026"})
 		if r.Status != common.StatusHygiene || r.Tier != common.TierT2 {
 			t.Errorf("floating tag %q: got %s/%s, want hygiene/T2", v, r.Status, r.Tier)
@@ -77,7 +67,7 @@ func TestClassifyFloatingLiteralBaseImageHygiene(t *testing.T) {
 
 func TestClassifyDigestPinnedOK(t *testing.T) {
 	c := testClassifier()
-	dep := common.Dependency{Category: "base-image", Name: "alpine", DigestPinned: true}
+	dep := common.Dependency{Category: common.CategoryBaseImage, Name: "alpine", DigestPinned: true}
 	r := c.Classify(dep, common.VersionInfo{})
 	if r.Status != common.StatusOK || r.Tier != common.TierT1 {
 		t.Errorf("digest-pinned alpine: got %s/%s, want ok/T1", r.Status, r.Tier)
@@ -86,7 +76,7 @@ func TestClassifyDigestPinnedOK(t *testing.T) {
 
 func TestClassifyDebianDateTag(t *testing.T) {
 	c := testClassifier()
-	dep := common.Dependency{Category: "base-image", Name: "debian", Version: "20260824T082821Z"}
+	dep := common.Dependency{Category: common.CategoryBaseImage, Name: "debian", Version: "20260824T082821Z"}
 	// Newer date-tag -> update, T1 (security base image).
 	r := c.Classify(dep, common.VersionInfo{Version: "20260901"})
 	if r.Status != common.StatusUpdate || r.Tier != common.TierT1 {
@@ -102,7 +92,7 @@ func TestClassifyDebianDateTag(t *testing.T) {
 func TestClassifyFullSHAPinnedAction(t *testing.T) {
 	c := testClassifier()
 	sha := "0123456789abcdef0123456789abcdef01234567"
-	dep := common.Dependency{Category: "ci-action", Name: "actions/checkout", Version: sha}
+	dep := common.Dependency{Category: common.CategoryCIAction, Name: "actions/checkout", Version: sha}
 	r := c.Classify(dep, common.VersionInfo{Version: "v4.2.0"})
 	if r.Status != common.StatusOK {
 		t.Errorf("full-SHA action pin: got %s, want ok", r.Status)
@@ -111,13 +101,13 @@ func TestClassifyFullSHAPinnedAction(t *testing.T) {
 
 func TestClassifyActionV0Major(t *testing.T) {
 	c := testClassifier()
-	dep := common.Dependency{Category: "ci-action", Name: "example/action", Version: "v0"}
+	dep := common.Dependency{Category: common.CategoryCIAction, Name: "example/action", Version: "v0"}
 	r := c.Classify(dep, common.VersionInfo{Version: "v0"})
 	if r.Status != common.StatusOK {
 		t.Errorf("v0 current + v0 latest: got %s, want ok (genuine major 0, not unknown)", r.Status)
 	}
 
-	dep = common.Dependency{Category: "ci-action", Name: "example/action", Version: "not-a-ref"}
+	dep = common.Dependency{Category: common.CategoryCIAction, Name: "example/action", Version: "not-a-ref"}
 	r = c.Classify(dep, common.VersionInfo{Version: "v4"})
 	if r.Status != common.StatusUnknown {
 		t.Errorf("unparseable current: got %s, want unknown", r.Status)
@@ -129,7 +119,7 @@ func TestClassifyActionV0Major(t *testing.T) {
 
 func TestClassifyGitHubActionExemption(t *testing.T) {
 	c := testClassifier()
-	dep := common.Dependency{Category: "ci-action", Name: "actions/checkout", Version: "v4"}
+	dep := common.Dependency{Category: common.CategoryCIAction, Name: "actions/checkout", Version: "v4"}
 	// Newer major exists -> update, T2.
 	r := c.Classify(dep, common.VersionInfo{Version: "v5.0.1"})
 	if r.Status != common.StatusUpdate || r.Tier != common.TierT2 {
@@ -153,7 +143,7 @@ func TestClassifyGitHubActionExemption(t *testing.T) {
 
 func TestClassifyT1BreakingBumpStaysT1(t *testing.T) {
 	c := testClassifier()
-	dep := common.Dependency{Category: "base-image", Name: "ubuntu", Version: "1.0.0"}
+	dep := common.Dependency{Category: common.CategoryBaseImage, Name: "ubuntu", Version: "1.0.0"}
 	r := c.Classify(dep, common.VersionInfo{Version: "2.0.0"})
 	if r.Status != common.StatusUpdate || r.Tier != common.TierT1 {
 		t.Errorf("T1 breaking bump: got %s/%s, want update/T1", r.Status, r.Tier)
@@ -162,7 +152,7 @@ func TestClassifyT1BreakingBumpStaysT1(t *testing.T) {
 
 func TestClassifyUpdateEscalatesSecurityToT1(t *testing.T) {
 	c := testClassifier()
-	dep := common.Dependency{Category: "script-pin", Name: "openssh-portable", Version: "10.3p1"}
+	dep := common.Dependency{Category: common.CategoryScriptPin, Name: "openssh-portable", Version: "10.3p1"}
 	r := c.Classify(dep, common.VersionInfo{Version: "10.4p1"})
 	if r.Status != common.StatusUpdate || r.Tier != common.TierT1 {
 		t.Errorf("security dep update: got %s/%s, want update/T1", r.Status, r.Tier)
@@ -199,30 +189,25 @@ func TestClassifyNonBaseImageDebianIsNotDateTagged(t *testing.T) {
 	}
 }
 
-// --- version-bump helpers --------------------------------------------------
-
 func TestFirstTwoNumericStates(t *testing.T) {
+	// Each case pins the exact numericCore a version string must parse to;
+	// numericCore is comparable, so direct equality is the whole assertion.
 	cases := []struct {
-		in           string
-		major, minor int
-		ok           bool
-		minorSet     bool
-		minorValid   bool
+		in   string
+		want numericCore
 	}{
-		{"0.63.0", 0, 63, true, true, true},
-		{"1.2.0", 1, 2, true, true, true},
-		{"v4", 4, 0, true, false, true}, // single-component version: no minor, treated as 0
-		{"0", 0, 0, true, false, true},
-		{"0.broken", 0, 0, true, true, false},               // present minor unparseable
-		{"0.99999999999999999999", 0, 0, true, true, false}, // present minor overflows int
-		{"abc", 0, 0, false, false, false},
-		{"", 0, 0, false, false, false},
+		{"0.63.0", numericCore{major: 0, minor: 63, ok: true, minorSet: true, minorValid: true}},
+		{"1.2.0", numericCore{major: 1, minor: 2, ok: true, minorSet: true, minorValid: true}},
+		{"v4", numericCore{major: 4, ok: true}}, // single-component version: no minor present
+		{"0", numericCore{major: 0, ok: true}},
+		{"0.broken", numericCore{major: 0, ok: true, minorSet: true}},               // present minor unparseable
+		{"0.99999999999999999999", numericCore{major: 0, ok: true, minorSet: true}}, // present minor overflows int
+		{"abc", numericCore{}},
+		{"", numericCore{}},
 	}
 	for _, c := range cases {
-		major, minor, ok, minorSet, minorValid := firstTwoNumeric(c.in)
-		if major != c.major || minor != c.minor || ok != c.ok || minorSet != c.minorSet || minorValid != c.minorValid {
-			t.Errorf("firstTwoNumeric(%q) = (%d, %d, %v, %v, %v), want (%d, %d, %v, %v, %v)",
-				c.in, major, minor, ok, minorSet, minorValid, c.major, c.minor, c.ok, c.minorSet, c.minorValid)
+		if got := firstTwoNumeric(c.in); got != c.want {
+			t.Errorf("firstTwoNumeric(%q) = %+v, want %+v", c.in, got, c.want)
 		}
 	}
 }

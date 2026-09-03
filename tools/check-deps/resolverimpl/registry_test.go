@@ -11,11 +11,8 @@ import (
 	"strimserver-check-deps/utilities"
 )
 
-// Phase 2 unit tests moved into the resolverimpl package: pure logic only
-// (registry/scraper parsers). No network is touched; every parser is exercised
-// against inline fixture strings.
-
-// --- pure parser fixtures ----------------------------------------------------
+// Phase 2 unit tests: pure logic only (registry/scraper parsers), exercised
+// against inline fixture strings. No network is touched.
 
 func TestParseBCRMetadataAndLatestNonYanked(t *testing.T) {
 	const metadata = `{

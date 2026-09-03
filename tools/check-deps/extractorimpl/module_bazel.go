@@ -35,7 +35,7 @@ func scanCallArgs(content, callName string) []string {
 			c := content[i]
 			switch {
 			case c == '\'' || c == '"' || c == '#':
-				i = skipStringOrComment(content, i) // jump straight past the span
+				i = skipStringOrComment(content, i)
 				continue
 			case c == '(':
 				depth++
@@ -73,7 +73,7 @@ func skipStringOrComment(s string, i int) int {
 		quote := c
 		for i++; i < len(s); i++ {
 			if s[i] == '\\' {
-				i++ // skip the escaped character
+				i++
 			} else if s[i] == quote {
 				return i + 1
 			}
@@ -84,7 +84,7 @@ func skipStringOrComment(s string, i int) int {
 			i++
 		}
 		if i < len(s) {
-			i++ // step past the newline ending the comment
+			i++
 		}
 		return i
 	default:
@@ -123,9 +123,6 @@ func attrValue(args, key string) string {
 	return ""
 }
 
-// matchesKeyAt reports whether key appears as a whole word at args[i]: not
-// preceded by a word character (so module_name never matches key "name") and
-// not followed by one (so names never matches key "name").
 func matchesKeyAt(args string, i int, key string) bool {
 	if i > 0 && isWordChar(args[i-1]) {
 		return false
@@ -139,9 +136,8 @@ func matchesKeyAt(args string, i int, key string) bool {
 
 // valueAfterKey parses `\s*=\s*"..."` or `\s*=\s*'...'` starting just past a
 // matched key and returns the unescaped quoted value, the index just past the
-// closing quote, and whether the assignment parsed. Both quote styles are
-// accepted, mirroring skipStringOrComment's handling of single- and
-// double-quoted strings; backslash escapes are honored inside either.
+// closing quote, and whether the assignment parsed. Backslash escapes are
+// honored inside either quote style.
 func valueAfterKey(args string, i int) (string, int, bool) {
 	i = skipAttrSpace(args, i)
 	if i >= len(args) || args[i] != '=' {
@@ -165,8 +161,6 @@ func valueAfterKey(args string, i int) (string, int, bool) {
 	return value.String(), i + 1, true
 }
 
-// skipAttrSpace advances past the whitespace allowed between a Starlark
-// attribute name, the '=', and its value.
 func skipAttrSpace(args string, i int) int {
 	for i < len(args) {
 		switch args[i] {
@@ -187,7 +181,6 @@ var (
 	digestRe       = regexp.MustCompile(`sha256:[0-9a-f]{64}`)
 )
 
-// ExtractModuleBazel reads MODULE.bazel at the repo root.
 func ExtractModuleBazel(root string) ([]common.Dependency, []common.ExtractionUnknown) {
 	return common.ReadAndParse(root, "MODULE.bazel", parseModuleBazel)
 }
@@ -222,7 +215,6 @@ func parseModuleBazel(data []byte, file string) ([]common.Dependency, []common.E
 	return deps, unknowns
 }
 
-// parseBazelDep extracts the bazel_dep module-registry pins.
 func parseBazelDep(content, file string) ([]common.Dependency, []common.ExtractionUnknown) {
 	var deps []common.Dependency
 	var unknowns []common.ExtractionUnknown
@@ -243,7 +235,6 @@ func parseBazelDep(content, file string) ([]common.Dependency, []common.Extracti
 	return deps, unknowns
 }
 
-// parseSingleVersionOverride extracts the module version pins.
 func parseSingleVersionOverride(content, file string) ([]common.Dependency, []common.ExtractionUnknown) {
 	var deps []common.Dependency
 	var unknowns []common.ExtractionUnknown

@@ -19,12 +19,20 @@ type SourceSpec struct {
 }
 
 // RunSourceSpecs runs every SourceSpec against the repo root and aggregates
-// the results, so each extraction pass folds in deps and unknowns identically.
+// the results.
 func RunSourceSpecs(root string, specs []SourceSpec) ([]Dependency, []ExtractionUnknown) {
+	return AggregateExtract(specs, func(s SourceSpec) ([]Dependency, []ExtractionUnknown) {
+		return ReadAndParse(root, s.RelPath, s.Parse)
+	})
+}
+
+// AggregateExtract folds every producer's (deps, unknowns) outputs into the
+// running results via MergeExtract, so every aggregation site shares one loop.
+func AggregateExtract[T any](producers []T, produce func(T) ([]Dependency, []ExtractionUnknown)) ([]Dependency, []ExtractionUnknown) {
 	var deps []Dependency
 	var unknowns []ExtractionUnknown
-	for _, spec := range specs {
-		gotDeps, gotUnknowns := ReadAndParse(root, spec.RelPath, spec.Parse)
+	for _, p := range producers {
+		gotDeps, gotUnknowns := produce(p)
 		deps, unknowns = MergeExtract(deps, unknowns, gotDeps, gotUnknowns)
 	}
 	return deps, unknowns
@@ -41,8 +49,6 @@ func ReadAndParse(root, relPath string, parse func(data []byte, file string) ([]
 	return parse(data, relPath)
 }
 
-// MergeExtract folds one extraction pass's outputs into the running results,
-// so every pass site aggregates deps and unknowns identically.
 func MergeExtract(deps []Dependency, unknowns []ExtractionUnknown, d []Dependency, u []ExtractionUnknown) ([]Dependency, []ExtractionUnknown) {
 	return append(deps, d...), append(unknowns, u...)
 }

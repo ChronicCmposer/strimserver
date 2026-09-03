@@ -6,9 +6,8 @@ import (
 )
 
 // TestRunRejectsNonPositiveMaxConcurrentFetches proves run() fails loudly
-// before any work begins when MaxConcurrentFetches is not positive, so a
-// zero-width worker pool can never deadlock. The guard must return before any
-// goroutines spawn (resolveAll is never reached).
+// before any work begins, so a zero-width worker pool can never deadlock; the
+// guard must return before any goroutines spawn.
 func TestRunRejectsNonPositiveMaxConcurrentFetches(t *testing.T) {
 	e := newE2EApp(t, e2eConsole, "", nil)
 	e.opts.MaxConcurrentFetches = 0

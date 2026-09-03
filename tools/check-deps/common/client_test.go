@@ -15,8 +15,6 @@ import (
 // client; backoff sleeps are recorded via the injectable Sleep hook instead of
 // blocking.
 
-// --- fetcher size cap ------------------------------------------------------
-
 func TestFetchBytesRejectsOversizedBody(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("0123456789ABCDEF")) // 16 bytes
@@ -42,8 +40,6 @@ func TestFetchBytesAcceptsWithinLimit(t *testing.T) {
 		t.Errorf("within-limit body: data=%q err=%v", data, err)
 	}
 }
-
-// --- fetcher retry and size-cap boundary -------------------------------------
 
 // sleepRecorder implements the Fetcher.Sleep injection point, recording every
 // backoff duration instead of blocking so tests can assert the retry schedule

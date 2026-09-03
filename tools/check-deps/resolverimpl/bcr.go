@@ -17,8 +17,6 @@ type bcrMetadata struct {
 	Yanked   map[string]string `json:"yanked_versions"`
 }
 
-// parseBCRMetadata decodes a BCR metadata.json into its version list and yanked
-// map. Pure: takes the raw body and returns typed data.
 func parseBCRMetadata(data []byte) (versions []string, yanked map[string]string, err error) {
 	var meta bcrMetadata
 	if err := json.Unmarshal(data, &meta); err != nil {

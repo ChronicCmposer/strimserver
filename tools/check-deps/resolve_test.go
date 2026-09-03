@@ -19,10 +19,10 @@ func TestResolveAllAppendsBatchRecords(t *testing.T) {
 
 	// One no-op resolver entry owns both toolchain deps and answers a fixed
 	// latest version, so every per-dependency record is deterministic and
-	// cache-free (no-op resolvers never touch the guard's entry map).
+	// cache-free.
 	const fakeLatest = "2.0.0"
 	resolvers := []ResolverEntry{
-		noopDep(isToolchain, func(dep common.Dependency) common.VersionInfo {
+		noopDep(matchesCategory(common.CategoryToolchain), func(dep common.Dependency) common.VersionInfo {
 			return common.VersionInfo{Version: fakeLatest}
 		}),
 	}
@@ -72,4 +72,16 @@ func TestResolveAllAppendsBatchRecords(t *testing.T) {
 	if !reflect.DeepEqual(got[2], batchRecord) {
 		t.Errorf("batch record = %+v, want %+v", got[2], batchRecord)
 	}
+}
+
+// resolveOne is a test helper exposing the serial resolution path for unit
+// tests: it resolves a single dependency and reports whether the cache was
+// mutated. It is a single-job wrapper that delegates to resolveJobWithCache,
+// so the serial test path and the parallel resolveAll worker path share one
+// cache-orchestration implementation (peek under the lock, fetch outside it,
+// commit under the lock).
+func resolveOne(resolvers []ResolverEntry, dep common.Dependency, cacheEntries map[string]cacheEntry, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
+	guard := newCacheGuard(cacheEntries)
+	e, ok := matchResolver(resolvers, dep)
+	return resolveJobWithCache(guard, resolveJob{dep: dep, entry: e, ok: ok}, fresh, classifier), guard.changed
 }

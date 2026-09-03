@@ -4,8 +4,6 @@ import "testing"
 
 // These tests exercise the string/date/snapshot helpers in utilities.go.
 
-// --- utilities string/date/snapshot helpers --------------------------------
-
 func TestStripTagPrefix(t *testing.T) {
 	cases := map[string]string{
 		"v2.13.2":          "2.13.2",

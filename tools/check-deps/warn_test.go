@@ -11,8 +11,6 @@ import (
 // failure paths: a corrupt cache and a malformed deps-ignore.json both warn
 // loudly and fall back to empty data rather than crashing.
 
-// TestCacheWarnsOnCorruptJSON asserts Load warns "cache unreadable" and returns
-// an empty entry map when the cache file is not valid JSON.
 func TestCacheWarnsOnCorruptJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), cacheFileRel)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

@@ -15,10 +15,8 @@ import (
 	"strimserver-check-deps/resolverimpl"
 )
 
-// Options is the single configuration struct for a check-deps run, mirroring
-// the controller's Config precedent. main parses flags into an Options and the
-// run() composition root consumes it; every external dependency (writers,
-// clock) enters here so tests can inject fakes.
+// Options is the single configuration struct for a check-deps run. Every
+// external dependency (writers, clock) enters here so tests can inject fakes.
 type Options struct {
 	// JSON emits the JSON report to Stdout.
 	JSON bool
@@ -40,8 +38,7 @@ type Options struct {
 	Stdout io.Writer
 	Stderr io.Writer
 
-	// Warn is the non-fatal warning sink; main wires warnf, tests capture into
-	// a slice. run requires it to be set and fails loudly if it is nil.
+	// Warn is the non-fatal warning sink. run fails loudly if it is nil.
 	Warn func(string, ...any)
 
 	// Now is the single clock for the whole run: both the cache TTL check and
@@ -68,9 +65,9 @@ type Options struct {
 	RateLimitRetryDelay time.Duration
 }
 
-// main is the composition root: it parses flags into Options, resolves the repo
-// root, wires the warning sink and every collaborator, then runs the pipeline.
-// Exit codes: 0 success (updates may exist), 1 operational failure.
+// main parses flags into Options, resolves the repo root, wires the warning
+// sink and every collaborator, then runs the pipeline. Exit codes: 0 success
+// (updates may exist), 1 operational failure.
 func main() {
 	jsonFlag := flag.Bool("json", false, "emit the JSON report to stdout")
 	consoleFlag := flag.Bool("console", false, "emit the console report")
@@ -103,8 +100,6 @@ func main() {
 	}
 	opts.Root = root
 
-	// Extract phase: Phase 1 owns dependency discovery. The extractors run over
-	// the repo root first, so they are wired before the resolve-phase objects.
 	extractors := []common.Extractor{
 		extractorimpl.ExtractModuleBazel,
 		extractorimpl.ExtractGoMod,
@@ -113,9 +108,6 @@ func main() {
 		extractorimpl.ExtractScripts,
 	}
 
-	// Resolve phase: Phase 2 owns version resolution, wired in execution order:
-	// the fetcher backs every network resolver, the batch resolvers shell out to
-	// the native tools, and the classifier turns each answer into a record.
 	fetcher := &common.Fetcher{
 		Client:     &http.Client{Timeout: opts.HTTPTimeout},
 		UserAgent:  opts.UserAgent,
@@ -126,7 +118,7 @@ func main() {
 	}
 
 	resolvers := []ResolverEntry{
-		{Match: isBazelModule, Resolve: resolverimpl.BCRResolve(fetcher), Network: true},
+		networkedDep(matchesCategory(common.CategoryBazelModule), resolverimpl.BCRResolve(fetcher)),
 		githubDep(common.CategoryToolBinary, "golangci_lint_linux_amd64", "golangci", "golangci-lint", fetcher),
 		githubDep(common.CategoryToolBinary, "mediamtx_dist", "bluenviron", "mediamtx", fetcher),
 		networkedDep(Matches(common.CategoryRuntime, "iperf3"), resolverimpl.AlpineResolve(fetcher)),
@@ -140,8 +132,8 @@ func main() {
 		githubDep(common.CategoryScriptPin, "nv-codec-headers", "FFmpeg", "nv-codec-headers", fetcher),
 		networkedDep(Matches(common.CategoryScriptPin, "CUDA"), resolverimpl.NvidiaResolve(fetcher)),
 		networkedDep(Matches(common.CategoryScriptPin, "distlib"), resolverimpl.PypiResolve(fetcher)),
-		networkedDep(isCIAction, resolverimpl.GithubActionResolve(fetcher)),
-		noopDep(isToolchain, resolverimpl.ToolchainResolve),
+		networkedDep(matchesCategory(common.CategoryCIAction), resolverimpl.GithubActionResolve(fetcher)),
+		noopDep(matchesCategory(common.CategoryToolchain), resolverimpl.ToolchainResolve),
 	}
 
 	batchResolvers := []common.BatchResolver{}
@@ -186,11 +178,10 @@ func main() {
 }
 
 // repoRoot resolves the repository root. The caller injects the Bazel
-// workspace root (main reads it from BUILD_WORKSPACE_DIRECTORY), so the
-// function is deterministic and testable without environment access; if the
-// workspace is empty, walk up from the working directory until a MODULE.bazel
-// file is found. An unresolvable root is an operational failure (exit 1), never
-// a silent empty report.
+// workspace root (main reads it from BUILD_WORKSPACE_DIRECTORY); when empty,
+// walk up from the working directory until a MODULE.bazel file is found. An
+// unresolvable root is an operational failure (exit 1), never a silent empty
+// report.
 func repoRoot(workspace string) (string, error) {
 	if workspace != "" {
 		if !isFile(filepath.Join(workspace, "MODULE.bazel")) {
@@ -225,16 +216,15 @@ func fail(op string, err error) {
 	os.Exit(1)
 }
 
-// warnf prints a non-fatal warning to stderr (cache/ignore failures never abort).
+// warnf prints a non-fatal warning to stderr; cache/ignore failures never abort.
 func warnf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "check-deps: warning: "+format+"\n", args...)
 }
 
-// run executes one full check-deps run: extract -> dedupe -> resolve
-// (cache-aware, --fresh, injected batch resolvers) -> ignore load ->
-// buildReport -> render to the injected writers. Every collaborator is
-// injected so the whole pipeline is testable with fakes (the e2e tests call
-// run directly).
+// run executes one full check-deps run: extract -> dedupe -> resolve ->
+// ignore load -> buildReport -> render to the injected writers. Every
+// collaborator is injected so the whole pipeline is testable with fakes (the
+// e2e tests call run directly).
 func run(opts *Options, cache *Cache, resolvers []ResolverEntry, batchResolvers []common.BatchResolver, extractors []common.Extractor, classifier *common.Classifier) error {
 	// A non-positive MaxConcurrentFetches would spawn a zero-width worker pool
 	// that deadlocks (no worker ever drains the job channel), so fail loudly
@@ -270,8 +260,7 @@ func run(opts *Options, cache *Cache, resolvers []ResolverEntry, batchResolvers 
 // routing rule: JSON goes to Stdout, and the console report goes to Stderr
 // when JSON is also emitted (so stdout stays clean for the machine-readable
 // report) and to Stdout otherwise. The console is the default when no output
-// mode is requested. Each write failure is surfaced with a descriptive wrap so
-// the run can exit non-zero.
+// mode is requested.
 func writeReport(rep report, opts *Options) error {
 	jsonOut := opts.JSON
 	consoleOut := opts.Console || !opts.JSON
@@ -288,7 +277,7 @@ func writeReport(rep report, opts *Options) error {
 	if consoleOut {
 		out := opts.Stdout
 		if jsonOut {
-			out = opts.Stderr // keep stdout clean for JSON
+			out = opts.Stderr
 		}
 		if _, err := io.WriteString(out, renderConsole(rep, opts.Root)); err != nil {
 			return fmt.Errorf("cannot write console report: %w", err)

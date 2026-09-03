@@ -2,17 +2,13 @@ package main
 
 import "strimserver-check-deps/common"
 
-// extractAll runs every extractor against the repository and aggregates
-// the results. Extraction failures never abort the run: they surface as unknown
+// extractAll runs every extractor against the repository and aggregates the
+// results. Extraction failures never abort the run: they surface as unknown
 // records alongside the successful dependencies.
 func extractAll(extractors []common.Extractor, root string) ([]common.Dependency, []common.ExtractionUnknown) {
-	var deps []common.Dependency
-	var unknowns []common.ExtractionUnknown
-	for _, ex := range extractors {
-		gotDeps, gotUnknowns := ex(root)
-		deps, unknowns = common.MergeExtract(deps, unknowns, gotDeps, gotUnknowns)
-	}
-	return deps, unknowns
+	return common.AggregateExtract(extractors, func(ex common.Extractor) ([]common.Dependency, []common.ExtractionUnknown) {
+		return ex(root)
+	})
 }
 
 // dedupe drops duplicate dependencies keyed by (category, name, source,

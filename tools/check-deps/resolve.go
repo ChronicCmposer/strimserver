@@ -10,12 +10,11 @@ import (
 
 // This file routes each Phase 1 dependency to the version-source resolver that
 // owns it and combines the resolver's answer with the classifier. Resolvers
-// live in the resolverimpl package (bcr.go, dockerhub.go, ...) and each returns
-// a common.VersionInfo; the common package's classifier turns that into a
-// resolved record. The resolver slice holds the ordered set of resolvers; every
+// live in the resolverimpl package and each returns a common.VersionInfo; the
+// common package's classifier turns that into a resolved record. Every
 // network-backed resolver is closure-bound to the Fetcher it should reach
-// through, so the slice is testable with an httptest-backed fetcher and free of
-// package globals.
+// through, so the resolver slice is testable with an httptest-backed fetcher
+// and free of package globals.
 
 // ResolverEntry matches a dependency (usually by category/name) to its
 // resolver. Entries are evaluated in order; the first match wins. Network
@@ -31,16 +30,12 @@ type ResolverEntry struct {
 	Network bool
 }
 
-// Matches builds a matcher that accepts a dependency of the given category and
-// name.
 func Matches(category, name string) func(common.Dependency) bool {
 	return func(dep common.Dependency) bool {
 		return dep.Category == category && dep.Name == name
 	}
 }
 
-// matchResolver returns the first resolverEntry matching dep: entries are
-// evaluated in order and the first match wins.
 func matchResolver(resolvers []ResolverEntry, dep common.Dependency) (ResolverEntry, bool) {
 	for _, e := range resolvers {
 		if e.Match(dep) {
@@ -50,52 +45,52 @@ func matchResolver(resolvers []ResolverEntry, dep common.Dependency) (ResolverEn
 	return ResolverEntry{}, false
 }
 
-// resolveMatched resolves a dependency through an already-matched resolver
-// entry, producing an "unknown" record when no entry matched. It is the
-// direct, never-cached path shared by guard.peek for no-op/missing resolvers;
-// the match is performed once by the caller and threaded in, so the entry is
-// never re-matched here.
-func resolveMatched(e ResolverEntry, ok bool, dep common.Dependency, classifier *common.Classifier) common.Resolved {
-	if !ok {
-		return classifier.Classify(dep, common.VersionInfo{Err: errors.New("no resolver configured for this dependency")})
-	}
+// resolveNoMatch builds the "unknown" record for a dependency that no
+// resolver entry owns.
+func resolveNoMatch(dep common.Dependency, classifier *common.Classifier) common.Resolved {
+	return classifier.Classify(dep, common.VersionInfo{Err: errors.New("no resolver configured for this dependency")})
+}
+
+func resolveMatched(e ResolverEntry, dep common.Dependency, classifier *common.Classifier) common.Resolved {
 	return classifier.Classify(dep, e.Resolve(dep))
 }
 
-// cacheGuard owns the shared mutable cache state and the lock discipline
-// around it: peek answers under the lock, the network fetch happens outside
-// it, and commit writes under the lock. The parallel resolveAll worker path
-// receives a guard injected by the caller; the serial resolveOne path builds
-// its own, and both route through resolveJobWithCache, so the two share one
-// cache-orchestration implementation (peek under the lock, fetch outside it,
-// commit under the lock).
+// cacheGuard owns the shared mutable cache state and whether it changed during
+// the run; resolveAll saves the entries when changed is set. The lock
+// discipline is: peek answers under the lock, the network fetch happens
+// outside it, and commit writes under the lock.
 type cacheGuard struct {
 	mu      sync.Mutex
 	changed bool
 	entries map[string]cacheEntry
 }
 
-// newCacheGuard is the single way to build a guard from a loaded entry map: the
-// caller passes the cache entries read at load time, and the guard starts with
-// the mutex zero value and changed false, exactly the state a fresh run needs.
+// newCacheGuard is the single way to build a guard from a loaded entry map. A
+// nil map is normalized to an empty one so a first successful cache write
+// never panics on a nil map assignment.
 func newCacheGuard(entries map[string]cacheEntry) *cacheGuard {
+	if entries == nil {
+		entries = map[string]cacheEntry{}
+	}
 	return &cacheGuard{entries: entries}
 }
 
-// peek checks whether a dependency can be answered without a network fetch,
-// reporting (resolved, true) when it can and (resolved{}, false) when a
-// network fetch is required. It owns the lock: the shared cache state is only
-// read under the mutex, and the lock is released before returning. The bool is
-// the unambiguous miss signal: a zero resolved on a miss is never handed back
-// as a result or committed. It resolves directly (and never caches) when no
-// resolver matched or the resolver is non-network; a network resolver's
-// present cache entry (and not fresh) also answers directly. The matched entry
-// is resolved once by the caller and threaded in, so peek never re-matches.
+// peek answers a dependency without a network fetch when possible, reporting
+// (resolved, true) on a hit and (resolved{}, false) when a fetch is required.
+// It owns the lock: cache state is only read under the mutex, and the lock is
+// released before returning, so the caller's network fetch runs outside it. It
+// resolves directly (and never caches) when no resolver matched or the
+// resolver is non-network; a network resolver's present cache entry (and not
+// fresh) also answers directly. The bool is the unambiguous miss signal: a
+// zero resolved on a miss is never handed back as a result or committed.
 func (g *cacheGuard) peek(e ResolverEntry, ok bool, dep common.Dependency, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !ok || !e.Network {
-		return resolveMatched(e, ok, dep, classifier), true
+	if !ok {
+		return resolveNoMatch(dep, classifier), true
+	}
+	if !e.Network {
+		return resolveMatched(e, dep, classifier), true
 	}
 	if fresh {
 		return common.Resolved{}, false
@@ -107,84 +102,60 @@ func (g *cacheGuard) peek(e ResolverEntry, ok bool, dep common.Dependency, fresh
 }
 
 // commit writes a successful resolution into the cache and returns the
-// classified result plus whether the cache was mutated. It owns the lock: the
-// shared cache state is only mutated under the mutex, and the changed flag is
-// set when a write or eviction actually mutates the cache. A transient
-// resolution failure is never written to the cache, so a one-off network or
-// rate-limit blip is not replayed as "unknown" for the whole TTL; in fresh
-// mode a failed refetch instead evicts any stale entry, so the next non-fresh
-// run refetches rather than serving the stale value. The cache write and
-// classification only need the dependency, versionInfo, and classifier, so the
-// matched resolver entry is not threaded in.
-func (g *cacheGuard) commit(dep common.Dependency, vi common.VersionInfo, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
+// classified result; the guard's changed flag records whether a write or an
+// eviction actually mutated the cache. It owns the lock: cache state is only
+// mutated under the mutex. A transient resolution failure is never written to
+// the cache, so a one-off network or rate-limit blip is not replayed as
+// "unknown" for the whole TTL; in fresh mode a failed refetch instead evicts
+// any stale entry, so the next non-fresh run refetches rather than serving the
+// stale value.
+func (g *cacheGuard) commit(dep common.Dependency, vi common.VersionInfo, fresh bool, classifier *common.Classifier) common.Resolved {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if vi.Err != nil {
-		if fresh {
-			key := cacheKey(dep)
-			if _, present := g.entries[key]; present {
-				delete(g.entries, key)
-				g.changed = true
-				return classifier.Classify(dep, vi), true
-			}
-		}
-		return classifier.Classify(dep, vi), false
+	res := classifier.Classify(dep, vi)
+	key := cacheKey(dep)
+	if vi.Err == nil {
+		g.entries[key] = versionInfoToEntry(vi)
+		g.changed = true
+		return res
 	}
-	g.entries[cacheKey(dep)] = versionInfoToEntry(vi)
+	// Fresh mode evicts a stale entry so the next non-fresh run refetches.
+	if !fresh {
+		return res
+	}
+	if _, present := g.entries[key]; !present {
+		return res
+	}
+	delete(g.entries, key)
 	g.changed = true
-	return classifier.Classify(dep, vi), true
+	return res
 }
 
-// resolveOne resolves a single dependency and reports whether the cache was
-// mutated. It is a single-job wrapper that delegates to resolveJobWithCache,
-// so the serial test path and the parallel resolveAll worker path share one
-// cache-orchestration implementation (peek under the lock, fetch outside it,
-// commit under the lock). The resolver entry is matched once here and threaded
-// through, so a dependency is never matched repeatedly.
-func resolveOne(resolvers []ResolverEntry, dep common.Dependency, cacheEntries map[string]cacheEntry, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
-	guard := newCacheGuard(cacheEntries)
-	results := make([]common.Resolved, 1)
-	e, ok := matchResolver(resolvers, dep)
-	resolveJobWithCache(guard, results, resolveJob{index: 0, dep: dep, entry: e, ok: ok}, fresh, classifier)
-	return results[0], guard.changed
-}
-
-// resolveJobWithCache resolves one worker job with correct lock boundaries
-// around the shared cache: the cacheGuard owns the mutex acquire/release so
-// the parallel resolveAll worker body stays a single call. guard.peek answers
-// without a fetch (no-op/missing resolver, or a fresh-bypassed present cache
-// entry) under the lock; when it misses, peek returns with the lock released
-// and the matched entry's resolver runs over the network OUTSIDE it, so
-// concurrent fetches stay bounded by the worker pool rather than serialized.
-// guard.commit then writes the cache and the changed flag under the lock.
-// Results writes need no lock: each worker owns a distinct results slot that
-// is only read after the worker pool drains. The matched entry is threaded in
-// from the caller, so it is never re-matched here.
-func resolveJobWithCache(g *cacheGuard, results []common.Resolved, job resolveJob, fresh bool, classifier *common.Classifier) {
+// resolveJobWithCache resolves one worker job through the guard: peek answers
+// without a fetch when possible, then the matched entry's resolver runs, then
+// commit records the outcome.
+func resolveJobWithCache(g *cacheGuard, job resolveJob, fresh bool, classifier *common.Classifier) common.Resolved {
 	if res, hit := g.peek(job.entry, job.ok, job.dep, fresh, classifier); hit {
-		results[job.index] = res
-		return
+		return res
 	}
-	vi := job.entry.Resolve(job.dep) // network fetch happens OUTSIDE the lock
-	res, _ := g.commit(job.dep, vi, fresh, classifier)
-	results[job.index] = res
+	vi := job.entry.Resolve(job.dep)
+	res := g.commit(job.dep, vi, fresh, classifier)
+	return res
 }
 
-func isBazelModule(dep common.Dependency) bool { return dep.Category == common.CategoryBazelModule }
-func isCIAction(dep common.Dependency) bool    { return dep.Category == common.CategoryCIAction }
-func isToolchain(dep common.Dependency) bool   { return dep.Category == common.CategoryToolchain }
+func matchesCategory(category string) func(common.Dependency) bool {
+	return func(dep common.Dependency) bool {
+		return dep.Category == category
+	}
+}
 
 // githubDep builds a network-backed resolver entry for a dependency pinned
-// from a fixed GitHub owner/repo pair. It collapses the repeated category/name
-// -> owner/repo registrations so the upstream location sits adjacent to its
-// match key.
+// from a fixed GitHub owner/repo pair, collapsing the repeated category/name
+// -> owner/repo registrations.
 func githubDep(category, name, owner, repo string, f *common.Fetcher) ResolverEntry {
 	return ResolverEntry{Match: Matches(category, name), Resolve: resolverimpl.GithubResolverFor(owner, repo, f), Network: true}
 }
 
-// networkedDep builds a network-backed resolver entry for one match rule,
-// collapsing the repeated match/resolve/network wiring so registrations read
-// as "dep matching this rule is resolved over the network by xResolve".
 func networkedDep(match func(common.Dependency) bool, resolve common.Resolver) ResolverEntry {
 	return ResolverEntry{Match: match, Resolve: resolve, Network: true}
 }
@@ -215,17 +186,13 @@ type resolveJob struct {
 // saving: resolveAll only mutates the guard and the caller persists the
 // entries when the guard reports a change. A bounded worker pool (the
 // MaxConcurrentFetches width, draining a job channel) performs the network
-// fetches; the cacheGuard guards only the shared cache state (peek and
-// commit), while each fetch runs outside the lock so concurrent fetches stay
-// parallel rather than serialized. Batch resolvers run serially after the
-// worker pool and their records append in order, so output stays
-// deterministic.
+// fetches. Batch resolvers run serially after the worker pool and their
+// records append in order, so output stays deterministic.
 func resolveAll(opts *Options, guard *cacheGuard, resolvers []ResolverEntry, batchResolvers []common.BatchResolver, deps []common.Dependency, classifier *common.Classifier) []common.Resolved {
 	results := make([]common.Resolved, len(deps))
 
-	// Spawn the bounded worker pool up front, then feed every dependency from
-	// this goroutine. Workers own distinct results slots (read only after
-	// wg.Wait), so those writes need no lock.
+	// Workers own distinct results slots (read only after wg.Wait), so those
+	// writes need no lock.
 	jobs := make(chan resolveJob)
 	var wg sync.WaitGroup
 	for w := 0; w < opts.MaxConcurrentFetches; w++ {
@@ -233,18 +200,12 @@ func resolveAll(opts *Options, guard *cacheGuard, resolvers []ResolverEntry, bat
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				// resolveJobWithCache delegates the lock boundaries to the
-				// cacheGuard: peek and commit run under its lock guarding the
-				// shared cache state, while the network fetch runs outside it
-				// so concurrent fetches stay bounded by the worker pool rather
-				// than serialized.
-				resolveJobWithCache(guard, results, job, opts.Fresh, classifier)
+				results[job.index] = resolveJobWithCache(guard, job, opts.Fresh, classifier)
 			}
 		}()
 	}
 
-	// Match the resolver once per dependency here, in input order, and hand the
-	// matched entry to a worker through the job channel.
+	// Match the resolver once per dependency here, in input order.
 	for i, dep := range deps {
 		entry, ok := matchResolver(resolvers, dep)
 		jobs <- resolveJob{index: i, dep: dep, entry: entry, ok: ok}
@@ -252,9 +213,6 @@ func resolveAll(opts *Options, guard *cacheGuard, resolvers []ResolverEntry, bat
 	close(jobs)
 	wg.Wait()
 
-	// Run every injected batch resolver (the native go/pnpm resolvers) serially
-	// after the per-dependency worker pool; each returns already-classified
-	// records appended in order.
 	for _, br := range batchResolvers {
 		results = append(results, br(opts.Root, opts.NativeToolTimeout, classifier)...)
 	}

@@ -15,9 +15,6 @@ import (
 // because the extractor side (extractorimpl's parseAPTSourcesList) matches the
 // same pattern and cannot import this package.
 
-// parseDebianSnapshotListing extracts every snapshot timestamp from a
-// snapshot.debian.org listing body. Pure: takes the HTML body and returns
-// timestamp strings.
 func parseDebianSnapshotListing(data []byte) []string {
 	return utilities.ExtractSnapshotTsAll(string(data))
 }
@@ -32,8 +29,7 @@ func newestDebianSnapshot(f *common.Fetcher) string {
 	}
 	timestamps := parseDebianSnapshotListing(data)
 	// Fixed-width YYYYMMDDTHHMMSSZ timestamps order lexicographically, which is
-	// exactly chronological. latestOf errors on an empty list; best-effort here
-	// returns "" instead.
+	// exactly chronological.
 	latest, err := latestOf(timestamps, strings.Compare)
 	if err != nil {
 		return ""

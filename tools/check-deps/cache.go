@@ -13,16 +13,15 @@ import (
 // This file owns the TTL cache of upstream registry results. The cache stores,
 // per dependency, the versionInfo a resolver produced, keyed by the pinned
 // current version so that bumping a pin invalidates that entry. The freshness
-// TTL is injected via Options.CacheTTL; a cache read failure is never fatal (we
-// fall back to live fetches); a write failure is warned, never fatal.
+// TTL is injected via Options.CacheTTL; read/write failures are warned, never
+// fatal (a read failure falls back to live fetches).
 
 // cacheSchema is the on-disk format version of deps-cache.json.
 const cacheSchema = 1
 
 // Cache reads and writes the on-disk dependency cache. All collaborators
 // (path, TTL, clock, warning sink) are injected so the behavior is testable
-// and free of package-global state. Read/write failures are never fatal: they
-// warn through Warn and fall back to live fetches.
+// and free of package-global state.
 type Cache struct {
 	Path string
 	TTL  time.Duration
@@ -30,10 +29,6 @@ type Cache struct {
 	Warn func(string, ...any)
 }
 
-// newCache builds the cache for a run from the options main already has. It
-// derives the on-disk path from root and the cacheFileRel constant, and takes
-// TTL, Now, and Warn from opts, so main never re-derives them and tests can
-// build the same cache from the same fakes they feed the rest of the pipeline.
 func newCache(opts *Options, root string) *Cache {
 	return &Cache{
 		Path: filepath.Join(root, cacheFileRel),
@@ -43,21 +38,18 @@ func newCache(opts *Options, root string) *Cache {
 	}
 }
 
-// cacheEntry is the serialized form of a resolver's versionInfo.
 type cacheEntry struct {
 	Version string   `json:"version"`
 	Date    string   `json:"date,omitempty"`
 	Infos   []string `json:"infos,omitempty"`
 }
 
-// cacheFile is the on-disk shape of deps-cache.json.
 type cacheFile struct {
 	Schema  int                   `json:"schema"`
 	Written time.Time             `json:"written"`
 	Entries map[string]cacheEntry `json:"entries"`
 }
 
-// cacheDirRel and cacheFileRel locate the cache relative to the repo root.
 const (
 	cacheDirRel  = "tools/check-deps/.cache"
 	cacheFileRel = cacheDirRel + "/deps-cache.json"
@@ -83,8 +75,6 @@ func versionInfoToEntry(vi common.VersionInfo) cacheEntry {
 	}
 }
 
-// entryToVersionInfo converts a cached entry back into a versionInfo. A
-// cached entry is always a successful resolution, so no error is recovered.
 func entryToVersionInfo(e cacheEntry) common.VersionInfo {
 	return common.VersionInfo{
 		Version: e.Version,
@@ -93,9 +83,8 @@ func entryToVersionInfo(e cacheEntry) common.VersionInfo {
 	}
 }
 
-// Load reads and decodes the cache file, returning the live entries. A missing,
-// corrupt, or expired cache yields an empty entry map: a missing file is silent
-// (as before), while corruption, schema mismatch, and expiry warn loudly. The
+// Load reads and decodes the cache file, returning the live entries. A missing
+// file is silent; corruption, schema mismatch, and expiry warn loudly. The
 // caller always proceeds with live fetches (never fatal).
 func (c *Cache) Load() map[string]cacheEntry {
 	data, err := os.ReadFile(c.Path)
@@ -121,8 +110,6 @@ func (c *Cache) Load() map[string]cacheEntry {
 	return cf.Entries
 }
 
-// emptyCacheEntries is the single empty-entry fallback every Load early-exit
-// shares, so the empty map is constructed in exactly one place.
 func emptyCacheEntries() map[string]cacheEntry {
 	return map[string]cacheEntry{}
 }
@@ -152,17 +139,19 @@ func (c *Cache) Save(entries map[string]cacheEntry) {
 		return
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
+		os.Remove(tmpName)
 		c.Warn("cannot write cache: %v", err)
 		return
 	}
 	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
 		c.Warn("cannot close cache: %v", err)
 		return
 	}
 	if err := os.Rename(tmpName, c.Path); err != nil {
+		os.Remove(tmpName)
 		c.Warn("cannot rename cache into place: %v", err)
 	}
 }

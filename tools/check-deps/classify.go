@@ -9,14 +9,11 @@ import (
 )
 
 // This file owns the concrete tier-policy functions for a run: the ordered
-// first-match-wins dispatch that the composition root (main) hands to
-// common.NewClassifier alongside the resting-tier base rules. The Classifier
-// object and the TierPolicy/BaseTierRule types live in the common package.
+// first-match-wins dispatch the composition root (main) hands to
+// common.NewClassifier alongside the resting-tier base rules.
 
 // classifyFloatingBaseImage flags floating base-image tags (amazonlinux:2023,
-// latest, stable) that roll upstream as hygiene rather than a plain update. It
-// reports whether the dependency is a floating base image and, when so, the
-// final record.
+// latest, stable) that roll upstream as hygiene rather than a plain update.
 func classifyFloatingBaseImage(r common.Resolved, dep common.Dependency) (common.Resolved, bool) {
 	if !isFloatingBaseImage(dep) {
 		return r, false
@@ -28,8 +25,7 @@ func classifyFloatingBaseImage(r common.Resolved, dep common.Dependency) (common
 }
 
 // classifyCIAction handles GitHub Actions pins, which are major-shorthand refs
-// (@v4); it compares majors and exempts @vN pins from date-pinning hygiene. It
-// reports whether the dependency is a ci-action and, when so, the final record.
+// (@v4): it compares majors and exempts @vN pins from date-pinning hygiene.
 func classifyCIAction(r common.Resolved, dep common.Dependency) (common.Resolved, bool) {
 	if dep.Category != common.CategoryCIAction {
 		return r, false
@@ -60,8 +56,7 @@ func classifyCIAction(r common.Resolved, dep common.Dependency) (common.Resolved
 
 // classifyDateTag handles date-stamped tags (debian trixie-YYYYMMDD-slim),
 // which compare lexicographically — for fixed-width YYYYMMDD that is exactly
-// numeric ordering. It reports whether the dependency is date-tagged and, when
-// so, the final record.
+// numeric ordering.
 func classifyDateTag(r common.Resolved, dep common.Dependency) (common.Resolved, bool) {
 	if !isDateTagged(dep) {
 		return r, false
@@ -96,10 +91,19 @@ func classifySemver(r common.Resolved, dep common.Dependency) (common.Resolved, 
 	case c < 0:
 		markUpdate(&r, updateTier(resting, isBreakingBump(dep.Version, r.Latest)))
 	default:
-		// Pinned at or ahead of the latest known version: nothing to do.
+		// Pinned at or ahead of the latest known version.
 		r.Status = common.StatusOK
 	}
 	return r, true
+}
+
+// numericCore is the parsed leading major/minor of a version, with the three
+// distinct minor states (absent, present-and-valid, present-but-invalid).
+type numericCore struct {
+	major, minor int
+	ok           bool // the major parsed as an integer
+	minorSet     bool // a minor component was present
+	minorValid   bool // the minor parsed as a valid integer (when minorSet)
 }
 
 // isBreakingBump reports whether moving from cur to latest is a breaking
@@ -109,37 +113,33 @@ func classifySemver(r common.Resolved, dep common.Dependency) (common.Resolved, 
 // but unparseable is treated conservatively as non-breaking, so a broken
 // version string never silently escalates a review.
 func isBreakingBump(cur, latest string) bool {
-	curMaj, curMin, curOK, curMinorSet, curMinorValid := firstTwoNumeric(cur)
-	latestMaj, latestMin, latestOK, latestMinorSet, latestMinorValid := firstTwoNumeric(latest)
-	if !curOK || !latestOK {
+	curCore := firstTwoNumeric(cur)
+	latestCore := firstTwoNumeric(latest)
+	if !curCore.ok || !latestCore.ok {
 		return false
 	}
-	if curMaj == 0 && latestMaj == 0 {
-		if (curMinorSet && !curMinorValid) || (latestMinorSet && !latestMinorValid) {
-			// A minor present but unparseable/overflowing is not trustworthy
-			// enough to escalate: treat the bump as non-breaking.
+	if curCore.major == 0 && latestCore.major == 0 {
+		if (curCore.minorSet && !curCore.minorValid) || (latestCore.minorSet && !latestCore.minorValid) {
+			// Not trustworthy enough to escalate a review.
 			return false
 		}
-		return latestMin > curMin
+		return latestCore.minor > curCore.minor
 	}
-	return latestMaj > curMaj
+	return latestCore.major > curCore.major
 }
 
-// firstTwoNumeric parses the leading major and minor integers from a version.
-// ok reports whether the major parsed; the minor has three distinct states
-// (minorSet, minorValid) as documented at the call site.
-func firstTwoNumeric(s string) (major, minor int, ok, minorSet, minorValid bool) {
+func firstTwoNumeric(s string) numericCore {
 	s = utilities.CoreVersion(s)
 	parts := strings.Split(s, ".")
-	major, ok = utilities.LeadingInt(parts[0])
+	major, ok := utilities.LeadingInt(parts[0])
 	if !ok {
-		return 0, 0, false, false, false
+		return numericCore{}
 	}
 	if len(parts) > 1 {
-		minor, minorValid = utilities.LeadingInt(parts[1])
-		return major, minor, true, true, minorValid
+		minor, minorValid := utilities.LeadingInt(parts[1])
+		return numericCore{major: major, minor: minor, ok: true, minorSet: true, minorValid: minorValid}
 	}
-	return major, 0, true, false, true
+	return numericCore{major: major, ok: true}
 }
 
 // actionMajor extracts the leading major integer from a GitHub Actions ref,
@@ -178,12 +178,9 @@ func updateTier(resting common.Tier, breaking bool) common.Tier {
 	return common.TierT3
 }
 
-// fullSHARe matches a full 40-character hex git commit SHA, the supply-chain
-// pinning practice isFullSHA recognizes.
+// fullSHARe matches a full 40-character hex git commit SHA.
 var fullSHARe = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 
-// isFullSHA reports whether ref is a full 40-character hex git commit SHA, the
-// recommended supply-chain pinning practice.
 func isFullSHA(ref string) bool {
 	return fullSHARe.MatchString(ref)
 }

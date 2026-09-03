@@ -8,10 +8,8 @@ import (
 )
 
 // Unit tests for extract.go: ReadAndParse, MergeExtract, and RunSourceSpecs.
-// All three are pure file/aggregation plumbing, so every case runs against
-// real temp files or inline fixtures; no network is touched.
-
-// --- ReadAndParse -----------------------------------------------------------
+// All are pure file/aggregation plumbing, so every case runs against real temp
+// files or inline fixtures; no network is touched.
 
 func TestReadAndParse(t *testing.T) {
 	dir := t.TempDir()
@@ -74,8 +72,6 @@ func TestReadAndParseMissingFile(t *testing.T) {
 	}
 }
 
-// --- MergeExtract -----------------------------------------------------------
-
 func TestMergeExtract(t *testing.T) {
 	deps := []Dependency{{Category: CategoryGo, Name: "first"}}
 	unknowns := []ExtractionUnknown{{File: "a.txt", Reason: "first"}}
@@ -103,8 +99,6 @@ func TestMergeExtract(t *testing.T) {
 		}
 	}
 }
-
-// --- RunSourceSpecs ---------------------------------------------------------
 
 func TestRunSourceSpecs(t *testing.T) {
 	dir := t.TempDir()

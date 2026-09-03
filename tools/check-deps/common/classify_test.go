@@ -4,11 +4,8 @@ import (
 	"testing"
 )
 
-// Phase 2 unit tests moved into the common package: pure logic only (tier
-// classification). No network is touched; the classifier is exercised against
-// inline fixture strings.
-
-// --- tier classification ---------------------------------------------------
+// Phase 2 unit tests: pure logic only (tier classification), exercised against
+// inline fixture strings. No network is touched.
 
 func TestClassifyUnknownOnNetworkFailure(t *testing.T) {
 	c := NewClassifier(nil, nil)

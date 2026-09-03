@@ -45,10 +45,7 @@ func parsePyPIVersionAndYanked(data []byte, currentVersion string) (latest strin
 }
 
 // PypiResolve builds a resolver that fetches the latest version of dep.Name
-// from PyPI, flagging a yanked current pin as an informational note. The parse
-// closure captures the yanked flag for the note, so the fetch/parse error
-// guards live in the shared fetchAndParse helper and only the note stays
-// explicit.
+// from PyPI, flagging a yanked current pin as an informational note.
 func PypiResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		var yanked bool

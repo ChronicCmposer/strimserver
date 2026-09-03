@@ -18,8 +18,7 @@ import (
 // latest-stable branch (v3.24) is an informational staleness note.
 
 // parseAPKIndex parses the APKINDEX text format (P: name / V: version blocks
-// separated by blank lines) into a name -> version map. Pure: takes the raw
-// index text and returns typed data.
+// separated by blank lines) into a name -> version map.
 func parseAPKIndex(data []byte) (map[string]string, error) {
 	pkgs := make(map[string]string)
 	var name, version string
@@ -43,8 +42,6 @@ func parseAPKIndex(data []byte) (map[string]string, error) {
 	return pkgs, nil
 }
 
-// fetchAPKIndexVersion downloads and extracts the APKINDEX for one Alpine
-// branch and returns the version of pkg within it.
 func fetchAPKIndexVersion(branch, pkg string, f *common.Fetcher) (string, error) {
 	url := fmt.Sprintf("https://dl-cdn.alpinelinux.org/alpine/%s/main/x86_64/APKINDEX.tar.gz", branch)
 	data, err := f.FetchBytes(url)

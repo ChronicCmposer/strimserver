@@ -22,7 +22,6 @@ type githubTag struct {
 	Name string `json:"name"`
 }
 
-// parseGitHubRelease decodes a /releases/latest body into a VersionInfo.
 func parseGitHubRelease(data []byte) (common.VersionInfo, error) {
 	var rel githubRelease
 	if err := json.Unmarshal(data, &rel); err != nil {
@@ -34,7 +33,6 @@ func parseGitHubRelease(data []byte) (common.VersionInfo, error) {
 	return common.VersionInfo{Version: rel.TagName, Date: rel.PublishedAt}, nil
 }
 
-// parseGitHubTags decodes a /tags body into the ordered list of tag names.
 func parseGitHubTags(data []byte) ([]string, error) {
 	var tags []githubTag
 	if err := json.Unmarshal(data, &tags); err != nil {
@@ -74,7 +72,6 @@ func fetchGitHubRelease(owner, repo string, f *common.Fetcher) (common.VersionIn
 	return parseGitHubRelease(data)
 }
 
-// GithubResolverFor builds a resolver for a fixed owner/repo pair.
 func GithubResolverFor(owner, repo string, f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		return fetchGitHubLatest(owner, repo, f)

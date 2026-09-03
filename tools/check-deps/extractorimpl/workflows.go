@@ -11,8 +11,6 @@ import (
 
 var usesRe = regexp.MustCompile(`(?m)^\s*-\s*uses:\s*([^\s#]+)`)
 
-// ExtractWorkflows lists every workflow under .github/workflows and parses the
-// pinned `uses:` action references in each.
 func ExtractWorkflows(root string) ([]common.Dependency, []common.ExtractionUnknown) {
 	workflowDir := filepath.Join(root, ".github", "workflows")
 	entries, err := os.ReadDir(workflowDir)
@@ -29,9 +27,6 @@ func ExtractWorkflows(root string) ([]common.Dependency, []common.ExtractionUnkn
 			Parse:   parseWorkflow,
 		})
 	}
-	// The same action pin (e.g. actions/checkout@v4) is reused across jobs and
-	// workflow files; resolveAll dedupes the aggregate, so each pin is reported
-	// exactly once.
 	return common.RunSourceSpecs(root, specs)
 }
 

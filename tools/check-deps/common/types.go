@@ -6,17 +6,14 @@
 // dependencies.
 package common
 
-// types.go owns the full shared contract surface: Dependency, ExtractionUnknown,
-// VersionInfo, Status, Tier, DepKey, and their methods.
 import "strings"
 
-// Dependency is one pinned dependency extracted from the repository. Every
-// field describes what is pinned, where it is pinned, and to which version.
+// Dependency is one pinned dependency extracted from the repository.
 type Dependency struct {
 	// Category classifies the dependency; the Category* constants enumerate
-	// the supported values (e.g. CategoryBazelModule, CategoryToolBinary).
+	// the supported values.
 	Category string
-	// Name is the dependency's name, e.g. "rules_go" or "golangci-lint".
+	// Name is the dependency's name.
 	Name string
 	// Version is the currently pinned version exactly as written in the
 	// source file. Empty when the pin carries no version (digest-only pins).
@@ -27,8 +24,8 @@ type Dependency struct {
 	// File is the repo-relative path of the file the dependency was extracted
 	// from.
 	File string
-	// Note carries an optional informational annotation, e.g. "git tag
-	// V_10_3_P1". It is not rendered in any output; it is purely descriptive.
+	// Note carries an optional informational annotation. It is not rendered in
+	// any output; it is purely descriptive.
 	Note string
 	// Branch carries an optional structured upstream branch the pin selects
 	// (e.g. the Alpine branch "v3.23" an iperf3 apk comes from). It is set
@@ -114,9 +111,9 @@ const (
 	TierT3 Tier = 3 // minor: patch-level or build-time tooling updates
 )
 
-// String renders the review-tier label. It routes through Normalized(), the
-// one canonical "unrecognized tier -> T3" rule, so a future or unrecognized
-// tier value renders as T3 rather than panicking or inventing a label.
+// String renders the review-tier label, routing through Normalized() so an
+// unrecognized tier value renders as T3 rather than panicking or inventing a
+// label.
 func (t Tier) String() string {
 	switch t.Normalized() {
 	case TierT1:
@@ -130,12 +127,10 @@ func (t Tier) String() string {
 }
 
 // Normalized maps any tier value to the three report tiers, resting
-// unrecognized or future values at TierT3. TierT3 is the explicit catch-all
-// resting tier (baseTier defaults every unclaimed dependency to it), so an
-// unrecognized value intentionally renders, counts, and buckets as T3 rather
-// than panicking. It is the one canonical "unrecognized tier -> T3" rule:
-// String(), the count accumulator, and the console renderer all route through
-// it so the fallback never diverges.
+// unrecognized or future values at TierT3, the explicit catch-all resting
+// tier. It is the one canonical "unrecognized tier -> T3" rule: String(), the
+// count accumulator, and the console renderer all route through it so the
+// fallback never diverges.
 func (t Tier) Normalized() Tier {
 	switch t {
 	case TierT1:
@@ -164,7 +159,7 @@ func (k DepKey) String() string {
 	return strings.Join(k[:], depKeySep)
 }
 
-// DepIdentity returns dep's identity key; see DepKey.
+// DepIdentity returns dep's identity key.
 func DepIdentity(dep Dependency) DepKey {
 	return DepKey{dep.Category, dep.Name, dep.Source, dep.Version}
 }

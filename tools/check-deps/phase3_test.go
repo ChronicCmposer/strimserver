@@ -17,12 +17,10 @@ import (
 // ignore matching and until-expiry, and tier-collapse counts. All are pure and
 // touch no network.
 
-// --- JSON schema ------------------------------------------------------------
-
 func TestJSONSchemaRoundTrip(t *testing.T) {
 	all := []common.Resolved{
 		{
-			Dep:     common.Dependency{Category: "bazel-module", Name: "rules_go", Version: "0.63.0", Source: "https://bcr.bazel.build/modules/rules_go", File: "MODULE.bazel"},
+			Dep:     common.Dependency{Category: common.CategoryBazelModule, Name: "rules_go", Version: "0.63.0", Source: "https://bcr.bazel.build/modules/rules_go", File: "MODULE.bazel"},
 			Tier:    common.TierT2,
 			Status:  common.StatusUpdate,
 			Latest:  "0.64.0",
@@ -30,12 +28,12 @@ func TestJSONSchemaRoundTrip(t *testing.T) {
 			Reasons: []string{"review"},
 		},
 		{
-			Dep:    common.Dependency{Category: "base-image", Name: "alpine", Version: "", Source: "docker.io/library/alpine @ sha256:abc", File: "MODULE.bazel", DigestPinned: true},
+			Dep:    common.Dependency{Category: common.CategoryBaseImage, Name: "alpine", Version: "", Source: "docker.io/library/alpine @ sha256:abc", File: "MODULE.bazel", DigestPinned: true},
 			Tier:   common.TierT1,
 			Status: common.StatusOK,
 		},
 		{
-			Dep:     common.Dependency{Category: "toolchain", Name: "Bazel", Version: "9.2.0", Source: ".bazelversion", File: ".bazelversion"},
+			Dep:     common.Dependency{Category: common.CategoryToolchain, Name: "Bazel", Version: "9.2.0", Source: ".bazelversion", File: ".bazelversion"},
 			Tier:    common.TierT2,
 			Status:  common.StatusUnknown,
 			Reasons: []string{"no resolver configured for this dependency"},
@@ -51,7 +49,6 @@ func TestJSONSchemaRoundTrip(t *testing.T) {
 		t.Fatalf("marshalReport: %v", err)
 	}
 
-	// Round-trip through the wire form and assert every required field.
 	var back report
 	if err := json.Unmarshal(data, &back); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -113,7 +110,6 @@ func TestJSONSchemaRoundTrip(t *testing.T) {
 		t.Errorf("unknowns missing expected entries: %+v", back.Unknowns)
 	}
 
-	// Counts.
 	c := back.Counts
 	if c.Total != 3 || c.T1 != 1 || c.T2 != 2 || c.T3 != 0 {
 		t.Errorf("tier counts = total:%d t1:%d t2:%d t3:%d", c.Total, c.T1, c.T2, c.T3)
@@ -128,7 +124,7 @@ func TestJSONSchemaRoundTrip(t *testing.T) {
 
 func TestJSONSchemaDeterministicFieldOrder(t *testing.T) {
 	all := []common.Resolved{{
-		Dep:    common.Dependency{Category: "ci-action", Name: "actions/checkout", Version: "v4", Source: "https://github.com/actions/checkout", File: ".github/workflows/ci.yml"},
+		Dep:    common.Dependency{Category: common.CategoryCIAction, Name: "actions/checkout", Version: "v4", Source: "https://github.com/actions/checkout", File: ".github/workflows/ci.yml"},
 		Tier:   common.TierT2,
 		Status: common.StatusUpdate,
 		Latest: "v7.0.1",
@@ -154,14 +150,12 @@ func TestJSONSchemaDeterministicFieldOrder(t *testing.T) {
 	}
 }
 
-// --- tier collapse counts ---------------------------------------------------
-
 func TestTierCollapseCounts(t *testing.T) {
 	all := []common.Resolved{
-		mkResolved("script-pin", "qemu", "9.2.4", common.TierT2, common.StatusUpdate, "9.2.5"),
-		mkResolved("script-pin", "m4", "1.4.19", common.TierT3, common.StatusUpdate, "1.4.20"),
-		mkResolved("script-pin", "ffmpeg", "8.0", common.TierT1, common.StatusUpdate, "8.0.1"),
-		mkResolved("bazel-module", "rules_nodejs", "6.7.3", common.TierT3, common.StatusUpdate, "6.7.5"),
+		mkResolved(common.CategoryScriptPin, "qemu", "9.2.4", common.TierT2, common.StatusUpdate, "9.2.5"),
+		mkResolved(common.CategoryScriptPin, "m4", "1.4.19", common.TierT3, common.StatusUpdate, "1.4.20"),
+		mkResolved(common.CategoryScriptPin, "ffmpeg", "8.0", common.TierT1, common.StatusUpdate, "8.0.1"),
+		mkResolved(common.CategoryBazelModule, "rules_nodejs", "6.7.3", common.TierT3, common.StatusUpdate, "6.7.5"),
 	}
 	rep := buildReport(all, nil, nil, time.Now())
 	if rep.Counts.T1 != 1 || rep.Counts.T2 != 1 || rep.Counts.T3 != 2 {
@@ -190,19 +184,17 @@ func mkResolved(category, name, version string, ti common.Tier, st common.Status
 	}
 }
 
-// --- cache ------------------------------------------------------------------
-
 func TestCacheKeyStableAndVersionSensitive(t *testing.T) {
-	a := common.Dependency{Category: "bazel-module", Name: "rules_go", Source: "https://bcr", Version: "0.63.0"}
-	b := common.Dependency{Category: "bazel-module", Name: "rules_go", Source: "https://bcr", Version: "0.63.0"}
+	a := common.Dependency{Category: common.CategoryBazelModule, Name: "rules_go", Source: "https://bcr", Version: "0.63.0"}
+	b := common.Dependency{Category: common.CategoryBazelModule, Name: "rules_go", Source: "https://bcr", Version: "0.63.0"}
 	if cacheKey(a) != cacheKey(b) {
 		t.Error("identical deps must share a cache key")
 	}
-	bumped := common.Dependency{Category: "bazel-module", Name: "rules_go", Source: "https://bcr", Version: "0.64.0"}
+	bumped := common.Dependency{Category: common.CategoryBazelModule, Name: "rules_go", Source: "https://bcr", Version: "0.64.0"}
 	if cacheKey(a) == cacheKey(bumped) {
 		t.Error("bumping the pinned version must change the cache key")
 	}
-	other := common.Dependency{Category: "tool-binary", Name: "golangci_lint_linux_amd64", Source: "https://github", Version: "2.13.2"}
+	other := common.Dependency{Category: common.CategoryToolBinary, Name: "golangci_lint_linux_amd64", Source: "https://github", Version: "2.13.2"}
 	if cacheKey(a) == cacheKey(other) {
 		t.Error("distinct deps must not collide on cache key")
 	}
@@ -218,7 +210,7 @@ func TestCacheRoundTripAndEntryConversion(t *testing.T) {
 
 	vi := common.VersionInfo{Version: "0.64.0", Date: "2026-08-01", Infos: []string{"note"}}
 	entries := map[string]cacheEntry{
-		cacheKey(common.Dependency{Category: "bazel-module", Name: "rules_go", Source: "s", Version: "0.63.0"}): versionInfoToEntry(vi),
+		cacheKey(common.Dependency{Category: common.CategoryBazelModule, Name: "rules_go", Source: "s", Version: "0.63.0"}): versionInfoToEntry(vi),
 	}
 	c.Save(entries)
 	if _, err := os.Stat(c.Path); err != nil {
@@ -259,7 +251,7 @@ func TestCacheMissingIsNotFatal(t *testing.T) {
 func TestCacheTTLUsesInjectedClock(t *testing.T) {
 	written := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	entries := map[string]cacheEntry{
-		cacheKey(common.Dependency{Category: "bazel-module", Name: "rules_go", Source: "s", Version: "0.63.0"}): versionInfoToEntry(common.VersionInfo{Version: "0.64.0"}),
+		cacheKey(common.Dependency{Category: common.CategoryBazelModule, Name: "rules_go", Source: "s", Version: "0.63.0"}): versionInfoToEntry(common.VersionInfo{Version: "0.64.0"}),
 	}
 
 	// A Save with the frozen clock stamps `written`; then a Load with the same
@@ -289,8 +281,7 @@ func TestCacheTTLUsesInjectedClock(t *testing.T) {
 }
 
 func TestCacheKeyDerivationKeyedOnCurrent(t *testing.T) {
-	// Bumping a pin invalidates the entry: the resolver must refetch.
-	// Simulated by asserting the key differs when current changes (covered in
+	// Bumping a pin invalidates the entry (covered in
 	// TestCacheKeyStableAndVersionSensitive); here we additionally confirm the
 	// no-op resolvers are never routed through the cache path by resolveOne.
 	fresh := false
@@ -318,11 +309,11 @@ var errTestNetwork = errors.New("test network failure")
 // failure leaves the stale entry intact and never writes the error.
 func TestCommitFreshEvictsStaleEntryOnFailure(t *testing.T) {
 	reg := []ResolverEntry{{
-		Match:   func(dep common.Dependency) bool { return dep.Category == "bazel-module" },
+		Match:   func(dep common.Dependency) bool { return dep.Category == common.CategoryBazelModule },
 		Resolve: func(dep common.Dependency) common.VersionInfo { return common.VersionInfo{Err: errTestNetwork} },
 		Network: true,
 	}}
-	dep := common.Dependency{Category: "bazel-module", Name: "rules_go", Source: "s", Version: "0.63.0"}
+	dep := common.Dependency{Category: common.CategoryBazelModule, Name: "rules_go", Source: "s", Version: "0.63.0"}
 	key := cacheKey(dep)
 	good := versionInfoToEntry(common.VersionInfo{Version: "0.64.0"})
 
@@ -352,8 +343,6 @@ func TestCommitFreshEvictsStaleEntryOnFailure(t *testing.T) {
 		t.Error("non-fresh failure must leave the stale entry intact")
 	}
 }
-
-// --- ignore ----------------------------------------------------------------
 
 func TestIgnoreMatching(t *testing.T) {
 	today := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)

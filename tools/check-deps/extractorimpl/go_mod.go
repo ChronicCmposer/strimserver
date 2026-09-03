@@ -8,7 +8,6 @@ import (
 
 var goDirectiveRe = regexp.MustCompile(`(?m)^go\s+([0-9]+\.[0-9]+(?:\.[0-9]+)?)\s*$`)
 
-// ExtractGoMod reads the controller Go module manifest.
 func ExtractGoMod(root string) ([]common.Dependency, []common.ExtractionUnknown) {
 	return common.ReadAndParse(root, "core/controller/go.mod", parseGoMod)
 }

@@ -14,8 +14,6 @@ import (
 
 var redistFileRe = regexp.MustCompile(`redistrib_([0-9]+\.[0-9]+\.[0-9]+)\.json`)
 
-// parseNvidiaRedistListing extracts every CUDA version from the redist
-// directory listing. Pure: takes the HTML body and returns version strings.
 func parseNvidiaRedistListing(data []byte) ([]string, error) {
 	versions := parseListing(data, redistFileRe)
 	if len(versions) == 0 {

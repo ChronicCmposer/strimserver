@@ -24,7 +24,6 @@ type dockerHubTagsPage struct {
 	Results []dockerTag `json:"results"`
 }
 
-// parseDockerHubTags decodes one page of the tags API.
 func parseDockerHubTags(data []byte) ([]dockerTag, error) {
 	var page dockerHubTagsPage
 	if err := json.Unmarshal(data, &page); err != nil {
@@ -78,8 +77,7 @@ var trixieDateTagRe = regexp.MustCompile(`^trixie-([0-9]{8})-slim$`)
 // DebianResolve builds a resolver for the Debian base-image pin: it finds the
 // newest trixie-YYYYMMDD-slim tag (a date-tag compare) and, best-effort, notes
 // when snapshot.debian.org has moved past the pinned snapshot (T3
-// informational). The trixie tags are matched through the shared
-// newestDockerHubTag helper: Docker Hub lists tags newest-first, so the first
+// informational). Docker Hub lists tags newest-first, so the first
 // trixie-YYYYMMDD-slim match is the newest; five pages is plenty and keeps the
 // anonymous rate limit happy.
 func DebianResolve(f *common.Fetcher) common.Resolver {

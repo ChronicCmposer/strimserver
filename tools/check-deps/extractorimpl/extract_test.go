@@ -6,7 +6,6 @@ import (
 	"strimserver-check-deps/common"
 )
 
-// findDep returns the first dependency matching category and name, or nil.
 func findDep(t *testing.T, deps []common.Dependency, category, name string) *common.Dependency {
 	t.Helper()
 	for i := range deps {
@@ -17,8 +16,6 @@ func findDep(t *testing.T, deps []common.Dependency, category, name string) *com
 	return nil
 }
 
-// findDepVersion returns the first dependency matching category, name, and
-// version, or nil.
 func findDepVersion(t *testing.T, deps []common.Dependency, category, name, version string) *common.Dependency {
 	t.Helper()
 	for i := range deps {

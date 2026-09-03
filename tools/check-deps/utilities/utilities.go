@@ -8,8 +8,6 @@ import (
 	"strings"
 )
 
-// IsAllDigits reports whether s is non-empty and consists only of ASCII
-// decimal digits ('0'–'9').
 func IsAllDigits(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
@@ -30,28 +28,25 @@ func StripTagPrefix(s string) string {
 }
 
 // LeadingInt returns the integer parsed from the leading digit run of s and
-// whether it parsed successfully. A run that is absent or overflows int is not
-// a representable integer, so it returns (0, false); any in-range digit run
-// returns (value, true). Callers use the bool to distinguish a genuine 0 (e.g.
-// "0" or "000") from "no digit present", so missing and broken inputs stay
-// distinguishable rather than collapsing onto the same sentinel.
+// whether it parsed successfully. Callers use the bool to distinguish a
+// genuine 0 (e.g. "0" or "000") from "no digit present", so missing and broken
+// inputs stay distinguishable rather than collapsing onto the same sentinel.
 func LeadingInt(s string) (int, bool) {
 	digits := LeadingDigits(s)
 	if digits == "" {
-		return 0, false // no digit run: not an integer
+		return 0, false
 	}
 	digits = strings.TrimLeft(digits, "0")
 	if digits == "" {
-		return 0, true // the run was all zeros; that is a valid 0
+		return 0, true
 	}
 	n, err := strconv.Atoi(digits)
 	if err != nil {
-		return 0, false // overflow: not representable
+		return 0, false
 	}
 	return n, true
 }
 
-// LeadingDigits returns the leading run of ASCII decimal digits in s.
 func LeadingDigits(s string) string {
 	i := 0
 	for i < len(s) && IsDigit(s[i]) {
@@ -60,7 +55,6 @@ func LeadingDigits(s string) string {
 	return s[:i]
 }
 
-// IsDigit reports whether c is an ASCII decimal digit.
 func IsDigit(c byte) bool {
 	return c >= '0' && c <= '9'
 }
@@ -74,9 +68,6 @@ func SplitCoreAndPre(s string) (core, pre string, hasPre bool) {
 	return strings.Cut(s, "-")
 }
 
-// CoreVersion reduces a version string to its numeric core: it strips a
-// leading alphabetic tag prefix, drops build metadata after '+', and cuts the
-// prerelease suffix after '-'.
 func CoreVersion(s string) string {
 	core, _, _ := SplitCoreAndPre(s)
 	return core
@@ -100,15 +91,15 @@ func ExtractDate(s string) string {
 var snapshotTsRe = regexp.MustCompile(`[0-9]{8}T[0-9]{6}Z`)
 
 // ExtractSnapshotTs returns the first Debian snapshot.debian.org timestamp
-// (YYYYMMDDTHHMMSSZ) inside s, or "" when there is none. It is used by the
-// extractor side (extractorimpl's parseAPTSourcesList) to pull a single
-// timestamp out of an apt.sources_list uri.
+// (YYYYMMDDTHHMMSSZ) inside s, or "" when there is none. Used by the extractor
+// side (extractorimpl's parseAPTSourcesList) to pull a single timestamp out of
+// an apt.sources_list uri.
 func ExtractSnapshotTs(s string) string {
 	return snapshotTsRe.FindString(s)
 }
 
 // ExtractSnapshotTsAll returns every Debian snapshot.debian.org timestamp
-// (YYYYMMDDTHHMMSSZ) inside s. It is used by the resolver side (resolverimpl's
+// (YYYYMMDDTHHMMSSZ) inside s. Used by the resolver side (resolverimpl's
 // newestDebianSnapshot) to enumerate all timestamps in an archive listing and
 // pick the newest.
 func ExtractSnapshotTsAll(s string) []string {

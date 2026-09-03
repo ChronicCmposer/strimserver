@@ -17,8 +17,7 @@ import (
 //
 // The Fetcher struct carries every knob as an injected field (client, retry
 // sleep, warning sink) so tests can substitute a httptest server-backed client
-// and a fake clock; every resolver is closure-bound to the fetcher it should
-// reach through in the composition-root wiring.
+// and a fake clock.
 
 // Fetcher performs bounded, retrying GET requests. The zero value is not
 // usable: every field must be populated, and the production defaults are wired
@@ -37,9 +36,8 @@ type Fetcher struct {
 
 // FetchBytes GETs rawURL and returns the response body. A rate-limited attempt
 // (403/429) is retried exactly once after the configured backoff; a success or
-// any other error returns immediately. The bounded two-attempt loop makes the
-// single retry explicit: after the second attempt, whatever happened is
-// reported as-is.
+// any other error returns immediately. After the second attempt, whatever
+// happened is reported as-is.
 func (f *Fetcher) FetchBytes(rawURL string) ([]byte, error) {
 	var data []byte
 	var err error
@@ -49,14 +47,12 @@ func (f *Fetcher) FetchBytes(rawURL string) ([]byte, error) {
 			return data, err
 		}
 		if attempt == 0 {
-			f.Sleep(f.RetryDelay) // back off before the one retry
+			f.Sleep(f.RetryDelay)
 		}
 	}
-	// Both attempts were rate-limited; report the retry's failure as-is.
 	return data, err
 }
 
-// fetchBytesOnce performs a single GET without retrying.
 func (f *Fetcher) fetchBytesOnce(rawURL string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {

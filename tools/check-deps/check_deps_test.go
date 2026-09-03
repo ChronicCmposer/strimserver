@@ -8,9 +8,9 @@ import (
 
 func TestDedupeKeepsFirst(t *testing.T) {
 	deps := []common.Dependency{
-		{Category: "script-pin", Name: "ffmpeg", Version: "8.0", File: "tools/ffmpeg-dist/build.sh"},
-		{Category: "script-pin", Name: "ffmpeg", Version: "8.0", File: "tools/ffmpeg-dist/publish.sh"},
-		{Category: "script-pin", Name: "qemu", Version: "9.2.4", File: "tools/qemu/build-qemu.sh"},
+		{Category: common.CategoryScriptPin, Name: "ffmpeg", Version: "8.0", File: "tools/ffmpeg-dist/build.sh"},
+		{Category: common.CategoryScriptPin, Name: "ffmpeg", Version: "8.0", File: "tools/ffmpeg-dist/publish.sh"},
+		{Category: common.CategoryScriptPin, Name: "qemu", Version: "9.2.4", File: "tools/qemu/build-qemu.sh"},
 	}
 	got := dedupe(deps)
 	if len(got) != 2 {

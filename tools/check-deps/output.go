@@ -16,9 +16,9 @@ import (
 // report and returns bytes/string, so it is unit-testable without I/O.
 
 // finding is one dependency in the JSON report. The struct field order is the
-// JSON field order, chosen once so output is reproducible. Tier is the JSON
-// schema's string form; the console renderer re-derives the typed tier from it
-// via tier() below, so the enum is never duplicated on the record.
+// JSON field order, chosen once so output is reproducible. The unexported tier
+// field carries the typed enum for the console renderer (never serialized, no
+// json tag).
 type finding struct {
 	Category    string   `json:"category"`
 	Name        string   `json:"name"`
@@ -34,6 +34,8 @@ type finding struct {
 	File        string   `json:"file,omitempty"`
 	Reasons     []string `json:"reasons,omitempty"`
 	Infos       []string `json:"infos,omitempty"`
+
+	tier common.Tier
 }
 
 // unknownEntry is one entry in the unknowns array. Phase 1 extraction
@@ -45,10 +47,9 @@ type unknownEntry struct {
 	Reason string `json:"reason"`
 }
 
-// counts summarizes the report. Tier and status counts are derived from the
-// findings so the consumer never has to recompute them. The JSON keys are a
-// deliberate, tested contract ("unknown" and "unknowns"), so they are pinned
-// with explicit tags while the Go field names carry the fuller meaning.
+// counts summarizes the report. The JSON keys are a deliberate, tested
+// contract ("unknown" and "unknowns"), so they are pinned with explicit tags
+// while the Go field names carry the fuller meaning.
 type counts struct {
 	Total  int `json:"total"`
 	T1     int `json:"t1"`
@@ -64,7 +65,6 @@ type counts struct {
 	UnknownsTotal int `json:"unknowns"`
 }
 
-// report is the top-level JSON object.
 type report struct {
 	Findings []finding      `json:"findings"`
 	Unknowns []unknownEntry `json:"unknowns"`
@@ -97,7 +97,10 @@ func bestURL(dep common.Dependency) string {
 	return ""
 }
 
-// toFinding converts a resolved record into the JSON finding shape.
+// toFinding converts a resolved record into the JSON finding shape. The wire
+// Tier is the string form; the unexported tier field carries the normalized
+// typed enum so the console renderer buckets exactly as the record's tier
+// does (Normalized() rests unrecognized tiers at T3).
 func toFinding(r common.Resolved) finding {
 	return finding{
 		Category:    r.Dep.Category,
@@ -113,17 +116,16 @@ func toFinding(r common.Resolved) finding {
 		File:        r.Dep.File,
 		Reasons:     slices.Clone(r.Reasons),
 		Infos:       slices.Clone(r.Infos),
+		tier:        r.Tier.Normalized(),
 	}
 }
 
 // buildReport assembles the full JSON report from the resolved dependencies,
 // the Phase 1 extraction unknowns, and the resolved "unknown" status records,
 // then applies the ignore set and derives the counts. today is injected so the
-// until-expiry logic is deterministic and testable. It makes a single pass over
-// the resolved dependencies: each one yields its finding (with Ignored set),
-// contributes its tier/status/ignored tallies, and contributes an unknowns
-// entry when it resolved "unknown"; the calendar date is formatted once and
-// threaded through isIgnoredOn so matching never re-formats it.
+// until-expiry logic is deterministic and testable. The calendar date is
+// formatted once and threaded through isIgnoredOn so matching never re-formats
+// it.
 func buildReport(all []common.Resolved, unknowns []common.ExtractionUnknown, ignores parsedIgnoreSet, today time.Time) report {
 	var rep report
 	calToday := calendarDate(today)
@@ -149,11 +151,9 @@ func buildReport(all []common.Resolved, unknowns []common.ExtractionUnknown, ign
 }
 
 // accumulateCounts adds one resolved dependency's tier, status, and ignored
-// contributions to the running counts. It counts directly from the typed
-// enums: common.Tier.Normalized() rests any unrecognized tier at TierT3 (the
-// explicit catch-all resting tier), and an unrecognized status contributes
-// nothing to the status tallies rather than silently skewing one of the four
-// known states.
+// contributions to the running counts. common.Tier.Normalized() rests any
+// unrecognized tier at TierT3 (the explicit catch-all resting tier), and an
+// unrecognized status contributes nothing to the status tallies.
 func accumulateCounts(c *counts, r common.Resolved, ignored bool) {
 	switch r.Tier.Normalized() {
 	case common.TierT1:
@@ -161,7 +161,7 @@ func accumulateCounts(c *counts, r common.Resolved, ignored bool) {
 	case common.TierT2:
 		c.T2++
 	default:
-		c.T3++ // the explicit catch-all resting tier
+		c.T3++
 	}
 	switch r.Status {
 	case common.StatusUpdate:
@@ -173,8 +173,7 @@ func accumulateCounts(c *counts, r common.Resolved, ignored bool) {
 	case common.StatusHygiene:
 		c.Hygiene++
 	default:
-		// An unrecognized status is not one of the four known report states;
-		// it is not counted so the tallies stay honest.
+		// An unrecognized status is not counted so the tallies stay honest.
 	}
 	if ignored {
 		c.Ignored++
@@ -194,8 +193,6 @@ func resolvedUnknownEntry(r common.Resolved) (unknownEntry, bool) {
 	}, true
 }
 
-// sortUnknowns orders unknowns deterministically by file, then name, then
-// reason.
 func sortUnknowns(unknowns []unknownEntry) {
 	slices.SortFunc(unknowns, func(a, b unknownEntry) int {
 		if a.File != b.File {
@@ -208,7 +205,6 @@ func sortUnknowns(unknowns []unknownEntry) {
 	})
 }
 
-// firstNonEmpty returns a when it is non-empty, otherwise b.
 func firstNonEmpty(a, b string) string {
 	if a != "" {
 		return a
@@ -217,31 +213,11 @@ func firstNonEmpty(a, b string) string {
 }
 
 // marshalReport serializes the report with a stable field order and
-// deterministic indentation. Failures are surfaced so main can exit non-zero.
+// deterministic indentation.
 func marshalReport(rep report) ([]byte, error) {
 	return json.MarshalIndent(rep, "", "  ")
 }
 
-// tier parses the JSON Tier string back into the typed enum for the console
-// renderer. The JSON schema owns the string form (Tier); this is the single
-// parse boundary where the console re-derives the enum, so bucketing never
-// string-compares "T1"/"T2" directly. Unrecognized strings rest at TierT3,
-// mirroring common.Tier.Normalized()'s catch-all fallback.
-func (f finding) tier() common.Tier {
-	switch f.Tier {
-	case "T1":
-		return common.TierT1
-	case "T2":
-		return common.TierT2
-	default:
-		return common.TierT3
-	}
-}
-
-// renderConsole produces the tiered human-readable report. T1 and T2 findings
-// are listed individually; T3 findings are collapsed into a count with a
-// compact name list; unknowns are listed with reasons; ignored findings are
-// collapsed.
 func renderConsole(rep report, root string) string {
 	var b strings.Builder
 	b.WriteString("== strimserver check-deps ==\n")
@@ -253,7 +229,7 @@ func renderConsole(rep report, root string) string {
 			ignored = append(ignored, f)
 			continue
 		}
-		switch f.tier() {
+		switch f.tier {
 		case common.TierT1:
 			t1 = append(t1, f)
 		case common.TierT2:
@@ -288,13 +264,10 @@ func renderConsole(rep report, root string) string {
 	return b.String()
 }
 
-// displayName returns the name to show for a finding, falling back to its
-// category when the name is empty.
 func displayName(f finding) string {
 	return firstNonEmpty(f.Name, f.Category)
 }
 
-// writeFindingSection renders one tier's findings as individual lines.
 func writeFindingSection(b *strings.Builder, title string, findings []finding) {
 	fmt.Fprintf(b, "%s — %d\n", title, len(findings))
 	for _, f := range findings {
@@ -328,8 +301,6 @@ func writeFindingSection(b *strings.Builder, title string, findings []finding) {
 	}
 }
 
-// joinNames renders the compact comma-separated name list for a collapsed
-// group, preserving the deterministic report order.
 func joinNames(findings []finding) string {
 	names := make([]string, 0, len(findings))
 	for _, f := range findings {

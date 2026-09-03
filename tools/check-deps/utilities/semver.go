@@ -62,11 +62,11 @@ func CompareChunks(a, b string) int {
 			a, b = a[len(aAlpha):], b[len(bAlpha):]
 			continue
 		}
-		// Both sides sit on a separator (e.g. '.'); neither is a digit or
-		// letter run. Versions in this tool use '.' uniformly, so advance one
-		// character from each. When the separators diverge (e.g. '.' vs '-'),
-		// order by the separator byte so ordering stays well-defined and no
-		// slice can underflow (a and b are both non-empty here).
+		// Both sides sit on a separator (e.g. '.'). Versions in this tool use
+		// '.' uniformly, so advance one character from each. When the
+		// separators diverge (e.g. '.' vs '-'), order by the separator byte so
+		// ordering stays well-defined and no slice can underflow (a and b are
+		// both non-empty here).
 		if a[0] != b[0] {
 			if a[0] < b[0] {
 				return -1
@@ -110,12 +110,11 @@ func comparePrereleaseIdent(a, b string) int {
 	case !aNum && bNum:
 		return 1
 	default:
-		// Alphanumeric identifiers: compare the full strings chunk-wise, the
+		// Alphanumeric identifiers compare the full strings chunk-wise, the
 		// same way CompareChunks orders version cores. Numeric runs compare as
 		// integers and alphabetic runs lexically, so interior content is never
 		// dropped and multi-run identifiers like "r10foo2" sort after "r9foo10"
-		// (both run "r", then 10 > 9) instead of being mis-ordered by their
-		// trailing digits.
+		// (both run "r", then 10 > 9).
 		return CompareChunks(a, b)
 	}
 }

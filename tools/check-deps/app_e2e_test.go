@@ -22,13 +22,10 @@ import (
 // `go test` and the bazel sandbox (where real repo files are absent), guarded
 // by the golden-nonet.* fixtures.
 
-// e2eMode selects which report mode the synthetic run emits.
 type e2eMode int
 
 const (
-	// e2eJSON emits the JSON report to Stdout.
 	e2eJSON e2eMode = iota
-	// e2eConsole emits the tiered console report to Stdout.
 	e2eConsole
 )
 
@@ -63,8 +60,6 @@ func testClassifier() *common.Classifier {
 	)
 }
 
-// captureWarn returns a warn sink that appends every formatted warning to the
-// given slice, so tests can assert which warnings were emitted.
 func captureWarn(warns *[]string) func(string, ...any) {
 	return func(format string, args ...any) {
 		*warns = append(*warns, fmt.Sprintf(format, args...))
@@ -111,13 +106,13 @@ func networkVersion(netCalls *int64) common.Resolver {
 // first match wins.
 func newSyntheticResolvers(netCalls *int64) []ResolverEntry {
 	return []ResolverEntry{
-		networkedDep(isBazelModule, networkVersion(netCalls)),
+		networkedDep(matchesCategory(common.CategoryBazelModule), networkVersion(netCalls)),
 		networkedDep(Matches(common.CategoryToolBinary, "golangci_lint_linux_amd64"), networkVersion(netCalls)),
 		noopDep(Matches(common.CategoryBaseImage, "alpine"), resolverimpl.DigestResolve),
 		networkedDep(Matches(common.CategoryBaseImage, "debian"), networkVersion(netCalls)),
 		networkedDep(Matches(common.CategoryScriptPin, "qemu"), networkVersion(netCalls)),
-		networkedDep(isCIAction, networkVersion(netCalls)),
-		noopDep(isToolchain, resolverimpl.ToolchainResolve),
+		networkedDep(matchesCategory(common.CategoryCIAction), networkVersion(netCalls)),
+		noopDep(matchesCategory(common.CategoryToolchain), resolverimpl.ToolchainResolve),
 	}
 }
 
@@ -126,23 +121,22 @@ func newSyntheticResolvers(netCalls *int64) []ResolverEntry {
 // argument (extraction is deterministic and filesystem-free).
 func syntheticExtract(_ string) ([]common.Dependency, []common.ExtractionUnknown) {
 	deps := []common.Dependency{
-		{Category: "bazel-module", Name: "rules_go", Version: "0.63.0", Source: "https://bcr.bazel.build/modules/rules_go", File: "MODULE.bazel"},
-		{Category: "tool-binary", Name: "golangci_lint_linux_amd64", Version: "2.13.2", Source: "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-amd64.tar.gz", File: "MODULE.bazel"},
-		{Category: "base-image", Name: "alpine", Version: "", Source: "docker.io/library/alpine", File: "MODULE.bazel", DigestPinned: true},
-		{Category: "base-image", Name: "debian", Version: "20260824T082821Z", Source: "https://snapshot.debian.org/archive/debian", File: "MODULE.bazel"},
-		{Category: "script-pin", Name: "qemu", Version: "9.2.4", Source: "https://download.qemu.org", File: "tools/qemu/build-qemu.sh"},
-		{Category: "ci-action", Name: "actions/checkout", Version: "v4", Source: "https://github.com/actions/checkout", File: ".github/workflows/controller-ci.yml"},
-		{Category: "toolchain", Name: "Bazel", Version: "9.2.0", Source: ".bazelversion", File: ".bazelversion"},
-		{Category: "script-pin", Name: "no-such-pin", Version: "1.0.0", Source: "x", File: "tools/x/build.sh"},
+		{Category: common.CategoryBazelModule, Name: "rules_go", Version: "0.63.0", Source: "https://bcr.bazel.build/modules/rules_go", File: "MODULE.bazel"},
+		{Category: common.CategoryToolBinary, Name: "golangci_lint_linux_amd64", Version: "2.13.2", Source: "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-amd64.tar.gz", File: "MODULE.bazel"},
+		{Category: common.CategoryBaseImage, Name: "alpine", Version: "", Source: "docker.io/library/alpine", File: "MODULE.bazel", DigestPinned: true},
+		{Category: common.CategoryBaseImage, Name: "debian", Version: "20260824T082821Z", Source: "https://snapshot.debian.org/archive/debian", File: "MODULE.bazel"},
+		{Category: common.CategoryScriptPin, Name: "qemu", Version: "9.2.4", Source: "https://download.qemu.org", File: "tools/qemu/build-qemu.sh"},
+		{Category: common.CategoryCIAction, Name: "actions/checkout", Version: "v4", Source: "https://github.com/actions/checkout", File: ".github/workflows/controller-ci.yml"},
+		{Category: common.CategoryToolchain, Name: "Bazel", Version: "9.2.0", Source: ".bazelversion", File: ".bazelversion"},
+		{Category: common.CategoryScriptPin, Name: "no-such-pin", Version: "1.0.0", Source: "x", File: "tools/x/build.sh"},
 	}
 	unknowns := []common.ExtractionUnknown{{File: "tools/ffmpeg-dist/build.sh", Reason: "cannot read file: open tools/ffmpeg-dist/build.sh: no such file or directory"}}
 	return deps, unknowns
 }
 
-// e2eRun is a fully wired synthetic scenario: the run() collaborators plus its
+// e2eRun is a fully wired synthetic scenario: the run() collaborators plus the
 // injected in-memory writers, warn capture, cache directory, and network-call
-// counter. Tests build one per run, call the package-level run() with the
-// harness's collaborators, and assert on the captured outputs.
+// counter. Tests build one per run, call run(), and assert on captured output.
 type e2eRun struct {
 	opts       *Options
 	cache      *Cache
@@ -164,11 +158,13 @@ type e2eRun struct {
 // runs and environments.
 func newE2EApp(t *testing.T, mode e2eMode, baseDir string, netCalls *int64) *e2eRun {
 	t.Helper()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
 	opts := &Options{
 		Root:                 "/repo",
 		Now:                  frozenNow,
-		Stdout:               &bytes.Buffer{},
-		Stderr:               &bytes.Buffer{},
+		Stdout:               stdout,
+		Stderr:               stderr,
 		MaxConcurrentFetches: 4,
 		NativeTools:          false,
 	}
@@ -203,8 +199,8 @@ func newE2EApp(t *testing.T, mode e2eMode, baseDir string, netCalls *int64) *e2e
 		resolvers:  resolvers,
 		extractors: extractors,
 		classifier: testClassifier(),
-		stdout:     opts.Stdout.(*bytes.Buffer),
-		stderr:     opts.Stderr.(*bytes.Buffer),
+		stdout:     stdout,
+		stderr:     stderr,
 		warns:      warns,
 		cacheDir:   baseDir,
 		netCalls:   netCalls,
