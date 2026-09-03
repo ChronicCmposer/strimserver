@@ -1,7 +1,22 @@
 [
   {
-    "id": "npm/@rollup/rollup-linux-arm64-gnu",
-    "reason": "Intentional platform-locked pin: @rollup/rollup-linux-arm64-gnu is forced to 4.62.2 to match the rollup version declared elsewhere, so pnpm outdated reports it as outdated. Keep it; bump rollup as a unit.",
-    "until": ""
+    "id": "script-pin/CUDA",
+    "reason": "CUDA upgrade to 13.3.1 requires NVIDIA driver 610 to be present in the latest AWS dlami for Amazon Linux 2023; must wait until that happens.",
+    "until": "2026-12-31"
+  },
+  {
+    "id": "script-pin/nv-codec-headers",
+    "reason": "nv-codec-headers upgrade to 13.1.x requires NVIDIA driver 610 to be present in the latest AWS dlami for Amazon Linux 2023; must wait until that happens.",
+    "until": "2026-12-31"
+  },
+  {
+    "id": "npm/typescript",
+    "reason": "typescript upgrade to 7.x has breaking changes per previous investigation; wait until at least 7.1 before investigating again.",
+    "until": "2027-01-31"
+  },
+  {
+    "id": "npm/@types/node",
+    "reason": "@types/node upgrade doesn't matter until the .nvmrc is bumped to node 26+; must wait for that.",
+    "until": "2026-12-31"
   }
 ]
