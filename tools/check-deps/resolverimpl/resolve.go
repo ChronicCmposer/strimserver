@@ -16,3 +16,9 @@ func ToolchainResolve(dep common.Dependency) common.VersionInfo {
 		Infos:   []string{"toolchain pin; no upstream endpoint configured"},
 	}
 }
+
+// DigestResolve and ToolchainResolve are direct common.Resolver
+// implementations; the assertions pin the contract so a signature drift fails
+// the build rather than surfacing only at a registration site.
+var _ common.Resolver = DigestResolve
+var _ common.Resolver = ToolchainResolve
