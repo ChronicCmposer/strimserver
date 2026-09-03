@@ -82,7 +82,7 @@ var trixieDateTagRe = regexp.MustCompile(`^trixie-([0-9]{8})-slim$`)
 // newestDockerHubTag helper: Docker Hub lists tags newest-first, so the first
 // trixie-YYYYMMDD-slim match is the newest; five pages is plenty and keeps the
 // anonymous rate limit happy.
-func DebianResolve(f *common.Fetcher) common.ResolverFunc {
+func DebianResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		tag, found, err := newestDockerHubTag("debian", 5, func(t dockerTag) bool {
 			return trixieDateTagRe.MatchString(t.Name)
@@ -110,7 +110,7 @@ func DebianResolve(f *common.Fetcher) common.ResolverFunc {
 // tag is a floating year-major (2023), so the classifier reports hygiene; here
 // we just confirm the tag still exists upstream by scanning the shared
 // newestDockerHubTag helper for an exact name match.
-func AmazonlinuxResolve(f *common.Fetcher) common.ResolverFunc {
+func AmazonlinuxResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		_, found, err := newestDockerHubTag("amazonlinux", 3, func(t dockerTag) bool {
 			return t.Name == dep.Version

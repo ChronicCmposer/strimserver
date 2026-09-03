@@ -295,7 +295,7 @@ func TestCacheKeyDerivationKeyedOnCurrent(t *testing.T) {
 	// no-op resolvers are never routed through the cache path by resolveOne.
 	fresh := false
 	entries := map[string]cacheEntry{}
-	reg := []common.ResolverEntry{noopDep(common.Matches(common.CategoryToolchain, "Bazel"), resolverimpl.ToolchainResolve)}
+	reg := []ResolverEntry{noopDep(Matches(common.CategoryToolchain, "Bazel"), resolverimpl.ToolchainResolve)}
 	r, changed := resolveOne(reg, common.Dependency{Category: common.CategoryToolchain, Name: "Bazel", Version: "9.2.0"}, entries, fresh, testClassifier())
 	if r.Status != common.StatusOK {
 		t.Errorf("toolchain resolveOne status = %s, want ok", r.Status)
@@ -317,7 +317,7 @@ var errTestNetwork = errors.New("test network failure")
 // evicted (so the next non-fresh run refetches live), while a non-fresh
 // failure leaves the stale entry intact and never writes the error.
 func TestCommitFreshEvictsStaleEntryOnFailure(t *testing.T) {
-	reg := []common.ResolverEntry{{
+	reg := []ResolverEntry{{
 		Match:   func(dep common.Dependency) bool { return dep.Category == "bazel-module" },
 		Resolve: func(dep common.Dependency) common.VersionInfo { return common.VersionInfo{Err: errTestNetwork} },
 		Network: true,

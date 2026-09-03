@@ -44,7 +44,7 @@ func latestOf(versions []string, cmp func(a, b string) int) (string, error) {
 }
 
 // QemuScrapeResolve builds a resolver that scrapes the QEMU release directory.
-func QemuScrapeResolve(f *common.Fetcher) common.ResolverFunc {
+func QemuScrapeResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		return scrapeListing("https://download.qemu.org/", qemuTarRe, f)
 	}
@@ -52,14 +52,14 @@ func QemuScrapeResolve(f *common.Fetcher) common.ResolverFunc {
 
 // OpensshScrapeResolve builds a resolver that scrapes the OpenSSH portable
 // release directory.
-func OpensshScrapeResolve(f *common.Fetcher) common.ResolverFunc {
+func OpensshScrapeResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		return scrapeListing("https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/", opensshTarRe, f)
 	}
 }
 
 // M4ScrapeResolve builds a resolver that scrapes the GNU m4 release directory.
-func M4ScrapeResolve(f *common.Fetcher) common.ResolverFunc {
+func M4ScrapeResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		return scrapeListing("https://ftp.gnu.org/gnu/m4/?C=M;O=D", m4TarRe, f)
 	}
@@ -67,7 +67,7 @@ func M4ScrapeResolve(f *common.Fetcher) common.ResolverFunc {
 
 // FfmpegScrapeResolve builds a resolver that scrapes the FFmpeg release
 // directory.
-func FfmpegScrapeResolve(f *common.Fetcher) common.ResolverFunc {
+func FfmpegScrapeResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		return scrapeListing("https://ffmpeg.org/releases/", ffmpegTarRe, f)
 	}

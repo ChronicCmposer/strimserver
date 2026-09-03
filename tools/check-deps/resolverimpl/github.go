@@ -75,7 +75,7 @@ func fetchGitHubRelease(owner, repo string, f *common.Fetcher) (common.VersionIn
 }
 
 // GithubResolverFor builds a resolver for a fixed owner/repo pair.
-func GithubResolverFor(owner, repo string, f *common.Fetcher) common.ResolverFunc {
+func GithubResolverFor(owner, repo string, f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		return fetchGitHubLatest(owner, repo, f)
 	}
@@ -84,7 +84,7 @@ func GithubResolverFor(owner, repo string, f *common.Fetcher) common.ResolverFun
 // GithubActionResolve builds a resolver that resolves a ci-action dependency
 // whose Name is "owner/repo"; the pin (dep.Version) is the @ref after the
 // action name.
-func GithubActionResolve(f *common.Fetcher) common.ResolverFunc {
+func GithubActionResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		owner, repo, found := strings.Cut(dep.Name, "/")
 		if !found || owner == "" || repo == "" {

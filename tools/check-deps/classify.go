@@ -75,7 +75,7 @@ func classifyDateTag(r common.Resolved, dep common.Dependency) (common.Resolved,
 	if common.CompareChunks(latest, cur) > 0 {
 		// A newer date tag is an update, never a breaking bump; the tier rule
 		// still derives the final tier from the resting one (T1 stays T1).
-		r.MarkUpdate(updateTier(r.Tier, false))
+		markUpdate(&r, updateTier(r.Tier, false))
 		return r, true
 	}
 	r.Status = common.StatusOK
@@ -94,7 +94,7 @@ func classifySemver(r common.Resolved, dep common.Dependency) (common.Resolved, 
 	case c == 0:
 		r.Status = common.StatusOK
 	case c < 0:
-		r.MarkUpdate(updateTier(resting, isBreakingBump(dep.Version, r.Latest)))
+		markUpdate(&r, updateTier(resting, isBreakingBump(dep.Version, r.Latest)))
 	default:
 		// Pinned at or ahead of the latest known version: nothing to do.
 		r.Status = common.StatusOK
@@ -154,6 +154,14 @@ func actionMajor(ref string) (int, bool) {
 // date-stamped tag (the Debian trixie-YYYYMMDD base image).
 func isDateTagged(dep common.Dependency) bool {
 	return dep.Category == common.CategoryBaseImage && dep.Name == "debian"
+}
+
+// markUpdate records that a newer upstream version exists, applying the
+// already-derived final review tier. It replaces the former Resolved.MarkUpdate
+// method (a method cannot be defined on a common type from the main package).
+func markUpdate(r *common.Resolved, final common.Tier) {
+	r.Status = common.StatusUpdate
+	r.Tier = final
 }
 
 // updateTier derives the final review tier for an update from the dependency's

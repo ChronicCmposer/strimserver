@@ -100,7 +100,7 @@ const alpinePinnedDefaultBranch = "v3.23"
 // latest-stable branch is recorded as informational branch staleness. The
 // pinned branch comes from the structured dependency.Branch field, falling
 // back to the default v3.23 when the extractor did not record one.
-func AlpineResolve(f *common.Fetcher) common.ResolverFunc {
+func AlpineResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		branch := dep.Branch
 		if branch == "" {

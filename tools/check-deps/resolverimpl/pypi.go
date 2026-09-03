@@ -49,7 +49,7 @@ func parsePyPIVersionAndYanked(data []byte, currentVersion string) (latest strin
 // closure captures the yanked flag for the note, so the fetch/parse error
 // guards live in the shared fetchAndParse helper and only the note stays
 // explicit.
-func PypiResolve(f *common.Fetcher) common.ResolverFunc {
+func PypiResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		var yanked bool
 		vi := fetchAndParse(f, "https://pypi.org/pypi/"+dep.Name+"/json", func(data []byte) (string, error) {

@@ -53,7 +53,7 @@ func latestNonYanked(versions []string, yanked map[string]string) (string, error
 // closure captures the yanked map for the note, so the fetch/parse error
 // guards live in the shared fetchAndParse helper and only the note stays
 // explicit.
-func BCRResolve(f *common.Fetcher) common.ResolverFunc {
+func BCRResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		var yanked map[string]string
 		vi := fetchAndParse(f, "https://bcr.bazel.build/modules/"+dep.Name+"/metadata.json", func(data []byte) (string, error) {

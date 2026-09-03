@@ -31,6 +31,21 @@ func ResolveNativeDeps(root string, timeout time.Duration, classifier *common.Cl
 	return out
 }
 
+// ResolveNativeDeps must keep satisfying the common.BatchResolver contract so
+// the composition root can register it in the batch-resolver list.
+var _ common.BatchResolver = ResolveNativeDeps
+
+// unknownResolved builds a resolved record for a dependency whose latest
+// version could not be resolved at all (missing toolchain, missing directory).
+func unknownResolved(category, reason string) common.Resolved {
+	return common.Resolved{
+		Dep:     common.Dependency{Category: category},
+		Tier:    common.TierT3,
+		Status:  common.StatusUnknown,
+		Reasons: []string{reason},
+	}
+}
+
 type goModuleJSON struct {
 	Path    string `json:"Path"`
 	Version string `json:"Version"`
@@ -46,7 +61,7 @@ func resolveGoModules(root string, timeout time.Duration, classifier *common.Cla
 	workDir := filepath.Join(root, "core", "controller")
 	out, err := runNativeTool(workDir, []string{"go", "list", "-m", "-u", "-json", "all"}, timeout)
 	if err != nil {
-		return []common.Resolved{common.UnknownResolved(common.CategoryGo, nativeToolReason(err, out, nativeToolMessages{
+		return []common.Resolved{unknownResolved(common.CategoryGo, nativeToolReason(err, out, nativeToolMessages{
 			dirMissing: "core/controller directory not found",
 			notFound:   "go toolchain not found",
 			timeout:    "go list -u timed out",
@@ -62,7 +77,7 @@ func resolveGoModules(root string, timeout time.Duration, classifier *common.Cla
 			if err == io.EOF {
 				break
 			}
-			return []common.Resolved{common.UnknownResolved(common.CategoryGo, "cannot parse go list output: "+err.Error())}
+			return []common.Resolved{unknownResolved(common.CategoryGo, "cannot parse go list output: "+err.Error())}
 		}
 		if mod.Path == "" || mod.Version == "" {
 			continue
@@ -97,7 +112,7 @@ func resolvePNPM(root string, timeout time.Duration, classifier *common.Classifi
 	workDir := filepath.Join(root, "tools", "streamdeck-plugin")
 	out, err := runNativeTool(workDir, []string{"pnpm", "outdated", "--json"}, timeout)
 	if err != nil && !isOutdatedExitOne(err) {
-		return []common.Resolved{common.UnknownResolved(common.CategoryNPM, nativeToolReason(err, out, nativeToolMessages{
+		return []common.Resolved{unknownResolved(common.CategoryNPM, nativeToolReason(err, out, nativeToolMessages{
 			dirMissing: "tools/streamdeck-plugin directory not found",
 			notFound:   "pnpm not found; node/pnpm toolchain missing",
 			timeout:    "pnpm outdated timed out",

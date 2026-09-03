@@ -96,7 +96,7 @@ func fixtureVersionInfo(category, name string) common.VersionInfo {
 // common.VersionInfo for the dependency's category+name. The counter is
 // incremented atomically because network resolvers now run concurrently in
 // resolveAll.
-func networkVersion(netCalls *int64) common.ResolverFunc {
+func networkVersion(netCalls *int64) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		atomic.AddInt64(netCalls, 1)
 		return fixtureVersionInfo(dep.Category, dep.Name)
@@ -107,13 +107,13 @@ func networkVersion(netCalls *int64) common.ResolverFunc {
 // scenario. Network resolvers are closures over the call counter; the digest
 // (alpine) and toolchain (Bazel) no-ops use the real free functions and never
 // count. Slice order is dispatch order: first match wins.
-func newSyntheticResolvers(netCalls *int64) []common.ResolverEntry {
-	return []common.ResolverEntry{
+func newSyntheticResolvers(netCalls *int64) []ResolverEntry {
+	return []ResolverEntry{
 		{Match: isBazelModule, Resolve: networkVersion(netCalls), Network: true},
-		{Match: common.Matches(common.CategoryToolBinary, "golangci_lint_linux_amd64"), Resolve: networkVersion(netCalls), Network: true},
-		{Match: common.Matches(common.CategoryBaseImage, "alpine"), Resolve: resolverimpl.DigestResolve, Network: false},
-		{Match: common.Matches(common.CategoryBaseImage, "debian"), Resolve: networkVersion(netCalls), Network: true},
-		{Match: common.Matches(common.CategoryScriptPin, "qemu"), Resolve: networkVersion(netCalls), Network: true},
+		{Match: Matches(common.CategoryToolBinary, "golangci_lint_linux_amd64"), Resolve: networkVersion(netCalls), Network: true},
+		{Match: Matches(common.CategoryBaseImage, "alpine"), Resolve: resolverimpl.DigestResolve, Network: false},
+		{Match: Matches(common.CategoryBaseImage, "debian"), Resolve: networkVersion(netCalls), Network: true},
+		{Match: Matches(common.CategoryScriptPin, "qemu"), Resolve: networkVersion(netCalls), Network: true},
 		{Match: isCIAction, Resolve: networkVersion(netCalls), Network: true},
 		{Match: isToolchain, Resolve: resolverimpl.ToolchainResolve, Network: false},
 	}
@@ -144,7 +144,7 @@ func syntheticExtract(_ string) ([]common.Dependency, []common.ExtractionUnknown
 type e2eRun struct {
 	opts       *Options
 	cache      *Cache
-	resolvers  []common.ResolverEntry
+	resolvers  []ResolverEntry
 	extractors []common.Extractor
 	classifier *common.Classifier
 	stdout     *bytes.Buffer
@@ -214,7 +214,7 @@ func newE2EApp(t *testing.T, mode e2eMode, baseDir string, netCalls *int64) *e2e
 // are stable.
 func TestE2ERegressionJSON(t *testing.T) {
 	e := newE2EApp(t, e2eJSON, "", nil)
-	if err := run(e.opts, e.cache, e.resolvers, e.extractors, e.classifier); err != nil {
+	if err := run(e.opts, e.cache, e.resolvers, nil, e.extractors, e.classifier); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	want, err := os.ReadFile(filepath.Join("testdata", "golden-nonet.json"))
@@ -231,7 +231,7 @@ func TestE2ERegressionJSON(t *testing.T) {
 // console report goes to Stdout.
 func TestE2ERegressionConsole(t *testing.T) {
 	e := newE2EApp(t, e2eConsole, "", nil)
-	if err := run(e.opts, e.cache, e.resolvers, e.extractors, e.classifier); err != nil {
+	if err := run(e.opts, e.cache, e.resolvers, nil, e.extractors, e.classifier); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	want, err := os.ReadFile(filepath.Join("testdata", "golden-nonet-console.txt"))
@@ -253,7 +253,7 @@ func TestE2ECacheHonoredAndFreshBypass(t *testing.T) {
 
 	// First run: empty cache forces every network resolver to fetch.
 	first := newE2EApp(t, e2eConsole, baseDir, netCalls)
-	if err := run(first.opts, first.cache, first.resolvers, first.extractors, first.classifier); err != nil {
+	if err := run(first.opts, first.cache, first.resolvers, nil, first.extractors, first.classifier); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	if *netCalls != networkDeps {
@@ -267,7 +267,7 @@ func TestE2ECacheHonoredAndFreshBypass(t *testing.T) {
 	// Second run with the same cache: resolvers are NOT invoked again and the
 	// output is identical.
 	second := newE2EApp(t, e2eConsole, baseDir, netCalls)
-	if err := run(second.opts, second.cache, second.resolvers, second.extractors, second.classifier); err != nil {
+	if err := run(second.opts, second.cache, second.resolvers, nil, second.extractors, second.classifier); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	if *netCalls != networkDeps {
@@ -280,7 +280,7 @@ func TestE2ECacheHonoredAndFreshBypass(t *testing.T) {
 	// --fresh bypasses the cache and refetches every network dep.
 	fresh := newE2EApp(t, e2eConsole, baseDir, netCalls)
 	fresh.opts.Fresh = true
-	if err := run(fresh.opts, fresh.cache, fresh.resolvers, fresh.extractors, fresh.classifier); err != nil {
+	if err := run(fresh.opts, fresh.cache, fresh.resolvers, nil, fresh.extractors, fresh.classifier); err != nil {
 		t.Fatalf("fresh run: %v", err)
 	}
 	if *netCalls != 2*networkDeps {

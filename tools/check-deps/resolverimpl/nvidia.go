@@ -25,7 +25,7 @@ func parseNvidiaRedistListing(data []byte) ([]string, error) {
 
 // NvidiaResolve builds a resolver that fetches the CUDA redist listing and
 // reports the newest manifest version.
-func NvidiaResolve(f *common.Fetcher) common.ResolverFunc {
+func NvidiaResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		return fetchAndParse(f, "https://developer.download.nvidia.com/compute/cuda/redist/", func(data []byte) (string, error) {
 			versions, err := parseNvidiaRedistListing(data)

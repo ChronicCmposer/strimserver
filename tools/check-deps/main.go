@@ -103,33 +103,50 @@ func main() {
 	}
 	opts.Root = root
 
-	fetcher := newFetcher(&opts)
-
-	resolvers := []common.ResolverEntry{
-		{Match: isBazelModule, Resolve: resolverimpl.BCRResolve(fetcher), Network: true},
-		githubDep(common.CategoryToolBinary, "golangci_lint_linux_amd64", "golangci", "golangci-lint", fetcher),
-		githubDep(common.CategoryToolBinary, "mediamtx_dist", "bluenviron", "mediamtx", fetcher),
-		networkedDep(common.Matches(common.CategoryRuntime, "iperf3"), resolverimpl.AlpineResolve(fetcher)),
-		noopDep(common.Matches(common.CategoryBaseImage, "alpine"), resolverimpl.DigestResolve),
-		networkedDep(common.Matches(common.CategoryBaseImage, "debian"), resolverimpl.DebianResolve(fetcher)),
-		networkedDep(common.Matches(common.CategoryBaseImage, "amazonlinux"), resolverimpl.AmazonlinuxResolve(fetcher)),
-		networkedDep(common.Matches(common.CategoryScriptPin, "qemu"), resolverimpl.QemuScrapeResolve(fetcher)),
-		networkedDep(common.Matches(common.CategoryScriptPin, "openssh-portable"), resolverimpl.OpensshScrapeResolve(fetcher)),
-		networkedDep(common.Matches(common.CategoryScriptPin, "GNU m4"), resolverimpl.M4ScrapeResolve(fetcher)),
-		networkedDep(common.Matches(common.CategoryScriptPin, "ffmpeg"), resolverimpl.FfmpegScrapeResolve(fetcher)),
-		githubDep(common.CategoryScriptPin, "nv-codec-headers", "FFmpeg", "nv-codec-headers", fetcher),
-		networkedDep(common.Matches(common.CategoryScriptPin, "CUDA"), resolverimpl.NvidiaResolve(fetcher)),
-		networkedDep(common.Matches(common.CategoryScriptPin, "distlib"), resolverimpl.PypiResolve(fetcher)),
-		networkedDep(isCIAction, resolverimpl.GithubActionResolve(fetcher)),
-		noopDep(isToolchain, resolverimpl.ToolchainResolve),
-	}
-
+	// Extract phase: Phase 1 owns dependency discovery. The extractors run over
+	// the repo root first, so they are wired before the resolve-phase objects.
 	extractors := []common.Extractor{
 		extractorimpl.ExtractModuleBazel,
 		extractorimpl.ExtractGoMod,
 		extractorimpl.ExtractToolchains,
 		extractorimpl.ExtractWorkflows,
 		extractorimpl.ExtractScripts,
+	}
+
+	// Resolve phase: Phase 2 owns version resolution, wired in execution order:
+	// the fetcher backs every network resolver, the batch resolvers shell out to
+	// the native tools, and the classifier turns each answer into a record.
+	fetcher := &common.Fetcher{
+		Client:     &http.Client{Timeout: opts.HTTPTimeout},
+		UserAgent:  opts.UserAgent,
+		MaxBytes:   opts.MaxResponseBytes,
+		RetryDelay: opts.RateLimitRetryDelay,
+		Sleep:      time.Sleep,
+		Warn:       opts.Warn,
+	}
+
+	resolvers := []ResolverEntry{
+		{Match: isBazelModule, Resolve: resolverimpl.BCRResolve(fetcher), Network: true},
+		githubDep(common.CategoryToolBinary, "golangci_lint_linux_amd64", "golangci", "golangci-lint", fetcher),
+		githubDep(common.CategoryToolBinary, "mediamtx_dist", "bluenviron", "mediamtx", fetcher),
+		networkedDep(Matches(common.CategoryRuntime, "iperf3"), resolverimpl.AlpineResolve(fetcher)),
+		noopDep(Matches(common.CategoryBaseImage, "alpine"), resolverimpl.DigestResolve),
+		networkedDep(Matches(common.CategoryBaseImage, "debian"), resolverimpl.DebianResolve(fetcher)),
+		networkedDep(Matches(common.CategoryBaseImage, "amazonlinux"), resolverimpl.AmazonlinuxResolve(fetcher)),
+		networkedDep(Matches(common.CategoryScriptPin, "qemu"), resolverimpl.QemuScrapeResolve(fetcher)),
+		networkedDep(Matches(common.CategoryScriptPin, "openssh-portable"), resolverimpl.OpensshScrapeResolve(fetcher)),
+		networkedDep(Matches(common.CategoryScriptPin, "GNU m4"), resolverimpl.M4ScrapeResolve(fetcher)),
+		networkedDep(Matches(common.CategoryScriptPin, "ffmpeg"), resolverimpl.FfmpegScrapeResolve(fetcher)),
+		githubDep(common.CategoryScriptPin, "nv-codec-headers", "FFmpeg", "nv-codec-headers", fetcher),
+		networkedDep(Matches(common.CategoryScriptPin, "CUDA"), resolverimpl.NvidiaResolve(fetcher)),
+		networkedDep(Matches(common.CategoryScriptPin, "distlib"), resolverimpl.PypiResolve(fetcher)),
+		networkedDep(isCIAction, resolverimpl.GithubActionResolve(fetcher)),
+		noopDep(isToolchain, resolverimpl.ToolchainResolve),
+	}
+
+	batchResolvers := []common.BatchResolver{}
+	if opts.NativeTools {
+		batchResolvers = append(batchResolvers, resolverimpl.ResolveNativeDeps)
 	}
 
 	classifier := common.NewClassifier(
@@ -158,6 +175,7 @@ func main() {
 		&opts,
 		newCache(&opts, root),
 		resolvers,
+		batchResolvers,
 		extractors,
 		classifier,
 	)
@@ -165,21 +183,6 @@ func main() {
 		fail("check-deps", err)
 	}
 	os.Exit(0)
-}
-
-// newFetcher wires the shared common.Fetcher from the run's Options: the HTTP
-// timeout, user agent, response-size cap, and rate-limit backoff all come from
-// the injected configuration so tests and the composition root control them
-// explicitly. common owns the Fetcher type and FetchBytes.
-func newFetcher(opts *Options) *common.Fetcher {
-	return &common.Fetcher{
-		Client:     &http.Client{Timeout: opts.HTTPTimeout},
-		UserAgent:  opts.UserAgent,
-		MaxBytes:   opts.MaxResponseBytes,
-		RetryDelay: opts.RateLimitRetryDelay,
-		Sleep:      time.Sleep,
-		Warn:       opts.Warn,
-	}
 }
 
 // repoRoot resolves the repository root. The caller injects the Bazel
@@ -228,10 +231,11 @@ func warnf(format string, args ...any) {
 }
 
 // run executes one full check-deps run: extract -> dedupe -> resolve
-// (cache-aware, --fresh) -> native deps -> ignore load -> buildReport -> render
-// to the injected writers. Every collaborator is injected so the whole pipeline
-// is testable with fakes (the e2e tests call run directly).
-func run(opts *Options, cache *Cache, resolvers []common.ResolverEntry, extractors []common.Extractor, classifier *common.Classifier) error {
+// (cache-aware, --fresh, injected batch resolvers) -> ignore load ->
+// buildReport -> render to the injected writers. Every collaborator is
+// injected so the whole pipeline is testable with fakes (the e2e tests call
+// run directly).
+func run(opts *Options, cache *Cache, resolvers []ResolverEntry, batchResolvers []common.BatchResolver, extractors []common.Extractor, classifier *common.Classifier) error {
 	// A non-positive MaxConcurrentFetches would spawn a zero-width worker pool
 	// that deadlocks (no worker ever drains the job channel), so fail loudly
 	// before any work begins.
@@ -247,7 +251,7 @@ func run(opts *Options, cache *Cache, resolvers []common.ResolverEntry, extracto
 
 	deps, unknowns := extractAll(extractors, opts.Root)
 	guard := newCacheGuard(cache.Load())
-	all := resolveAll(opts, guard, resolvers, dedupe(deps), classifier)
+	all := resolveAll(opts, guard, resolvers, batchResolvers, dedupe(deps), classifier)
 	if guard.changed {
 		cache.Save(guard.entries)
 	}

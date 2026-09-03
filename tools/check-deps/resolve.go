@@ -17,15 +17,37 @@ import (
 // through, so the slice is testable with an httptest-backed fetcher and free of
 // package globals.
 
+// ResolverEntry matches a dependency (usually by category/name) to its
+// resolver. Entries are evaluated in order; the first match wins. Network
+// marks resolvers that perform upstream I/O worth caching (registry calls,
+// scrapers); the no-op resolvers (digest, toolchain) are not network-backed
+// and never cached.
+type ResolverEntry struct {
+	// Match reports whether the entry owns the dependency.
+	Match func(common.Dependency) bool
+	// Resolve answers the dependency's latest version once matched.
+	Resolve common.Resolver
+	// Network marks resolvers that perform upstream I/O worth caching.
+	Network bool
+}
+
+// Matches builds a matcher that accepts a dependency of the given category and
+// name.
+func Matches(category, name string) func(common.Dependency) bool {
+	return func(dep common.Dependency) bool {
+		return dep.Category == category && dep.Name == name
+	}
+}
+
 // matchResolver returns the first resolverEntry matching dep: entries are
 // evaluated in order and the first match wins.
-func matchResolver(resolvers []common.ResolverEntry, dep common.Dependency) (common.ResolverEntry, bool) {
+func matchResolver(resolvers []ResolverEntry, dep common.Dependency) (ResolverEntry, bool) {
 	for _, e := range resolvers {
 		if e.Match(dep) {
 			return e, true
 		}
 	}
-	return common.ResolverEntry{}, false
+	return ResolverEntry{}, false
 }
 
 // resolveMatched resolves a dependency through an already-matched resolver
@@ -33,7 +55,7 @@ func matchResolver(resolvers []common.ResolverEntry, dep common.Dependency) (com
 // direct, never-cached path shared by guard.peek for no-op/missing resolvers;
 // the match is performed once by the caller and threaded in, so the entry is
 // never re-matched here.
-func resolveMatched(e common.ResolverEntry, ok bool, dep common.Dependency, classifier *common.Classifier) common.Resolved {
+func resolveMatched(e ResolverEntry, ok bool, dep common.Dependency, classifier *common.Classifier) common.Resolved {
 	if !ok {
 		return classifier.Classify(dep, common.VersionInfo{Err: errors.New("no resolver configured for this dependency")})
 	}
@@ -69,7 +91,7 @@ func newCacheGuard(entries map[string]cacheEntry) *cacheGuard {
 // resolver matched or the resolver is non-network; a network resolver's
 // present cache entry (and not fresh) also answers directly. The matched entry
 // is resolved once by the caller and threaded in, so peek never re-matches.
-func (g *cacheGuard) peek(e common.ResolverEntry, ok bool, dep common.Dependency, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
+func (g *cacheGuard) peek(e ResolverEntry, ok bool, dep common.Dependency, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !ok || !e.Network {
@@ -119,7 +141,7 @@ func (g *cacheGuard) commit(dep common.Dependency, vi common.VersionInfo, fresh 
 // cache-orchestration implementation (peek under the lock, fetch outside it,
 // commit under the lock). The resolver entry is matched once here and threaded
 // through, so a dependency is never matched repeatedly.
-func resolveOne(resolvers []common.ResolverEntry, dep common.Dependency, cacheEntries map[string]cacheEntry, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
+func resolveOne(resolvers []ResolverEntry, dep common.Dependency, cacheEntries map[string]cacheEntry, fresh bool, classifier *common.Classifier) (common.Resolved, bool) {
 	guard := newCacheGuard(cacheEntries)
 	results := make([]common.Resolved, 1)
 	e, ok := matchResolver(resolvers, dep)
@@ -156,22 +178,22 @@ func isToolchain(dep common.Dependency) bool   { return dep.Category == common.C
 // from a fixed GitHub owner/repo pair. It collapses the repeated category/name
 // -> owner/repo registrations so the upstream location sits adjacent to its
 // match key.
-func githubDep(category, name, owner, repo string, f *common.Fetcher) common.ResolverEntry {
-	return common.ResolverEntry{Match: common.Matches(category, name), Resolve: resolverimpl.GithubResolverFor(owner, repo, f), Network: true}
+func githubDep(category, name, owner, repo string, f *common.Fetcher) ResolverEntry {
+	return ResolverEntry{Match: Matches(category, name), Resolve: resolverimpl.GithubResolverFor(owner, repo, f), Network: true}
 }
 
 // networkedDep builds a network-backed resolver entry for one match rule,
 // collapsing the repeated match/resolve/network wiring so registrations read
 // as "dep matching this rule is resolved over the network by xResolve".
-func networkedDep(match func(common.Dependency) bool, resolve common.ResolverFunc) common.ResolverEntry {
-	return common.ResolverEntry{Match: match, Resolve: resolve, Network: true}
+func networkedDep(match func(common.Dependency) bool, resolve common.Resolver) ResolverEntry {
+	return ResolverEntry{Match: match, Resolve: resolve, Network: true}
 }
 
 // noopDep builds a non-network resolver entry for one match rule: the digest
 // and toolchain resolvers short-circuit locally with no upstream I/O and are
 // never cached, so they register without the network flag.
-func noopDep(match func(common.Dependency) bool, resolve common.ResolverFunc) common.ResolverEntry {
-	return common.ResolverEntry{Match: match, Resolve: resolve, Network: false}
+func noopDep(match func(common.Dependency) bool, resolve common.Resolver) ResolverEntry {
+	return ResolverEntry{Match: match, Resolve: resolve, Network: false}
 }
 
 // resolveJob pairs one dependency slot with its already-matched resolver
@@ -182,21 +204,23 @@ func noopDep(match func(common.Dependency) bool, resolve common.ResolverFunc) co
 type resolveJob struct {
 	index int
 	dep   common.Dependency
-	entry common.ResolverEntry
+	entry ResolverEntry
 	ok    bool
 }
 
 // resolveAll resolves every dependency, consulting and updating the TTL cache
-// for network-backed resolvers and resolving native deps live. The caller
-// injects the cacheGuard (built from the loaded cache entries), so the
-// composition root controls construction and owns saving: resolveAll only
-// mutates the guard and the caller persists the entries when the guard reports
-// a change. A bounded worker pool (the MaxConcurrentFetches width, draining a
-// job channel) performs the network fetches; the cacheGuard guards only the
-// shared cache state (peek and commit), while each fetch runs outside the lock
-// so concurrent fetches stay parallel rather than serialized. Result order
-// mirrors the input order, so output stays deterministic.
-func resolveAll(opts *Options, guard *cacheGuard, resolvers []common.ResolverEntry, deps []common.Dependency, classifier *common.Classifier) []common.Resolved {
+// for network-backed resolvers. The caller injects the cacheGuard (built from
+// the loaded cache entries) and the []common.BatchResolver list (the native
+// go/pnpm resolvers), so the composition root controls construction and owns
+// saving: resolveAll only mutates the guard and the caller persists the
+// entries when the guard reports a change. A bounded worker pool (the
+// MaxConcurrentFetches width, draining a job channel) performs the network
+// fetches; the cacheGuard guards only the shared cache state (peek and
+// commit), while each fetch runs outside the lock so concurrent fetches stay
+// parallel rather than serialized. Batch resolvers run serially after the
+// worker pool and their records append in order, so output stays
+// deterministic.
+func resolveAll(opts *Options, guard *cacheGuard, resolvers []ResolverEntry, batchResolvers []common.BatchResolver, deps []common.Dependency, classifier *common.Classifier) []common.Resolved {
 	results := make([]common.Resolved, len(deps))
 
 	// Spawn the bounded worker pool up front, then feed every dependency from
@@ -228,8 +252,11 @@ func resolveAll(opts *Options, guard *cacheGuard, resolvers []common.ResolverEnt
 	close(jobs)
 	wg.Wait()
 
-	if opts.NativeTools {
-		results = append(results, resolverimpl.ResolveNativeDeps(opts.Root, opts.NativeToolTimeout, classifier)...)
+	// Run every injected batch resolver (the native go/pnpm resolvers) serially
+	// after the per-dependency worker pool; each returns already-classified
+	// records appended in order.
+	for _, br := range batchResolvers {
+		results = append(results, br(opts.Root, opts.NativeToolTimeout, classifier)...)
 	}
 	return results
 }
