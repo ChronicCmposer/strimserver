@@ -18,5 +18,20 @@
     "id": "npm/@types/node",
     "reason": "@types/node upgrade doesn't matter until the .nvmrc is bumped to node 26+; must wait for that.",
     "until": "2026-12-31"
+  },
+  {
+    "id": "go/github.com/containerd/typeurl/v2",
+    "reason": "typeurl v2.3.0 removes gogo support but is not yet coordinated by a containerd release; containerd/v2 v2.3.4 still pins v2.2.3. Wait for a containerd release that coordinates these satellite modules.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/containerd/ttrpc",
+    "reason": "ttrpc v1.2.9 forces grpc 1.80->1.81.1 and is not yet coordinated by a containerd release; containerd/v2 v2.3.4 still pins v1.2.8. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/containerd/platforms",
+    "reason": "platforms v1.0.0-rc.5 is a Windows-only compat fix, irrelevant to the linux/amd64 controller, and not yet coordinated by a containerd release. Wait for a containerd release.",
+    "until": "2027-03-31"
   }
 ]
