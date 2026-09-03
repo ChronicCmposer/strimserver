@@ -40,6 +40,16 @@
 #                      run the guest natively with no qemu at all.
 #   OPENSSH_DIST_ROOTFS default unset; when set to an already-extracted rootfs
 #                      the Docker Hub registry pull is skipped entirely.
+#   OPENSSH_DIST_CACHE  default ${XDG_CACHE_HOME:-$HOME/.cache}/openssh-dist; the
+#                      persistent version-stamped rootfs cache. The rootfs is
+#                      keyed by AMAZONLINUX_TAG + OPENSSH_TAG + QEMU_VERSION
+#                      (every build-determining pin) and stamped with a
+#                      .provisioned sentinel (provisioned into $rootfs.new then
+#                      atomically mv'd into place), so an aborted build resumes
+#                      from the cached rootfs on the next run. Determinism
+#                      guardrail: the cache is never reused across a pin change
+#                      (a different pin resolves to a different rootfs-<key>
+#                      path).
 #   S3_BUCKET          required for upload (e.g. s3://<bucket-name>; SKIP_UPLOAD=1 works without it)
 #   AWS_REGION         required for upload (no default; SKIP_UPLOAD=1 works without it)
 #   GITHUB_REPOSITORY  owner/repo; default ChronicCmposer/strimserver; used for
@@ -63,6 +73,7 @@ SKIP_UPLOAD="${SKIP_UPLOAD:-}"
 QEMU_BIN="${QEMU_BIN:-}"
 QEMU_VERSION="${QEMU_VERSION:-9.2.4}"
 OPENSSH_DIST_ROOTFS="${OPENSSH_DIST_ROOTFS:-}"
+OPENSSH_DIST_CACHE="${OPENSSH_DIST_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/openssh-dist}"
 
 # --- guard clauses: refuse to build with a malformed pin ---
 if [[ -z "$OPENSSH_TAG" ]]; then
@@ -80,7 +91,6 @@ work="$(mktemp -d)"
 # unprivileged rm cannot delete its root-owned files; without the guard that
 # floods the log with ~10^5 'Permission denied' lines and hides the real error.
 trap 'rm -rf "$work" 2>/dev/null || true' EXIT
-mkdir -p "$work/out"
 
 host_arch="$(uname -m)"
 # Each consumer pins its own qemu (openssh-dist: 9.2.4, ffmpeg-dist: 8.2.2)
@@ -224,14 +234,23 @@ provision_rootfs() {
   return 0
 }
 
-rootfs="${OPENSSH_DIST_ROOTFS:-$work/rootfs}"
+rootfs="${OPENSSH_DIST_ROOTFS:-$OPENSSH_DIST_CACHE/rootfs-${AMAZONLINUX_TAG}-${OPENSSH_TAG}-${QEMU_VERSION}}"
 if [[ -z "$OPENSSH_DIST_ROOTFS" ]]; then
-  echo "==> pulling amazonlinux:${AMAZONLINUX_TAG} (linux/amd64) via the Docker Hub registry API"
-  if ! provision_rootfs "$rootfs" "library/amazonlinux" "$AMAZONLINUX_TAG"; then
-    echo "error: failed to pull 'amazonlinux:${AMAZONLINUX_TAG}' from Docker Hub via the registry API." >&2
-    echo "       Reuse an already-extracted rootfs instead:" >&2
-    echo "       OPENSSH_DIST_ROOTFS=/var/tmp/amazonlinux-rootfs-2023.12.20260817.0 ./publish.sh" >&2
-    exit 1
+  if [[ ! -f "$rootfs/.provisioned" ]]; then
+    echo "==> provisioning rootfs amazonlinux:${AMAZONLINUX_TAG} (linux/amd64) via the Docker Hub registry API"
+    rm -rf "$rootfs" "$rootfs.new"
+    mkdir -p "$rootfs.new"
+    if ! provision_rootfs "$rootfs.new" "library/amazonlinux" "$AMAZONLINUX_TAG"; then
+      rm -rf "$rootfs.new"
+      echo "error: failed to pull 'amazonlinux:${AMAZONLINUX_TAG}' from Docker Hub via the registry API." >&2
+      echo "       Reuse an already-extracted rootfs instead:" >&2
+      echo "       OPENSSH_DIST_ROOTFS=$rootfs ./publish.sh" >&2
+      exit 1
+    fi
+    touch "$rootfs.new/.provisioned"
+    mv "$rootfs.new" "$rootfs"
+  else
+    echo "==> reusing cached rootfs $rootfs (pin amazonlinux:${AMAZONLINUX_TAG})"
   fi
 fi
 
@@ -266,9 +285,7 @@ fi
   printf '  mount --bind "/dev/$n" "$rootfs/dev/$n"\n'
   printf 'done\n'
   printf 'mount --bind "$rootfs/etc/resolv.conf" "$rootfs/etc/resolv.conf"\n'
-  # The host out/ dir is bind-mounted at the guest /out so build.sh's artifact
-  # lands on the host filesystem directly (no post-hoc copy out of the chroot).
-  printf 'mount --bind %s "$rootfs/out"\n' "$(printf %q "$work/out")"
+  # The RPM is copied out of the rootfs after the chroot (no /out bind-mount).
   for pin in OPENSSH_TAG OPENSSH_VERSION; do
     printf 'export %s=%s\n' "$pin" "$(printf %q "${!pin}")"
   done
@@ -289,9 +306,9 @@ echo "==> building openssh-experimental.rpm (linux/amd64) via chroot+qemu (no do
 
 # --- privilege wrapper: root, passwordless sudo, or a fresh user namespace ---
 if [[ $EUID -eq 0 ]]; then
-  bash "$work/inner.sh"
+  unshare -m bash "$work/inner.sh"
 elif sudo -n true 2>/dev/null; then
-  sudo -n bash "$work/inner.sh"
+  sudo -n unshare -m bash "$work/inner.sh"
 elif unshare -Urmpf true 2>/dev/null; then
   unshare -Urmpf bash "$work/inner.sh"
 else
@@ -301,16 +318,16 @@ else
 fi
 
 # --- verify the artifact (in-chroot rpm -qip ran inside the harness) ----------
-if [[ ! -f "$work/out/openssh-experimental.rpm" || ! -s "$work/out/openssh-experimental.rpm" ]]; then
+if [[ ! -f "$rootfs/out/openssh-experimental.rpm" || ! -s "$rootfs/out/openssh-experimental.rpm" ]]; then
   echo "error: build produced no non-empty /out/openssh-experimental.rpm" >&2
   exit 1
 fi
-rpm_type="$(file -b "$work/out/openssh-experimental.rpm")"
+rpm_type="$(file -b "$rootfs/out/openssh-experimental.rpm")"
 echo "==> rpm: $rpm_type"
 
 # --- checksum -----------------------------------------------------------------
 artifact="openssh-experimental.rpm"
-cp -f "$work/out/openssh-experimental.rpm" "$artifact"
+cp -f "$rootfs/out/openssh-experimental.rpm" "$artifact"
 sha256="$(sha256sum "$artifact" | awk '{print $1}')"
 echo "==> artifact: $artifact"
 echo "==> sha256:   $sha256"

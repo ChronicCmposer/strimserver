@@ -107,50 +107,85 @@ apt-get install -y --no-install-recommends \
     nasm yasm binutils libfdk-aac-dev
 rm -rf /var/lib/apt/lists/*
 
+# --- incremental-make resume (rich-keyed rootfs => identical pins on reuse) ---
+# The rootfs cache is keyed on every build-determining pin (DEBIAN_SNAPSHOT +
+# FFMPEG_COMMIT + CUDA version + NV_CODEC_HEADERS_COMMIT + SM target +
+# QEMU_VERSION), so a cached rootfs holds the identical source + toolchain.
+# Reuse the source tree only when it is verifiably at the pinned commit AND
+# already configured (Makefile present); otherwise wipe and rebuild clean.
+# FFMPEG_COMMIT is a raw 40-char SHA, so HEAD is compared directly.
+reuse=0
+if [[ -f /opt/ffmpeg-src/Makefile ]] \
+     && [[ "$(git -C /opt/ffmpeg-src rev-parse HEAD 2>/dev/null)" == "$FFMPEG_COMMIT" ]]; then
+    reuse=1
+    echo "==> reusing ffmpeg source tree (matches pinned commit)"
+fi
+
 # --- Phase 2: CUDA from the NVIDIA redistrib manifest ------------------------
 # Each component's relative_path + sha256 is read from the manifest at build
 # time (single source of truth) and verified before extraction. The components
 # ship include/ and lib/ (cudart), include/crt/ (crt), and nvvm/ (libnvvm) --
 # extract with --strip-components=1, merge, and expose the conventional lib64
 # path via a symlink.
-cuda_redist_base="$(dirname "$CUDA_MANIFEST_URL")"
-rm -rf /opt/cuda/merged /usr/local/cuda
-mkdir -p /opt/cuda/downloads /opt/cuda/merged /usr/local/cuda
-curl -fsSL "$CUDA_MANIFEST_URL" -o /opt/cuda/manifest.json
-for component in $CUDA_COMPONENTS; do
-    relative_path="$(jq -r --arg c "$component" '.[$c]["linux-x86_64"].relative_path' /opt/cuda/manifest.json)"
-    sha256="$(jq -r --arg c "$component" '.[$c]["linux-x86_64"].sha256' /opt/cuda/manifest.json)"
-    curl -fsSL "$cuda_redist_base/$relative_path" -o "/opt/cuda/downloads/${component}.tar.xz"
-    printf '%s  %s\n' "$sha256" "/opt/cuda/downloads/${component}.tar.xz" | sha256sum -c -
-    tar -xJf "/opt/cuda/downloads/${component}.tar.xz" -C /opt/cuda/merged --strip-components=1 --no-same-owner
-done
-cp -a /opt/cuda/merged/. /usr/local/cuda/
-if [[ ! -L /usr/local/cuda/lib64 ]]; then
-    ln -s lib /usr/local/cuda/lib64
+# On a resumed build (reuse=1) the extraction is skipped: re-extracting into
+# /usr/local/cuda (or reinstalling nv-codec-headers) bumps header mtimes, which
+# would make ffmpeg's make rebuild despite the cache. Verify the pinned CUDA +
+# nv-codec-headers installs are present instead; if any piece is missing, fall
+# through to the full fresh path (reuse=0).
+if [[ "$reuse" == 1 ]]; then
+    if [[ ! -x /usr/local/cuda/bin/nvcc || ! -L /usr/local/cuda/lib64 \
+          || ! -f /opt/cuda/manifest.json \
+          || ! -f /usr/include/ffnvcodec/nvEncodeAPI.h ]]; then
+        echo "==> cached CUDA / nv-codec-headers incomplete; rebuilding from scratch"
+        reuse=0
+    fi
 fi
-test -x /usr/local/cuda/bin/nvcc
-test -f /usr/local/cuda/include/cuda_runtime.h
-test -f /usr/local/cuda/include/cuda.h
-test -L /usr/local/cuda/lib64
-/usr/local/cuda/bin/nvcc --version
+if [[ "$reuse" != 1 ]]; then
+    cuda_redist_base="$(dirname "$CUDA_MANIFEST_URL")"
+    rm -rf /opt/cuda/merged /usr/local/cuda
+    mkdir -p /opt/cuda/downloads /opt/cuda/merged /usr/local/cuda
+    curl -fsSL "$CUDA_MANIFEST_URL" -o /opt/cuda/manifest.json
+    for component in $CUDA_COMPONENTS; do
+        relative_path="$(jq -r --arg c "$component" '.[$c]["linux-x86_64"].relative_path' /opt/cuda/manifest.json)"
+        sha256="$(jq -r --arg c "$component" '.[$c]["linux-x86_64"].sha256' /opt/cuda/manifest.json)"
+        curl -fsSL "$cuda_redist_base/$relative_path" -o "/opt/cuda/downloads/${component}.tar.xz"
+        printf '%s  %s\n' "$sha256" "/opt/cuda/downloads/${component}.tar.xz" | sha256sum -c -
+        tar -xJf "/opt/cuda/downloads/${component}.tar.xz" -C /opt/cuda/merged --strip-components=1 --no-same-owner
+    done
+    cp -a /opt/cuda/merged/. /usr/local/cuda/
+    if [[ ! -L /usr/local/cuda/lib64 ]]; then
+        ln -s lib /usr/local/cuda/lib64
+    fi
+    test -x /usr/local/cuda/bin/nvcc
+    test -f /usr/local/cuda/include/cuda_runtime.h
+    test -f /usr/local/cuda/include/cuda.h
+    test -L /usr/local/cuda/lib64
+    /usr/local/cuda/bin/nvcc --version
 
-# --- Phase 3: nv-codec-headers (tag for readability, exact commit as pin) ----
-# The n13.0.19.1 tag is annotated and currently resolves to the pinned commit;
-# the explicit checkout guards determinism if the tag is ever force-moved.
-rm -rf /opt/nv-codec-headers
-git clone --depth 1 --branch "$NV_CODEC_HEADERS_TAG" \
-    https://github.com/FFmpeg/nv-codec-headers.git /opt/nv-codec-headers
-git -C /opt/nv-codec-headers checkout "$NV_CODEC_HEADERS_COMMIT"
-make -j"${NPROC}" -C /opt/nv-codec-headers install PREFIX=/usr
+    # --- Phase 3: nv-codec-headers (tag for readability, exact commit as pin) ----
+    # The n13.0.19.1 tag is annotated and currently resolves to the pinned commit;
+    # the explicit checkout guards determinism if the tag is ever force-moved.
+    rm -rf /opt/nv-codec-headers
+    git clone --depth 1 --branch "$NV_CODEC_HEADERS_TAG" \
+        https://github.com/FFmpeg/nv-codec-headers.git /opt/nv-codec-headers
+    git -C /opt/nv-codec-headers checkout "$NV_CODEC_HEADERS_COMMIT"
+    make -j"${NPROC}" -C /opt/nv-codec-headers install PREFIX=/usr
+fi
 
 # --- Phase 4: FFmpeg at the exact pinned commit (blobless clone), build ------
 # The ./configure flags below are the frozen contract for the artifact
 # (documented in README.md's "FFmpeg reproducibility and artifact pipeline"
 # section and recorded per-build in BUILD-INFO.txt).
-rm -rf /opt/ffmpeg-src /opt/ffmpeg-dist
-git clone --filter=blob:none --no-checkout \
-    https://github.com/FFmpeg/FFmpeg.git /opt/ffmpeg-src
-git -C /opt/ffmpeg-src checkout "$FFMPEG_COMMIT"
+# On a resumed build the tree is already at FFMPEG_COMMIT and configured, so
+# make runs incrementally; otherwise wipe and rebuild clean. The staging dir is
+# always regenerated.
+rm -rf /opt/ffmpeg-dist
+if [[ "$reuse" != 1 ]]; then
+    rm -rf /opt/ffmpeg-src
+    git clone --filter=blob:none --no-checkout \
+        https://github.com/FFmpeg/FFmpeg.git /opt/ffmpeg-src
+    git -C /opt/ffmpeg-src checkout "$FFMPEG_COMMIT"
+fi
 cd /opt/ffmpeg-src
 nvccflags="--nvccflags=-gencode ${GENCODE} -O2"
 configure_flags=(
@@ -219,7 +254,9 @@ configure_flags=(
     --enable-filter=scale
     --enable-filter=aresample
 )
-./configure "${configure_flags[@]}"
+if [[ "$reuse" != 1 ]]; then
+    ./configure "${configure_flags[@]}"
+fi
 make -j"${NPROC}"
 make -j"${NPROC}" install DESTDIR=/opt/ffmpeg-dist
 strip /opt/ffmpeg-dist/usr/local/bin/ffmpeg

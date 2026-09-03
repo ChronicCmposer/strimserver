@@ -45,6 +45,17 @@
 #                        run the guest natively with no qemu at all.
 #   FFMPEG_DIST_ROOTFS   default unset; when set to an already-extracted rootfs
 #                        the Docker Hub registry pull is skipped entirely.
+#   FFMPEG_DIST_CACHE    default ${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist;
+#                        the persistent version-stamped rootfs cache. The rootfs
+#                        is keyed by DEBIAN_SNAPSHOT + FFMPEG_COMMIT + CUDA
+#                        version + NV_CODEC_HEADERS_COMMIT + SM target +
+#                        QEMU_VERSION (every build-determining pin) and stamped
+#                        with a .provisioned sentinel (provisioned into
+#                        $rootfs.new then atomically mv'd into place), so an
+#                        aborted build resumes from the cached rootfs on the
+#                        next run. Determinism guardrail: the cache is never
+#                        reused across a pin change (a different pin resolves to
+#                        a different rootfs-<key> path).
 #   S3_BUCKET            required for upload (e.g. s3://<bucket-name>; SKIP_UPLOAD=1 works without it)
 #   AWS_REGION           required for upload (no default; SKIP_UPLOAD=1 works without it)
 #   GITHUB_REPOSITORY    owner/repo; default ChronicCmposer/strimserver; used for
@@ -75,6 +86,7 @@ SKIP_UPLOAD="${SKIP_UPLOAD:-}"
 QEMU_BIN="${QEMU_BIN:-}"
 QEMU_VERSION="${QEMU_VERSION:-8.2.2}"
 FFMPEG_DIST_ROOTFS="${FFMPEG_DIST_ROOTFS:-}"
+FFMPEG_DIST_CACHE="${FFMPEG_DIST_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist}"
 
 # --- guard clauses: refuse to build with a malformed pin ---
 if [[ ! "$FFMPEG_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
@@ -241,15 +253,24 @@ provision_rootfs() {
   return 0
 }
 
-rootfs="${FFMPEG_DIST_ROOTFS:-$work/rootfs}"
+rootfs="${FFMPEG_DIST_ROOTFS:-$FFMPEG_DIST_CACHE/rootfs-${DEBIAN_SNAPSHOT}-${FFMPEG_COMMIT}-cuda${cuda_version}-nv${NV_CODEC_HEADERS_COMMIT:0:7}-sm${sm_suffix}-${QEMU_VERSION}}"
 if [[ -z "$FFMPEG_DIST_ROOTFS" ]]; then
   base_tag="debian:trixie-${deb_date}-slim"
-  echo "==> pulling $base_tag (linux/amd64) via the Docker Hub registry API"
-  if ! provision_rootfs "$rootfs" "${base_tag#debian:}"; then
-    echo "error: failed to pull '$base_tag' from Docker Hub via the registry API." >&2
-    echo "       Reuse an already-extracted rootfs instead:" >&2
-    echo "       FFMPEG_DIST_ROOTFS=/var/tmp/debian-rootfs-20260824 ./publish.sh" >&2
-    exit 1
+  if [[ ! -f "$rootfs/.provisioned" ]]; then
+    echo "==> provisioning $base_tag (linux/amd64) via the Docker Hub registry API"
+    rm -rf "$rootfs" "$rootfs.new"
+    mkdir -p "$rootfs.new"
+    if ! provision_rootfs "$rootfs.new" "${base_tag#debian:}"; then
+      rm -rf "$rootfs.new"
+      echo "error: failed to pull '$base_tag' from Docker Hub via the registry API." >&2
+      echo "       Reuse an already-extracted rootfs instead:" >&2
+      echo "       FFMPEG_DIST_ROOTFS=$rootfs ./publish.sh" >&2
+      exit 1
+    fi
+    touch "$rootfs.new/.provisioned"
+    mv "$rootfs.new" "$rootfs"
+  else
+    echo "==> reusing cached rootfs $rootfs (pin $base_tag)"
   fi
 fi
 
@@ -297,9 +318,9 @@ echo "==> building $artifact (linux/amd64) via chroot+qemu (no docker)"
 
 # --- privilege wrapper: root, passwordless sudo, or a fresh user namespace ---
 if [[ $EUID -eq 0 ]]; then
-  bash "$work/inner.sh"
+  unshare -m bash "$work/inner.sh"
 elif sudo -n true 2>/dev/null; then
-  sudo -n bash "$work/inner.sh"
+  sudo -n unshare -m bash "$work/inner.sh"
 elif unshare -Urmpf true 2>/dev/null; then
   unshare -Urmpf bash "$work/inner.sh"
 else

@@ -12,6 +12,13 @@ tools/ffmpeg-dist/out.log
 tools/ffmpeg-dist/ffmpeg-*.tar.gz
 tools/ffmpeg-dist/1
 
+# dist-pipeline build outputs copied to the repo root by publish.sh
+/ffmpeg-*.tar.gz
+/openssh-experimental.rpm
+
+# stray duplicate copy of check-deps.sh (not source; the .sh file is canonical)
+tools/ffmpeg-dist/check-deps
+
 # python caches / local-only obs paths
 deploy/aws/__pycache__/
 tools/local-obs/

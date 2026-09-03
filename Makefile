@@ -36,7 +36,7 @@ check-no-twitch-key:
 # Phase 1 stub: list every pinned dependency in the repo (Bazel modules,
 # toolchain versions, downloaded artifacts, CI actions, and script pins).
 check-deps:
-	bazel run //tools/check-deps:check-deps
+	bazel run //tools/check-deps:check-deps -- --ignore
 
 # LLM/automation-readable form: JSON report to stdout (the console report and
 # bazel INFO logs both go to stderr, so stdout stays pure JSON).

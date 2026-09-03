@@ -18,7 +18,7 @@
 #   OPENSSH_REPO    https://github.com/openssh/openssh-portable.git
 #   NPROC           (host nproc)
 #
-# Output: /out/openssh-experimental.rpm (publish.sh bind-mounts /out).
+# Output: /out/openssh-experimental.rpm (publish.sh copies it out of the rootfs).
 # =============================================================================
 set -euo pipefail
 
@@ -53,7 +53,13 @@ spec_file="$rootfs/tmp/openssh-experimental.spec"
 out_dir="$rootfs/out"
 
 # --- idempotency: clean every prior build state ------------------------------
-rm -rf "$src_dir" "$destdir" "$rpmbuild_top" "$filelist" "$spec_file"
+# The source tree is preserved for incremental-make resume (see below) and only
+# rebuilt when it doesn't match the pinned commit; staging + output state is
+# always regenerated.
+rm -rf "$destdir" "$rpmbuild_top" "$filelist" "$spec_file"
+# The rootfs is persistent, so a failed build's RPM would linger and pass a
+# later verification as if it were fresh; remove it before every build.
+rm -f "$out_dir/openssh-experimental.rpm"
 
 # --- build deps --------------------------------------------------------------
 dnf install -y \
@@ -74,9 +80,32 @@ dnf clean all
 
 # --- clone openssh-portable at the pinned tag, configure, build ---------------
 # --with-pam matches the pinned artifact contract; the deps above provide the
-# PAM + openssl headers it needs. Only the daemon + session/auth helpers are
-# built; the rest of the tree is not needed for the RPM.
-git clone --depth 1 --branch "$OPENSSH_TAG" "$OPENSSH_REPO" "$src_dir"
+# PAM + openssl headers it needs. The full tree is built because
+# install-nokeys/install-files installs every binary (ssh, ssh-add, ssh-keygen,
+# ssh-keyscan, ssh-agent, scp, sftp, ssh-keysign, sftp-server, ...), not just
+# the daemon + session/auth helpers -- install-files is not a build
+# prerequisite of its own recipes, so the full set must be built up front.
+#
+# Incremental-make resume: the rootfs cache is keyed on every build-determining
+# pin (AMAZONLINUX_TAG + OPENSSH_TAG + QEMU_VERSION), so a cached rootfs holds
+# the identical source + toolchain. Reuse the source tree only when it is
+# verifiably at the pinned commit AND already configured (Makefile present);
+# otherwise wipe and rebuild clean. The commit marker records the resolved HEAD
+# from the first clone so a resumed build can detect a force-moved tag. Note
+# the OpenSSH Makefile depends on config.h, so re-running configure would force
+# a full rebuild -- that is exactly why configure is skipped on reuse.
+commit_marker="$rootfs/tmp/openssh-commit"
+reuse=0
+if [[ -f "$src_dir/Makefile" && -f "$commit_marker" ]] \
+     && [[ "$(git -C "$src_dir" rev-parse HEAD 2>/dev/null)" == "$(cat "$commit_marker" 2>/dev/null)" ]]; then
+    reuse=1
+    echo "==> reusing openssh source tree (matches pinned commit)"
+fi
+if [[ "$reuse" != 1 ]]; then
+    rm -rf "$src_dir"
+    git clone --depth 1 --branch "$OPENSSH_TAG" "$OPENSSH_REPO" "$src_dir"
+    git -C "$src_dir" rev-parse HEAD > "$commit_marker"
+fi
 cd "$src_dir"
 # autoreconf is normally unnecessary: openssh-portable commits the generated
 # autotools outputs (configure, aclocal.m4, config.h.in, Makefile.in) at every
@@ -86,56 +115,59 @@ cd "$src_dir"
 # autoconf's generated configure then refuses to run ("m4/openssh.m4 newer
 # than configure, run autoreconf"). Regenerate whenever configure is missing
 # OR stale (the exact predicate autoconf itself fails on).
-if [[ ! -f configure ]] || [[ m4/openssh.m4 -nt configure ]]; then
-    # The guest /usr/bin/m4 (amazonlinux:2023 glibc) crashes qemu under the
-    # buildkit-direct-execve emulator on non-x86_64 hosts (QEMU internal SIGSEGV
-    # on its /proc/self/maps emulation -- the same glibc loader/string code
-    # paths that break grep/awk, worked around with sed above), so autom4te
-    # dies with "need GNU m4 1.4 or later" and aborts autoreconf. Work around it
-    # by building a static GNU m4 from the pinned source tarball and prepending
-    # its bin dir to PATH so autom4te uses it instead: a static binary never
-    # takes the dynamic loader's /proc/self/maps path that trips qemu, and it
-    # produces the same configure output as the guest m4. This engages only
-    # when qemu is actually in play (publish.sh installs
-    # /usr/local/bin/qemu-x86_64 into the rootfs solely on non-x86_64 hosts),
-    # so a native amd64 run is completely unaffected.
-    if [[ -x "$rootfs/usr/local/bin/qemu-x86_64" ]]; then
-        m4_good_dir="$rootfs/tmp/m4-good"
-        m4_bin="$m4_good_dir/usr/bin/m4"
-        if [[ ! -x "$m4_bin" ]]; then
-            echo "==> building a static GNU m4 (the guest /usr/bin/m4 crashes qemu)"
-            dnf install -y glibc-static
-            m4_tarball="$rootfs/tmp/m4-1.4.21.tar.gz"
-            curl -fsSL --retry 3 -o "$m4_tarball" "$M4_SOURCE_URL"
-            printf '%s  %s\n' "$M4_SOURCE_SHA256" "$m4_tarball" | sha256sum -c - >/dev/null
-            mkdir -p "$rootfs/tmp/m4-src"
-            tar -xzf "$m4_tarball" -C "$rootfs/tmp/m4-src"
-            # m4's bundled gnulib gl_GNUmakefile macro AC_CONFIG_LINKS's GNUmakefile to
-            # itself; under qemu srcdir resolves absolute, so config.status replaces the
-            # real GNUmakefile with a self-referential symlink and GNU make dies with
-            # "Too many levels of symbolic links". It is maintainer-only, so drop it and
-            # let make read the automake Makefile. Also build 'all' before installing:
-            # install-exec does not build first, so the noinst convenience library
-            # ../lib/libm4.a would be missing when src/m4 links.
-            (
-                cd "$rootfs/tmp/m4-src/m4-1.4.21" \
-                    && ./configure --prefix=/usr --disable-shared LDFLAGS=-static \
-                    && rm -f GNUmakefile \
-                    && make -j"$NPROC" all install-exec DESTDIR="$m4_good_dir"
-            )
-            # sed (not grep) for the static check: grep itself crashes qemu.
-            file -b "$m4_bin" | sed -n '/statically linked/p' >/dev/null || {
-                echo "error: static m4 build failed; cannot run autoreconf under qemu." >&2
-                exit 1
-            }
+if [[ "$reuse" != 1 ]]; then
+    if [[ ! -f configure ]] || [[ m4/openssh.m4 -nt configure ]]; then
+        # The guest /usr/bin/m4 (amazonlinux:2023 glibc) crashes qemu under the
+        # buildkit-direct-execve emulator on non-x86_64 hosts (QEMU internal SIGSEGV
+        # on its /proc/self/maps emulation -- the same glibc loader/string code
+        # paths that break grep/awk, worked around with sed above), so autom4te
+        # dies with "need GNU m4 1.4 or later" and aborts autoreconf. Work around it
+        # by building a static GNU m4 from the pinned source tarball and prepending
+        # its bin dir to PATH so autom4te uses it instead: a static binary never
+        # takes the dynamic loader's /proc/self/maps path that trips qemu, and it
+        # produces the same configure output as the guest m4. This engages only
+        # when qemu is actually in play (publish.sh installs
+        # /usr/local/bin/qemu-x86_64 into the rootfs solely on non-x86_64 hosts),
+        # so a native amd64 run is completely unaffected.
+        if [[ -x "$rootfs/usr/local/bin/qemu-x86_64" ]]; then
+            m4_good_dir="$rootfs/tmp/m4-good"
+            m4_bin="$m4_good_dir/usr/bin/m4"
+            if [[ ! -x "$m4_bin" ]]; then
+                echo "==> building a static GNU m4 (the guest /usr/bin/m4 crashes qemu)"
+                dnf install -y glibc-static
+                m4_tarball="$rootfs/tmp/m4-1.4.21.tar.gz"
+                curl -fsSL --retry 3 -o "$m4_tarball" "$M4_SOURCE_URL"
+                printf '%s  %s\n' "$M4_SOURCE_SHA256" "$m4_tarball" | sha256sum -c - >/dev/null
+                mkdir -p "$rootfs/tmp/m4-src"
+                tar -xzf "$m4_tarball" -C "$rootfs/tmp/m4-src"
+                # m4's bundled gnulib gl_GNUmakefile macro AC_CONFIG_LINKS's GNUmakefile to
+                # itself; under qemu srcdir resolves absolute, so config.status replaces the
+                # real GNUmakefile with a self-referential symlink and GNU make dies with
+                # "Too many levels of symbolic links". It is maintainer-only, so drop it and
+                # let make read the automake Makefile. Also build 'all' before installing:
+                # install-exec does not build first, so the noinst convenience library
+                # ../lib/libm4.a would be missing when src/m4 links.
+                (
+                    cd "$rootfs/tmp/m4-src/m4-1.4.21" \
+                        && ./configure --prefix=/usr --disable-shared LDFLAGS=-static \
+                        && rm -f GNUmakefile \
+                        && make -j"$NPROC" all \
+                        && make -j"$NPROC" install-exec DESTDIR="$m4_good_dir"
+                )
+                # sed (not grep) for the static check: grep itself crashes qemu.
+                file -b "$m4_bin" | sed -n '/statically linked/p' >/dev/null || {
+                    echo "error: static m4 build failed; cannot run autoreconf under qemu." >&2
+                    exit 1
+                }
+            fi
+            PATH="$m4_good_dir/usr/bin:$PATH"
+            export PATH
         fi
-        PATH="$m4_good_dir/usr/bin:$PATH"
-        export PATH
+        autoreconf -fiv
     fi
-    autoreconf -fiv
+    ./configure --with-pam
 fi
-./configure --with-pam
-make -j"$NPROC" sshd sshd-session sshd-auth
+make -j"$NPROC"
 
 # --- install into a staging root (no host keys; they are generated at boot) ---
 mkdir -p "$destdir/var/empty/sshd"
@@ -196,5 +228,20 @@ rpmbuild -bb \
     --define "_topdir $rpmbuild_top" \
     "$spec_file"
 rpm="$(find "$rpmbuild_top/RPMS" -name 'openssh-experimental-*.rpm' | head -n 1)"
+
+# --- place the artifact -------------------------------------------------------
+# The rootfs is persistent, so a stale /out from the old bind-mount era can
+# survive a rebuild: a bind-mount whose source directory was deleted still
+# stats as a directory (so `mkdir -p` no-ops) yet rejects new entries with
+# ENOENT. Clear any leftover mount and recreate the plain directory
+# immediately before the copy, so the artifact write cannot fail on a bad /out.
+if mountpoint -q "$out_dir"; then
+    if ! umount "$out_dir"; then
+        echo "error: stale $out_dir mount could not be cleared; run publish.sh as root once (or delete the rootfs cache) so a fresh artifact directory can be created." >&2
+        exit 1
+    fi
+fi
+rm -rf "$out_dir"
+mkdir -p "$out_dir"
 cp "$rpm" "$out_dir/openssh-experimental.rpm"
 echo "==> artifact: $out_dir/openssh-experimental.rpm"

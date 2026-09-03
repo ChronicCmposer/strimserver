@@ -235,7 +235,7 @@ s3_http_file(
     downloaded_file_name = "openssh-experimental.rpm",
     mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental.rpm"],
     s3_key = "openssh/openssh-experimental.rpm",
-    sha256 = "d3d1a2775eb8ee694bfd9b7a704594121743b30d397d0d726d9a2fd8ddad6deb",
+    sha256 = "9d20903a69c66f207856c4d7f5c989bd2aa88421610c7ab79b2cd823cad659a4",
 )
 
 # --- Stream Deck plugin (rollup) ------------------------------------------
