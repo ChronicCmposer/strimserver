@@ -41,7 +41,7 @@ check-deps:
 # LLM/automation-readable form: JSON report to stdout (the console report and
 # bazel INFO logs both go to stderr, so stdout stays pure JSON).
 check-deps-json:
-	bazel run //tools/check-deps:check-deps -- --json
+	@bazel run //tools/check-deps:check-deps -- --json
 
 package:
 	bazel build //:package

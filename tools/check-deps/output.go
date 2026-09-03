@@ -218,10 +218,11 @@ func firstNonEmpty(a, b string) string {
 	return b
 }
 
-// marshalReport serializes the report with a stable field order and
-// deterministic indentation.
+// marshalReport serializes the report with a stable field order and no
+// indentation, so the JSON document is a single compact line (terse for
+// machine and LLM consumers).
 func marshalReport(rep report) ([]byte, error) {
-	return json.MarshalIndent(rep, "", "  ")
+	return json.Marshal(rep)
 }
 
 func renderConsole(rep report, root string) string {

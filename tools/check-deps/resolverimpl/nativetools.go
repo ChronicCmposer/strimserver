@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"strimserver-check-deps/common"
@@ -69,6 +70,22 @@ func resolveGoModules(root string, timeout time.Duration, classifier *common.Cla
 		}))}
 	}
 
+	// `go list -m all` reports the whole transitive build list, but only the
+	// modules pinned by require directives in go.mod are actually reviewable
+	// pins. Parse the require set and drop every transitive-only module so the
+	// report reflects what go.mod pins. A go.mod that reads but has no require
+	// block yields an empty set, which filters out every module: zero findings,
+	// never a panic.
+	modData, err := os.ReadFile(filepath.Join(workDir, "go.mod"))
+	if err != nil {
+		return []common.Resolved{unknownResolved(common.CategoryGo, "core/controller/go.mod", "cannot read go.mod: "+err.Error())}
+	}
+	requiredPaths := parseGoModRequires(modData)
+	required := make(map[string]struct{}, len(requiredPaths))
+	for _, path := range requiredPaths {
+		required[path] = struct{}{}
+	}
+
 	var res []common.Resolved
 	dec := json.NewDecoder(bytes.NewReader(out))
 	for {
@@ -80,6 +97,9 @@ func resolveGoModules(root string, timeout time.Duration, classifier *common.Cla
 			return []common.Resolved{unknownResolved(common.CategoryGo, "core/controller/go.mod", "cannot parse go list output: "+err.Error())}
 		}
 		if mod.Path == "" || mod.Version == "" {
+			continue
+		}
+		if _, pinned := required[mod.Path]; !pinned {
 			continue
 		}
 		dep := common.Dependency{
@@ -96,6 +116,42 @@ func resolveGoModules(root string, timeout time.Duration, classifier *common.Cla
 		res = append(res, classifier.Classify(dep, vi))
 	}
 	return res
+}
+
+// parseGoModRequires returns the module paths pinned by the require directives
+// in a go.mod file, covering both the single-line form (`require path version`)
+// and the block form (`require ( ... )`). Comment and blank lines are ignored;
+// the other directive families (module, go, exclude, replace, retract) never
+// contribute a path.
+func parseGoModRequires(data []byte) []string {
+	var paths []string
+	inRequireBlock := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if inRequireBlock {
+			if strings.HasPrefix(trimmed, ")") {
+				inRequireBlock = false
+				continue
+			}
+			if len(fields) >= 2 {
+				paths = append(paths, fields[0])
+			}
+			continue
+		}
+		if len(fields) < 2 || fields[0] != "require" {
+			continue
+		}
+		if fields[1] == "(" {
+			inRequireBlock = true
+			continue
+		}
+		paths = append(paths, fields[1])
+	}
+	return paths
 }
 
 // pnpmOutdated is the JSON shape of `pnpm outdated --json`. pnpm 9 reports
