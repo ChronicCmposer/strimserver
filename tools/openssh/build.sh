@@ -44,6 +44,20 @@ NPROC="${NPROC:-$(nproc)}"
 # pinned source tarball, verified by sha256 before use.
 M4_SOURCE_URL="${M4_SOURCE_URL:-https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.gz}"
 M4_SOURCE_SHA256="${M4_SOURCE_SHA256:-38ae59f7a30bf9c108193cc5c25fbb06014f21e230c7ede2eff614f7b7c37ed8}"
+# Reproducible build clock: rpmbuild would otherwise stamp BUILDTIME and the
+# payload files' mtimes with the wall-clock time of each build, so two builds
+# of the same pins produce byte-different RPMs. A fixed SOURCE_DATE_EPOCH (not
+# "now") makes every build-time file's mtime identical. The constant is
+# anchored to the pinned amazonlinux:2023 rootfs tag date
+# (AMAZONLINUX_TAG=2023.12.20260817.0 -> 2026-08-17); any constant would do,
+# this one is meaningful and always in the past relative to a build, so every
+# freshly cloned/compiled/installed file (mtime = build time) is clamped to it.
+# amazonlinux's rpm macros default clamp_mtime_to_source_date_epoch=0 and
+# use_source_date_epoch_as_buildtime=0, so the explicit rpmbuild defines below
+# (not the env var alone) are what take effect. Exporting the var also keeps
+# any future source's __DATE__/__TIME__ compiler expansions reproducible.
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1786924800}"   # 2026-08-17T00:00:00Z
+export SOURCE_DATE_EPOCH
 
 src_dir="$rootfs/tmp/openssh-src"
 destdir="$rootfs/tmp/openssh-root"
@@ -183,7 +197,12 @@ cp "$rootfs/sshd_config" "$destdir/usr/local/etc/sshd_config"
 # NB: sed instead of grep for the directory filter: under the buildkit-direct-
 # execve qemu on non-amd64 hosts, amazonlinux's grep/awk binaries crash qemu
 # (QEMU internal SIGSEGV on their glibc string code paths); sed is unaffected
-# and produces byte-identical output.
+# and produces byte-identical output. The whole list is sorted so the RPM
+# header's file arrays are in a stable order: find walks directories in
+# readdir order, which varies with the (racing, parallel-make) directory entry
+# insertion order and would otherwise reorder the header bytes between builds.
+# LC_ALL=C pins byte-order collation so the ordering cannot shift with the
+# guest's locale setting.
 {
     find "$destdir" -type d \
         -printf '%%dir /%P\n' | sed -n '/^%dir \/$/!p'
@@ -192,7 +211,7 @@ cp "$rootfs/sshd_config" "$destdir/usr/local/etc/sshd_config"
     find "$destdir" \( -type f -o -type l \) \
         ! -path "$destdir/etc/ssh/*" \
         -printf '/%P\n'
-} > "$filelist"
+} | LC_ALL=C sort > "$filelist"
 
 # --- rpm spec (Version 10.5 / Release 1 per the migration plan) ---------------
 cat > "$spec_file" <<EOF
@@ -223,9 +242,21 @@ cp -a ${destdir}/. %{buildroot}/
 EOF
 
 # --- build the RPM ------------------------------------------------------------
+# Determinism defines: _buildhost replaces the varying hostname; _source_date_epoch
+# + clamp_mtime_to_source_date_epoch pin BUILDTIME and every payload file mtime to
+# the fixed epoch (amazonlinux defaults both off); use_source_date_epoch_as_buildtime
+# stamps the header's BUILDTIME with the epoch; _binary_payload freezes the
+# compression (zstd level 19, deterministic -- no timestamps in zstd frames; the
+# zstdio suffix is rpm's zstd spec, matching the rpm-default payload) so distro
+# macro drift cannot silently change the payload bytes.
 mkdir -p "$rpmbuild_top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} "$out_dir"
 rpmbuild -bb \
     --define "_topdir $rpmbuild_top" \
+    --define "_buildhost reproducible" \
+    --define "_source_date_epoch $SOURCE_DATE_EPOCH" \
+    --define "clamp_mtime_to_source_date_epoch 1" \
+    --define "use_source_date_epoch_as_buildtime 1" \
+    --define "_binary_payload w19.zstdio" \
     "$spec_file"
 rpm="$(find "$rpmbuild_top/RPMS" -name 'openssh-experimental-*.rpm' | head -n 1)"
 
