@@ -10,13 +10,9 @@ go_library(
     srcs = [
         "common/classify.go",
         "common/client.go",
-        "common/depkey.go",
         "common/extract.go",
         "common/resolve.go",
-        "common/status.go",
-        "common/tier.go",
         "common/types.go",
-        "common/version.go",
     ],
     importpath = "strimserver-check-deps/common",
     visibility = ["//visibility:private"],
