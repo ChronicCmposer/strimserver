@@ -135,7 +135,7 @@ func buildReport(all []common.Resolved, unknowns []common.ExtractionUnknown, ign
 	rep.Unknowns = make([]unknownEntry, 0, len(unknowns)+len(all))
 	for _, r := range all {
 		f := toFinding(r)
-		f.Ignored = ignores.isIgnoredOn(findingID(r.Dep), calToday)
+		f.Ignored = ignores.isIgnoredOn(findingID(r.Dep), r.Dep.File, calToday)
 		// Count every dependency regardless of the findings filter so counts
 		// stay full and authoritative; only the findings list narrows.
 		accumulateCounts(&rep.Counts, r, f.Ignored)

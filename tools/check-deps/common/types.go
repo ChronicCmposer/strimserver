@@ -143,9 +143,12 @@ func (t Tier) Normalized() Tier {
 }
 
 // DepKey is the single identity tuple for a dependency: (category, name,
-// source, version). It is the shared key both dedupe and the cache use, so a
-// "deduplicated" set and a "cached" set always mean the same thing.
-type DepKey [4]string
+// source, version, file). It is the shared key both dedupe and the cache use,
+// so a "deduplicated" set and a "cached" set always mean the same thing. File
+// is part of the identity so the same pin declared in two different files
+// stays distinct (e.g. two tools pinning the same qemu version do not
+// collide).
+type DepKey [5]string
 
 // depKeySep is the unit separator (\x1f) that joins the identity fields into
 // the stable JSON cache key. It cannot appear in a version string, so the
@@ -153,13 +156,15 @@ type DepKey [4]string
 const depKeySep = "\x1f"
 
 // String renders the identity as the stable cache key: category, name, source,
-// and version joined by depKeySep. Field order is deliberate and fixed, so the
-// string form is byte-identical for identical dependencies.
+// version, and file joined by depKeySep. Field order is deliberate and fixed,
+// so the string form is byte-identical for identical dependencies.
 func (k DepKey) String() string {
 	return strings.Join(k[:], depKeySep)
 }
 
-// DepIdentity returns dep's identity key.
+// DepIdentity returns dep's identity key: (category, name, source, version,
+// file). File is included so per-tool pins declared in different files stay
+// distinct.
 func DepIdentity(dep Dependency) DepKey {
-	return DepKey{dep.Category, dep.Name, dep.Source, dep.Version}
+	return DepKey{dep.Category, dep.Name, dep.Source, dep.Version, dep.File}
 }

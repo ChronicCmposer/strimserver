@@ -232,6 +232,9 @@ func TestParseWorkflow(t *testing.T) {
 	}
 }
 
+// TestScrapeQemu proves build-qemu.sh now yields only the distlib wheel pin:
+// qemu versions are tracked per consumer (their publish scripts), not scraped
+// out of the shared build script.
 func TestScrapeQemu(t *testing.T) {
 	const script = `
 QEMU_VERSION="${QEMU_VERSION:-8.2.2}"
@@ -245,13 +248,69 @@ QEMU_DISTLIB_URL="${QEMU_DISTLIB_URL:-https://files.pythonhosted.org/packages/02
 	if len(unknowns) != 0 {
 		t.Fatalf("scrapeQemu unknowns = %v, want none", unknowns)
 	}
-	for _, wantVersion := range []string{"8.2.2", "9.2.4"} {
-		if got := findDepVersion(t, deps, "script-pin", "qemu", wantVersion); got == nil {
-			t.Errorf("qemu %s not extracted: %v", wantVersion, deps)
-		}
+	if findDep(t, deps, "script-pin", "qemu") != nil {
+		t.Errorf("scrapeQemu must not emit a qemu dependency from build-qemu.sh: %v", deps)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("scrapeQemu deps = %v, want exactly the distlib dependency", deps)
 	}
 	if got := findDep(t, deps, "script-pin", "distlib"); got == nil || got.Version != "0.4.3" {
 		t.Errorf("distlib not extracted: %v", got)
+	}
+}
+
+// TestScrapeQemuConsumer proves each consumer's publish script yields exactly
+// one script-pin/qemu dependency carrying the consumer's own QEMU_VERSION, the
+// download.qemu.org source, the consumer file, and a consumer-labeled note.
+func TestScrapeQemuConsumer(t *testing.T) {
+	const opensshScript = `
+OPENSSH_TAG="${OPENSSH_TAG:-V_10_5_P1}"
+OPENSSH_VERSION="${OPENSSH_VERSION:-10.5p1}"
+QEMU_VERSION="${QEMU_VERSION:-9.2.4}"
+OPENSSH_DIST_ROOTFS="${OPENSSH_DIST_ROOTFS:-}"
+`
+	deps, unknowns := scrapeQemuConsumer("openssh")([]byte(opensshScript), "tools/openssh/publish.sh")
+	if len(unknowns) != 0 {
+		t.Fatalf("scrapeQemuConsumer openssh unknowns = %v, want none", unknowns)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("scrapeQemuConsumer openssh deps = %v, want exactly one", deps)
+	}
+	got := deps[0]
+	if got.Category != "script-pin" || got.Name != "qemu" || got.Version != "9.2.4" {
+		t.Errorf("openssh qemu dep = %v, want script-pin/qemu 9.2.4", got)
+	}
+	if got.Source != "https://download.qemu.org" {
+		t.Errorf("openssh qemu source = %q, want https://download.qemu.org", got.Source)
+	}
+	if got.File != "tools/openssh/publish.sh" {
+		t.Errorf("openssh qemu file = %q, want tools/openssh/publish.sh", got.File)
+	}
+	if !strings.Contains(got.Note, "openssh") {
+		t.Errorf("openssh qemu note = %q, want one containing %q", got.Note, "openssh")
+	}
+
+	const ffmpegScript = `
+FFMPEG_VERSION="${FFMPEG_VERSION:-8.1}"
+QEMU_VERSION="${QEMU_VERSION:-8.2.2}"
+FFMPEG_DIST_ROOTFS="${FFMPEG_DIST_ROOTFS:-}"
+`
+	deps, unknowns = scrapeQemuConsumer("ffmpeg-dist")([]byte(ffmpegScript), "tools/ffmpeg-dist/publish.sh")
+	if len(unknowns) != 0 {
+		t.Fatalf("scrapeQemuConsumer ffmpeg-dist unknowns = %v, want none", unknowns)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("scrapeQemuConsumer ffmpeg-dist deps = %v, want exactly one", deps)
+	}
+	got = deps[0]
+	if got.Version != "8.2.2" {
+		t.Errorf("ffmpeg-dist qemu version = %q, want 8.2.2", got.Version)
+	}
+	if got.File != "tools/ffmpeg-dist/publish.sh" {
+		t.Errorf("ffmpeg-dist qemu file = %q, want tools/ffmpeg-dist/publish.sh", got.File)
+	}
+	if !strings.Contains(got.Note, "ffmpeg-dist") {
+		t.Errorf("ffmpeg-dist qemu note = %q, want one containing %q", got.Note, "ffmpeg-dist")
 	}
 }
 

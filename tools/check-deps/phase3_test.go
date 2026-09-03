@@ -416,6 +416,33 @@ func TestIgnoreMatching(t *testing.T) {
 	}
 }
 
+func TestIgnoreFileScoping(t *testing.T) {
+	today := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+	calToday := calendarDate(today)
+	ffmpegFile := "tools/ffmpeg-dist/publish.sh"
+	opensshFile := "tools/openssh/publish.sh"
+	rules := ignoreSet{
+		{ID: "script-pin/qemu", File: ffmpegFile, Reason: "byte-identity pin"},
+		{ID: "script-pin/m4", Reason: "unscoped rule"},
+	}.parsed()
+
+	// A file-scoped rule matches only the exact source file for that id.
+	if !rules.isIgnoredOn("script-pin/qemu", ffmpegFile, calToday) {
+		t.Errorf("qemu from %s should be ignored by the file-scoped rule", ffmpegFile)
+	}
+	if rules.isIgnoredOn("script-pin/qemu", opensshFile, calToday) {
+		t.Errorf("qemu from %s must not be ignored by the %s-scoped rule", opensshFile, ffmpegFile)
+	}
+
+	// A rule with an empty file matches any file for that id (backward compat).
+	if !rules.isIgnoredOn("script-pin/m4", ffmpegFile, calToday) {
+		t.Error("unscoped rule must match the ffmpeg file")
+	}
+	if !rules.isIgnoredOn("script-pin/m4", opensshFile, calToday) {
+		t.Error("unscoped rule must match the openssh file")
+	}
+}
+
 func TestIgnoreUntilExpiry(t *testing.T) {
 	rules := ignoreSet{{ID: "base-image/debian", Reason: "repro", Until: "2026-09-01"}}.parsed()
 	// On the day after until, the rule no longer applies.

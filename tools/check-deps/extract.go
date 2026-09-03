@@ -11,14 +11,16 @@ func extractAll(extractors []common.Extractor, root string) ([]common.Dependency
 	})
 }
 
-// dedupe drops duplicate dependencies keyed by (category, name, source,
-// version), keeping the first occurrence. Script groups (e.g. build.sh +
-// publish.sh) declare the same pins, so each pin is reported exactly once. The
-// identity deliberately includes Source so it matches cacheKey's (category,
-// name, source, version) grouping: a "deduplicated" set and a "cached" set
-// must mean the same thing, because distinct pins can share a name+version
-// while coming from different sources (e.g. the same tool mirrored from two
-// upstream locations).
+// dedupe drops duplicate dependencies keyed by common.DepIdentity (category,
+// name, source, version, file), keeping the first occurrence. Because the
+// identity includes File, the same pin declared in two different files is
+// reported separately: per-tool pins from different scripts (e.g. build.sh +
+// publish.sh) stay distinct, so two tools pinning the same qemu version do not
+// collide. Only repeats within the same file collapse. The identity
+// deliberately includes Source and File so it matches cacheKey's grouping: a
+// "deduplicated" set and a "cached" set must mean the same thing, because
+// distinct pins can share a name+version while coming from different sources
+// (e.g. the same tool mirrored from two upstream locations) or files.
 func dedupe(deps []common.Dependency) []common.Dependency {
 	seen := make(map[common.DepKey]struct{})
 	unique := make([]common.Dependency, 0, len(deps))

@@ -2,7 +2,6 @@ package extractorimpl
 
 import (
 	"regexp"
-	"sort"
 
 	"strimserver-check-deps/common"
 	"strimserver-check-deps/utilities"
@@ -20,9 +19,8 @@ type pinSpec struct {
 }
 
 var (
-	qemuDefaultVersionRe = regexp.MustCompile(`QEMU_VERSION="[^"]*-([0-9][0-9.]*)"`)
-	qemuCaseArmRe        = regexp.MustCompile(`(?m)^\s*([0-9]+\.[0-9]+\.[0-9]+)\)\s+QEMU_SOURCE_SHA256`)
-	qemuDistlibRe        = regexp.MustCompile(`QEMU_DISTLIB_URL:[-=][^"}]*distlib-([0-9]+\.[0-9]+\.[0-9]+)-py2`)
+	qemuConsumerVersionRe = regexp.MustCompile(`QEMU_VERSION="\$\{QEMU_VERSION:-([0-9][0-9.]*)\}"`)
+	qemuDistlibRe         = regexp.MustCompile(`QEMU_DISTLIB_URL:[-=][^"}]*distlib-([0-9]+\.[0-9]+\.[0-9]+)-py2`)
 
 	opensshVersionRe = regexp.MustCompile(`OPENSSH_VERSION:[-=]([^"}]+)\}`)
 	opensshTagRe     = regexp.MustCompile(`OPENSSH_TAG:[-=]([^"}]+)\}`)
@@ -46,8 +44,10 @@ func ExtractScripts(root string) ([]common.Dependency, []common.ExtractionUnknow
 		{RelPath: "tools/openssh/publish.sh", Parse: func(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
 			return scrapeOpenssh(data, file, opensshPublishSpecs)
 		}},
+		{RelPath: "tools/openssh/publish.sh", Parse: scrapeQemuConsumer("openssh")},
 		{RelPath: "tools/ffmpeg-dist/build.sh", Parse: scrapeFfmpeg},
 		{RelPath: "tools/ffmpeg-dist/publish.sh", Parse: scrapeFfmpeg},
+		{RelPath: "tools/ffmpeg-dist/publish.sh", Parse: scrapeQemuConsumer("ffmpeg-dist")},
 	})
 }
 
@@ -81,48 +81,36 @@ func scrapeScript(content, file string, specs []pinSpec) ([]common.Dependency, [
 	return deps, unknowns
 }
 
-// scrapeQemu extracts every qemu version pinned by build-qemu.sh (the default
-// QEMU_VERSION and each verified case arm) plus the provisioned distlib wheel.
+// scrapeQemu extracts the provisioned distlib wheel pin from build-qemu.sh.
+// The qemu version itself is deliberately not scraped here: each consumer
+// (ffmpeg-dist, openssh) pins its own QEMU_VERSION in its own publish script
+// and owns a version-stamped qemu cache, so the shared build script carries no
+// single qemu pin to report.
 func scrapeQemu(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
 	content := string(data)
-	versions := make(map[string]bool)
-	if m := qemuDefaultVersionRe.FindStringSubmatch(content); m != nil {
-		versions[m[1]] = true
-	}
-	for _, m := range qemuCaseArmRe.FindAllStringSubmatch(content, -1) {
-		versions[m[1]] = true
-	}
-	var deps []common.Dependency
-	var unknowns []common.ExtractionUnknown
-	if len(versions) == 0 {
-		unknowns = append(unknowns, common.ExtractionUnknown{File: file, Reason: "no QEMU_VERSION pin found"})
-	} else {
-		sorted := make([]string, 0, len(versions))
-		for version := range versions {
-			sorted = append(sorted, version)
-		}
-		sort.Strings(sorted)
-		for _, version := range sorted {
-			deps = append(deps, common.Dependency{
-				Category: common.CategoryScriptPin,
-				Name:     "qemu",
-				Version:  version,
-				Source:   "https://download.qemu.org",
-				File:     file,
-				Note:     "buildkit-direct-execve patched qemu-x86_64",
-			})
-		}
-	}
-
-	gotDeps, gotUnknowns := scrapeScript(content, file, []pinSpec{{
+	return scrapeScript(content, file, []pinSpec{{
 		name:     "distlib",
 		category: common.CategoryScriptPin,
 		re:       qemuDistlibRe,
 		source:   "https://files.pythonhosted.org",
 		note:     "mkvenv wheel pin",
 	}})
-	deps, unknowns = common.MergeExtract(deps, unknowns, gotDeps, gotUnknowns)
-	return deps, unknowns
+}
+
+// scrapeQemuConsumer extracts the qemu version a single tool pins in its own
+// publish script (each consumer declares its own QEMU_VERSION and owns a
+// version-stamped qemu cache).
+func scrapeQemuConsumer(consumer string) func(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
+	return func(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
+		content := string(data)
+		return scrapeScript(content, file, []pinSpec{{
+			name:     "qemu",
+			category: common.CategoryScriptPin,
+			re:       qemuConsumerVersionRe,
+			source:   "https://download.qemu.org",
+			note:     consumer + "'s buildkit-direct-execve patched qemu-x86_64 pin",
+		}})
+	}
 }
 
 // opensshBuildSpecs and opensshPublishSpecs are the pins each half of the
