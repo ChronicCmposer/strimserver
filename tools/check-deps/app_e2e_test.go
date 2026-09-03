@@ -106,16 +106,18 @@ func networkVersion(netCalls *int64) common.Resolver {
 // newSyntheticResolvers builds the fake resolver slice for the synthetic
 // scenario. Network resolvers are closures over the call counter; the digest
 // (alpine) and toolchain (Bazel) no-ops use the real free functions and never
-// count. Slice order is dispatch order: first match wins.
+// count. It reuses the networkedDep/noopDep builders from resolve.go rather
+// than re-declaring their match/network wiring. Slice order is dispatch order:
+// first match wins.
 func newSyntheticResolvers(netCalls *int64) []ResolverEntry {
 	return []ResolverEntry{
-		{Match: isBazelModule, Resolve: networkVersion(netCalls), Network: true},
-		{Match: Matches(common.CategoryToolBinary, "golangci_lint_linux_amd64"), Resolve: networkVersion(netCalls), Network: true},
-		{Match: Matches(common.CategoryBaseImage, "alpine"), Resolve: resolverimpl.DigestResolve, Network: false},
-		{Match: Matches(common.CategoryBaseImage, "debian"), Resolve: networkVersion(netCalls), Network: true},
-		{Match: Matches(common.CategoryScriptPin, "qemu"), Resolve: networkVersion(netCalls), Network: true},
-		{Match: isCIAction, Resolve: networkVersion(netCalls), Network: true},
-		{Match: isToolchain, Resolve: resolverimpl.ToolchainResolve, Network: false},
+		networkedDep(isBazelModule, networkVersion(netCalls)),
+		networkedDep(Matches(common.CategoryToolBinary, "golangci_lint_linux_amd64"), networkVersion(netCalls)),
+		noopDep(Matches(common.CategoryBaseImage, "alpine"), resolverimpl.DigestResolve),
+		networkedDep(Matches(common.CategoryBaseImage, "debian"), networkVersion(netCalls)),
+		networkedDep(Matches(common.CategoryScriptPin, "qemu"), networkVersion(netCalls)),
+		networkedDep(isCIAction, networkVersion(netCalls)),
+		noopDep(isToolchain, resolverimpl.ToolchainResolve),
 	}
 }
 
