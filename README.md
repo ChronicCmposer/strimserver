@@ -189,10 +189,10 @@ gracefully on shutdown.
 
 | Component | Version / source | Where used |
 | --- | --- | --- |
-| NVIDIA CUDA redistributables | `13.0.2` (`cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm`; per-component sha256 pinned via the `redistrib_13.0.2.json` manifest) | Compile the FFmpeg artifact in `tools/ffmpeg-dist` (producer-only; not needed for a normal package build) |
-| Prebuilt FFmpeg artifact | `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz` (sha256 pinned in `MODULE.bazel` via `s3_http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
-| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | `8.0` at commit `281c902` (tip of `release/8.0`, 2026-08-14; pinned and baked into the prebuilt artifact) | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
-| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.0` at commit `e844e5b2` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
+| NVIDIA CUDA redistributables | `13.2.2` (`cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm`; per-component sha256 pinned via the `redistrib_13.2.2.json` manifest) | Compile the FFmpeg artifact in `tools/ffmpeg-dist` (producer-only; not needed for a normal package build) |
+| Prebuilt FFmpeg artifact | `ffmpeg-8.1-deb20260824-cuda13.2.2-sm75-1a748fe.tar.gz` (sha256 pinned in `MODULE.bazel` via `s3_http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
+| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | `8.1` at commit `1a748fe` (tip of `release/8.1`, 2026-08-28; pinned and baked into the prebuilt artifact) | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
+| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.1` at commit `88fee5c` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
 | FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
 | Intermediate Debian image | `debian:trixie` snapshot `20260824T082821Z` | Base for the artifact producer (`tools/ffmpeg-dist`: pulled via the Docker Hub registry API into a rootfs by `publish.sh`); the same snapshot supplies the scratch-image runtime libs via the `@trixie` rules_distroless apt extension |
 | Go toolchain | `go 1.26.4` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
@@ -475,7 +475,7 @@ qemu. An already-extracted rootfs can be reused by setting
 `FFMPEG_DIST_ROOTFS`. `publish.sh` then extracts the stripped
 `ffmpeg` binary plus its `BUILD-INFO.txt` provenance record, writes
 `ffmpeg-<ffver>-deb<date>-cuda<ver>-sm<N>-<shortsha>.tar.gz`
-(e.g. `ffmpeg-8.0-deb20260824-cuda13.0.2-sm75-281c902.tar.gz`),
+(e.g. `ffmpeg-8.1-deb20260824-cuda13.2.2-sm75-1a748fe.tar.gz`),
 uploads it to the `s3://<bucket>/ffmpeg/` prefix with no ACL
 modification (objects get the bucket's default private ACL; the
 IP-scoped HTTPS-only bucket policy from `scripts/bucket-cidr-policy.sh` is
@@ -1020,7 +1020,7 @@ Core dependencies:
   media server used for SRT ingest, RTSP routing, the Unix
   MPEG-TS source, and recording.
 - [FFmpeg](https://github.com/FFmpeg/FFmpeg) — the normalize
-  and scale/egress stages run a pinned prebuilt FFmpeg 8.0
+  and scale/egress stages run a pinned prebuilt FFmpeg 8.1
   artifact (see *FFmpeg reproducibility and artifact
   pipeline*).
 - [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers)

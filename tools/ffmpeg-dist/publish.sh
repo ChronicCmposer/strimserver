@@ -20,11 +20,11 @@
 # (name = "ffmpeg_dist").
 #
 # Env vars (defaults mirror the build.sh pins):
-#   FFMPEG_VERSION       default 8.0
-#   FFMPEG_COMMIT        default 281c902aa1a83fe759011097cb005b555034c151
-#   NV_CODEC_HEADERS_TAG default n13.0.19.0
-#   NV_CODEC_HEADERS_COMMIT default e844e5b26f46bb77479f063029595293aa8f812d
-#   CUDA_MANIFEST_URL    default .../redistrib_13.0.2.json
+#   FFMPEG_VERSION       default 8.1
+#   FFMPEG_COMMIT        default 1a748fe2cd43e3ead22fafb1b5b7d77f153898a8
+#   NV_CODEC_HEADERS_TAG default n13.0.19.1
+#   NV_CODEC_HEADERS_COMMIT default 88fee5c37318c991a8762d423530f91681e32e3a
+#   CUDA_MANIFEST_URL    default .../redistrib_13.2.2.json
 #   DEBIAN_SNAPSHOT      default 20260824T082821Z
 #   CUDA_COMPONENTS      default "cuda_nvcc cuda_cudart cuda_crt libnvvm"
 #   GENCODE              default arch=compute_75,code=sm_75
@@ -59,11 +59,11 @@
 set -euo pipefail
 
 # --- inputs (defaults mirror the build.sh pins) ---
-FFMPEG_VERSION="${FFMPEG_VERSION:-8.0}"
-FFMPEG_COMMIT="${FFMPEG_COMMIT:-281c902aa1a83fe759011097cb005b555034c151}"
-NV_CODEC_HEADERS_TAG="${NV_CODEC_HEADERS_TAG:-n13.0.19.0}"
-NV_CODEC_HEADERS_COMMIT="${NV_CODEC_HEADERS_COMMIT:-e844e5b26f46bb77479f063029595293aa8f812d}"
-CUDA_MANIFEST_URL="${CUDA_MANIFEST_URL:-https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.0.2.json}"
+FFMPEG_VERSION="${FFMPEG_VERSION:-8.1}"
+FFMPEG_COMMIT="${FFMPEG_COMMIT:-1a748fe2cd43e3ead22fafb1b5b7d77f153898a8}"
+NV_CODEC_HEADERS_TAG="${NV_CODEC_HEADERS_TAG:-n13.0.19.1}"
+NV_CODEC_HEADERS_COMMIT="${NV_CODEC_HEADERS_COMMIT:-88fee5c37318c991a8762d423530f91681e32e3a}"
+CUDA_MANIFEST_URL="${CUDA_MANIFEST_URL:-https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json}"
 DEBIAN_SNAPSHOT="${DEBIAN_SNAPSHOT:-20260824T082821Z}"
 CUDA_COMPONENTS="${CUDA_COMPONENTS:-cuda_nvcc cuda_cudart cuda_crt libnvvm}"
 GENCODE="${GENCODE:-arch=compute_75,code=sm_75}"
