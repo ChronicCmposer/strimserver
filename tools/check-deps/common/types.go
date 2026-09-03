@@ -49,6 +49,7 @@ const (
 	CategoryToolchain   = "toolchain"
 	CategoryCIAction    = "ci-action"
 	CategoryScriptPin   = "script-pin"
+	CategoryBzlPin      = "bzl-pin"
 	CategoryGo          = "go"
 	CategoryNPM         = "npm"
 )

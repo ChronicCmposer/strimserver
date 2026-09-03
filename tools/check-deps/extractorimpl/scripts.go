@@ -22,6 +22,11 @@ var (
 	qemuConsumerVersionRe = regexp.MustCompile(`QEMU_VERSION="\$\{QEMU_VERSION:-([0-9][0-9.]*)\}"`)
 	qemuDistlibRe         = regexp.MustCompile(`QEMU_DISTLIB_URL:[-=][^"}]*distlib-([0-9]+\.[0-9]+\.[0-9]+)-py2`)
 
+	// bzlQemuVersionRe targets only the qemu_x86_64 repo-rule's qemu_version
+	// attr default. The attr.string( ... default = "...") shape keeps it from
+	// matching build_script (attr.label) or build_timeout (attr.int).
+	bzlQemuVersionRe = regexp.MustCompile(`"qemu_version": attr\.string\(\s*default = "([0-9][0-9.]*)"`)
+
 	opensshVersionRe = regexp.MustCompile(`OPENSSH_VERSION:[-=]([^"}]+)\}`)
 	opensshTagRe     = regexp.MustCompile(`OPENSSH_TAG:[-=]([^"}]+)\}`)
 
@@ -48,6 +53,7 @@ func ExtractScripts(root string) ([]common.Dependency, []common.ExtractionUnknow
 		{RelPath: "tools/ffmpeg-dist/build.sh", Parse: scrapeFfmpeg},
 		{RelPath: "tools/ffmpeg-dist/publish.sh", Parse: scrapeFfmpeg},
 		{RelPath: "tools/ffmpeg-dist/publish.sh", Parse: scrapeQemuConsumer("ffmpeg-dist")},
+		{RelPath: "tools/bazel/qemu_x86_64.bzl", Parse: scrapeBzlPinQemu},
 	})
 }
 
@@ -111,6 +117,23 @@ func scrapeQemuConsumer(consumer string) func(data []byte, file string) ([]commo
 			note:     consumer + "'s buildkit-direct-execve patched qemu-x86_64 pin",
 		}})
 	}
+}
+
+// scrapeBzlPinQemu extracts the qemu version pinned as the qemu_x86_64
+// repo-rule attr default in tools/bazel/qemu_x86_64.bzl. That emulator is the
+// one the in-tree genrule uses to cross-strip the amd64 mediamtx binary on
+// non-x86_64 hosts; it is an independent pin, distinct from the ffmpeg-dist /
+// openssh consumer pins scraped from their publish scripts, so it is reported
+// in its own bzl-pin category.
+func scrapeBzlPinQemu(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
+	content := string(data)
+	return scrapeScript(content, file, []pinSpec{{
+		name:     "qemu",
+		category: common.CategoryBzlPin,
+		re:       bzlQemuVersionRe,
+		source:   "https://download.qemu.org",
+		note:     "qemu_x86_64 repo-rule default for cross-stripping amd64 mediamtx on non-x86_64 hosts",
+	}})
 }
 
 // opensshBuildSpecs and opensshPublishSpecs are the pins each half of the

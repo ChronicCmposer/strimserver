@@ -314,6 +314,58 @@ FFMPEG_DIST_ROOTFS="${FFMPEG_DIST_ROOTFS:-}"
 	}
 }
 
+// TestScrapeBzlPinQemu proves the qemu_x86_64 repo-rule default in
+// tools/bazel/qemu_x86_64.bzl yields exactly one bzl-pin/qemu dependency
+// carrying the pinned version, the download.qemu.org source, the bzl file, and
+// the cross-stripping note -- and never a script-pin qemu. The fixture carries
+// all three attrs (build_script, qemu_version, build_timeout) so the regex
+// provably targets only the qemu_version default.
+func TestScrapeBzlPinQemu(t *testing.T) {
+	const bzl = `
+qemu_x86_64 = repository_rule(
+    implementation = _qemu_x86_64_impl,
+    attrs = {
+        "build_script": attr.label(
+            default = "//tools/qemu:build-qemu.sh",
+            allow_single_file = True,
+            doc = "The patched-qemu build script (tracks changes via the label).",
+        ),
+        "qemu_version": attr.string(
+            default = "8.2.2",
+            doc = "QEMU_VERSION pin; must match a supported tools/qemu pin.",
+        ),
+        "build_timeout": attr.int(
+            default = 3600,
+            doc = "Seconds allowed for the qemu source build (meson/ninja).",
+        ),
+    },
+)
+`
+	deps, unknowns := scrapeBzlPinQemu([]byte(bzl), "tools/bazel/qemu_x86_64.bzl")
+	if len(unknowns) != 0 {
+		t.Fatalf("scrapeBzlPinQemu unknowns = %v, want none", unknowns)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("scrapeBzlPinQemu deps = %v, want exactly one", deps)
+	}
+	if findDep(t, deps, "script-pin", "qemu") != nil {
+		t.Errorf("scrapeBzlPinQemu must not emit a script-pin qemu: %v", deps)
+	}
+	got := deps[0]
+	if got.Category != "bzl-pin" || got.Name != "qemu" || got.Version != "8.2.2" {
+		t.Errorf("bzl-pin qemu dep = %v, want bzl-pin/qemu 8.2.2", got)
+	}
+	if got.Source != "https://download.qemu.org" {
+		t.Errorf("bzl-pin qemu source = %q, want https://download.qemu.org", got.Source)
+	}
+	if got.File != "tools/bazel/qemu_x86_64.bzl" {
+		t.Errorf("bzl-pin qemu file = %q, want tools/bazel/qemu_x86_64.bzl", got.File)
+	}
+	if !strings.Contains(got.Note, "cross-stripping") {
+		t.Errorf("bzl-pin qemu note = %q, want one containing %q", got.Note, "cross-stripping")
+	}
+}
+
 func TestScrapeOpenssh(t *testing.T) {
 	const script = `
 OPENSSH_TAG="${OPENSSH_TAG:-V_10_5_P1}"

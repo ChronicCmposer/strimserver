@@ -56,6 +56,7 @@ func testClassifier() *common.Classifier {
 			{Category: common.CategoryScriptPin, Name: "CUDA", Tier: common.TierT1},
 			{Category: common.CategoryScriptPin, Name: "nv-codec-headers", Tier: common.TierT1},
 			{Category: common.CategoryScriptPin, Name: "qemu", Tier: common.TierT2},
+			{Category: common.CategoryBzlPin, Name: "qemu", Tier: common.TierT2},
 		},
 	)
 }
@@ -78,6 +79,8 @@ func fixtureVersionInfo(category, name string) common.VersionInfo {
 	case "base-image/debian":
 		return common.VersionInfo{Version: "20260824"}
 	case "script-pin/qemu":
+		return common.VersionInfo{Version: "11.1.1"}
+	case "bzl-pin/qemu":
 		return common.VersionInfo{Version: "11.1.1"}
 	case "ci-action/actions/checkout":
 		return common.VersionInfo{Version: "v7.0.1", Date: "2026-07-20T15:10:05Z"}
@@ -111,6 +114,7 @@ func newSyntheticResolvers(netCalls *int64) []ResolverEntry {
 		noopDep(Matches(common.CategoryBaseImage, "alpine"), resolverimpl.DigestResolve),
 		networkedDep(Matches(common.CategoryBaseImage, "debian"), networkVersion(netCalls)),
 		networkedDep(Matches(common.CategoryScriptPin, "qemu"), networkVersion(netCalls)),
+		networkedDep(Matches(common.CategoryBzlPin, "qemu"), networkVersion(netCalls)),
 		networkedDep(matchesCategory(common.CategoryCIAction), networkVersion(netCalls)),
 		noopDep(matchesCategory(common.CategoryToolchain), resolverimpl.ToolchainResolve),
 	}
@@ -126,6 +130,7 @@ func syntheticExtract(_ string) ([]common.Dependency, []common.ExtractionUnknown
 		{Category: common.CategoryBaseImage, Name: "alpine", Version: "", Source: "docker.io/library/alpine", File: "MODULE.bazel", DigestPinned: true},
 		{Category: common.CategoryBaseImage, Name: "debian", Version: "20260824T082821Z", Source: "https://snapshot.debian.org/archive/debian", File: "MODULE.bazel"},
 		{Category: common.CategoryScriptPin, Name: "qemu", Version: "9.2.4", Source: "https://download.qemu.org", File: "tools/qemu/build-qemu.sh"},
+		{Category: common.CategoryBzlPin, Name: "qemu", Version: "8.2.2", Source: "https://download.qemu.org", File: "tools/bazel/qemu_x86_64.bzl"},
 		{Category: common.CategoryCIAction, Name: "actions/checkout", Version: "v4", Source: "https://github.com/actions/checkout", File: ".github/workflows/controller-ci.yml"},
 		{Category: common.CategoryToolchain, Name: "Bazel", Version: "9.2.0", Source: ".bazelversion", File: ".bazelversion"},
 		{Category: common.CategoryScriptPin, Name: "no-such-pin", Version: "1.0.0", Source: "x", File: "tools/x/build.sh"},
@@ -264,7 +269,7 @@ func TestE2EAllRestoresFullFindings(t *testing.T) {
 // --fresh bypass: a second run with the same cache dir must not re-invoke the
 // network resolvers, while --fresh must bypass the cache and refetch.
 func TestE2ECacheHonoredAndFreshBypass(t *testing.T) {
-	const networkDeps = 5 // rules_go, golangci, debian, qemu, checkout
+	const networkDeps = 6 // rules_go, golangci, debian, qemu, bzl-pin qemu, checkout
 	baseDir := t.TempDir()
 	netCalls := new(int64)
 

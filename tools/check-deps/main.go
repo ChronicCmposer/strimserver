@@ -133,6 +133,7 @@ func main() {
 		networkedDep(Matches(common.CategoryBaseImage, "debian"), resolverimpl.DebianResolve(fetcher)),
 		networkedDep(Matches(common.CategoryBaseImage, "amazonlinux"), resolverimpl.AmazonlinuxResolve(fetcher)),
 		networkedDep(Matches(common.CategoryScriptPin, "qemu"), resolverimpl.QemuScrapeResolve(fetcher)),
+		networkedDep(Matches(common.CategoryBzlPin, "qemu"), resolverimpl.QemuScrapeResolve(fetcher)),
 		networkedDep(Matches(common.CategoryScriptPin, "openssh-portable"), resolverimpl.OpensshScrapeResolve(fetcher)),
 		networkedDep(Matches(common.CategoryScriptPin, "GNU m4"), resolverimpl.M4ScrapeResolve(fetcher)),
 		networkedDep(Matches(common.CategoryScriptPin, "ffmpeg"), resolverimpl.FfmpegScrapeResolve(fetcher)),
@@ -167,6 +168,10 @@ func main() {
 			{Category: common.CategoryScriptPin, Name: "CUDA", Tier: common.TierT1},
 			{Category: common.CategoryScriptPin, Name: "nv-codec-headers", Tier: common.TierT1},
 			{Category: common.CategoryScriptPin, Name: "qemu", Tier: common.TierT2},
+			// bzl-pin: the qemu_x86_64 repo-rule default is the cross-stripping
+			// emulator for the amd64 mediamtx binary, so it rests at T2 like the
+			// other qemu pins; anything else in the category defaults to T3.
+			{Category: common.CategoryBzlPin, Name: "qemu", Tier: common.TierT2},
 		},
 	)
 

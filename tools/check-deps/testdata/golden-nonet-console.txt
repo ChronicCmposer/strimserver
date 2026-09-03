@@ -2,8 +2,9 @@
 repo root: /repo
 
 T1 (security) — 0
-T2 (review) — 3
+T2 (review) — 4
   - rules_go  0.63.0 -> 0.64.0  (https://bcr.bazel.build/modules/rules_go)  [MODULE.bazel]  [update]
+  - qemu  8.2.2 -> 11.1.1  (https://download.qemu.org)  [tools/bazel/qemu_x86_64.bzl]  [update]
   - actions/checkout  v4 -> v7.0.1  (https://github.com/actions/checkout)  [.github/workflows/controller-ci.yml]  [update]
   - qemu  9.2.4 -> 11.1.1  (https://download.qemu.org)  [tools/qemu/build-qemu.sh]  [update]
 
