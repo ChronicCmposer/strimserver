@@ -11,6 +11,7 @@ go_library(
         "common/classify.go",
         "common/client.go",
         "common/extract.go",
+        "common/nodesubrepos.go",
         "common/resolve.go",
         "common/types.go",
     ],
@@ -43,6 +44,7 @@ go_test(
         "common/classify_test.go",
         "common/client_test.go",
         "common/extract_test.go",
+        "common/nodesubrepos_test.go",
     ],
     embed = [":common"],
 )
@@ -71,7 +73,10 @@ go_library(
 
 go_test(
     name = "resolverimpl_test",
-    srcs = ["resolverimpl/registry_test.go"],
+    srcs = [
+        "resolverimpl/nativetools_test.go",
+        "resolverimpl/registry_test.go",
+    ],
     embed = [":resolverimpl"],
     deps = [
         ":common",

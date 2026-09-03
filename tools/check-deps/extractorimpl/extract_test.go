@@ -1,10 +1,23 @@
 package extractorimpl
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"strimserver-check-deps/common"
 )
+
+func writeFixture(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating fixture directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing fixture file: %v", err)
+	}
+}
 
 func findDep(t *testing.T, deps []common.Dependency, category, name string) *common.Dependency {
 	t.Helper()
@@ -137,6 +150,71 @@ func TestParsePackageJSON(t *testing.T) {
 	}
 	if len(deps) != 1 || deps[0].Category != "toolchain" || deps[0].Name != "pnpm" || deps[0].Version != "9.15.9" {
 		t.Errorf("packageManager pin not extracted: %v", deps)
+	}
+}
+
+// TestExtractToolchainsDiscoversNodeSubRepos proves the root .nvmrc assumption
+// is gone: the Node and pnpm pins come from the discovered sub-repo, tagged
+// with its repo-relative files, and no missing-file unknown is produced.
+func TestExtractToolchainsDiscoversNodeSubRepos(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, filepath.Join(root, ".bazelversion"), "9.2.0\n")
+	writeFixture(t, filepath.Join(root, "tools", "streamdeck-plugin", ".nvmrc"), "24.13.0\n")
+	writeFixture(t, filepath.Join(root, "tools", "streamdeck-plugin", "package.json"), `{"packageManager": "pnpm@9.15.9"}`)
+
+	deps, unknowns := ExtractToolchains(root)
+	if len(unknowns) != 0 {
+		t.Fatalf("ExtractToolchains unknowns = %v, want none", unknowns)
+	}
+	if got := findDepVersion(t, deps, "toolchain", "Bazel", "9.2.0"); got == nil {
+		t.Errorf("Bazel not extracted: %v", deps)
+	}
+	if got := findDepVersion(t, deps, "toolchain", "Node", "24.13.0"); got == nil || got.File != "tools/streamdeck-plugin/.nvmrc" {
+		t.Errorf("Node not extracted from the sub-repo .nvmrc: %v", deps)
+	}
+	if got := findDepVersion(t, deps, "toolchain", "pnpm", "9.15.9"); got == nil || got.File != "tools/streamdeck-plugin/package.json" {
+		t.Errorf("pnpm not extracted from the sub-repo package.json: %v", deps)
+	}
+}
+
+// TestExtractToolchainsSkipsUnmanagedPackageJSON proves a discovered
+// package.json without a packageManager field contributes no pnpm finding and
+// no spurious unknown.
+func TestExtractToolchainsSkipsUnmanagedPackageJSON(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, filepath.Join(root, ".bazelversion"), "9.2.0\n")
+	writeFixture(t, filepath.Join(root, "web", "package.json"), `{"name": "web"}`)
+
+	deps, unknowns := ExtractToolchains(root)
+	if len(unknowns) != 0 {
+		t.Fatalf("ExtractToolchains unknowns = %v, want none", unknowns)
+	}
+	if findDep(t, deps, "toolchain", "pnpm") != nil {
+		t.Errorf("unmanaged package.json must not yield a pnpm finding: %v", deps)
+	}
+	if findDep(t, deps, "toolchain", "Node") != nil {
+		t.Errorf("package.json-only sub-repo must not yield a Node finding: %v", deps)
+	}
+}
+
+// TestExtractToolchainsSurfacesMalformedPackageJSON proves a discovered
+// package.json with broken JSON still surfaces as an unknown: the discovery
+// skip applies only to the missing packageManager field, never to a real parse
+// error.
+func TestExtractToolchainsSurfacesMalformedPackageJSON(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, filepath.Join(root, ".bazelversion"), "9.2.0\n")
+	writeFixture(t, filepath.Join(root, "web", "package.json"), `{"packageManager": `)
+
+	deps, unknowns := ExtractToolchains(root)
+	if len(deps) != 1 || deps[0].Name != "Bazel" {
+		t.Errorf("deps = %v, want only the Bazel finding", deps)
+	}
+	if len(unknowns) != 1 || unknowns[0].File != "web/package.json" {
+		t.Fatalf("unknowns = %v, want exactly one unknown for web/package.json", unknowns)
+	}
+	if !strings.Contains(unknowns[0].Reason, "invalid JSON") {
+		t.Errorf("unknown reason = %q, want one containing %q", unknowns[0].Reason, "invalid JSON")
 	}
 }
 

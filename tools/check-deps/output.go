@@ -125,8 +125,10 @@ func toFinding(r common.Resolved) finding {
 // then applies the ignore set and derives the counts. today is injected so the
 // until-expiry logic is deterministic and testable. The calendar date is
 // formatted once and threaded through isIgnoredOn so matching never re-formats
-// it.
-func buildReport(all []common.Resolved, unknowns []common.ExtractionUnknown, ignores parsedIgnoreSet, today time.Time) report {
+// it. includeOK decides whether ok (current) findings appear in the findings
+// list: false filters them out while counts still cover the full inventory;
+// true lists every dependency.
+func buildReport(all []common.Resolved, unknowns []common.ExtractionUnknown, ignores parsedIgnoreSet, today time.Time, includeOK bool) report {
 	var rep report
 	calToday := calendarDate(today)
 	rep.Findings = make([]finding, 0, len(all))
@@ -134,8 +136,12 @@ func buildReport(all []common.Resolved, unknowns []common.ExtractionUnknown, ign
 	for _, r := range all {
 		f := toFinding(r)
 		f.Ignored = ignores.isIgnoredOn(findingID(r.Dep), calToday)
-		rep.Findings = append(rep.Findings, f)
+		// Count every dependency regardless of the findings filter so counts
+		// stay full and authoritative; only the findings list narrows.
 		accumulateCounts(&rep.Counts, r, f.Ignored)
+		if r.Status != common.StatusOK || includeOK {
+			rep.Findings = append(rep.Findings, f)
+		}
 		if u, ok := resolvedUnknownEntry(r); ok {
 			rep.Unknowns = append(rep.Unknowns, u)
 		}

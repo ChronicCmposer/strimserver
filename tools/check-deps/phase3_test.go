@@ -42,7 +42,9 @@ func TestJSONSchemaRoundTrip(t *testing.T) {
 	unknowns := []common.ExtractionUnknown{{File: "MODULE.bazel", Reason: "malformed bazel_dep"}}
 	ignores := ignoreSet{{ID: "bazel-module/rules_go", Reason: "pinned", Until: ""}}.parsed()
 
-	rep := buildReport(all, unknowns, ignores, time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC))
+	// includeOK=true keeps the full inventory in findings (the schema
+	// round-trip must cover ok deps too).
+	rep := buildReport(all, unknowns, ignores, time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC), true)
 
 	data, err := marshalReport(rep)
 	if err != nil {
@@ -129,7 +131,7 @@ func TestJSONSchemaDeterministicFieldOrder(t *testing.T) {
 		Status: common.StatusUpdate,
 		Latest: "v7.0.1",
 	}}
-	rep := buildReport(all, nil, nil, time.Now())
+	rep := buildReport(all, nil, nil, time.Now(), false)
 	a, err := marshalReport(rep)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -157,7 +159,7 @@ func TestTierCollapseCounts(t *testing.T) {
 		mkResolved(common.CategoryScriptPin, "ffmpeg", "8.0", common.TierT1, common.StatusUpdate, "8.0.1"),
 		mkResolved(common.CategoryBazelModule, "rules_nodejs", "6.7.3", common.TierT3, common.StatusUpdate, "6.7.5"),
 	}
-	rep := buildReport(all, nil, nil, time.Now())
+	rep := buildReport(all, nil, nil, time.Now(), false)
 	if rep.Counts.T1 != 1 || rep.Counts.T2 != 1 || rep.Counts.T3 != 2 {
 		t.Errorf("tier counts = t1:%d t2:%d t3:%d, want 1/1/2", rep.Counts.T1, rep.Counts.T2, rep.Counts.T3)
 	}
@@ -181,6 +183,56 @@ func mkResolved(category, name, version string, ti common.Tier, st common.Status
 		Tier:   ti,
 		Status: st,
 		Latest: latest,
+	}
+}
+
+// TestBuildReportFiltersOKFindingsByDefault pins the default vs --all
+// behavior: ok findings are filtered from the findings list by default while
+// counts still reflect the full inventory; includeOK=true restores them.
+func TestBuildReportFiltersOKFindingsByDefault(t *testing.T) {
+	all := []common.Resolved{
+		mkResolved(common.CategoryBazelModule, "rules_go", "0.63.0", common.TierT2, common.StatusUpdate, "0.64.0"),
+		mkResolved(common.CategoryBaseImage, "alpine", "", common.TierT1, common.StatusOK, ""),
+		mkResolved(common.CategoryScriptPin, "no-such-pin", "1.0.0", common.TierT3, common.StatusUnknown, ""),
+	}
+	unknowns := []common.ExtractionUnknown{{File: "tools/ffmpeg-dist/build.sh", Reason: "cannot read file"}}
+	today := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+
+	// Default (includeOK=false): the ok finding is filtered from findings, but
+	// counts still cover the full inventory and unknowns are untouched.
+	rep := buildReport(all, unknowns, nil, today, false)
+	if len(rep.Findings) != 2 {
+		t.Fatalf("default findings = %d, want 2 (ok filtered)", len(rep.Findings))
+	}
+	for _, f := range rep.Findings {
+		if f.Status == string(common.StatusOK) {
+			t.Errorf("default findings must not contain ok entries, got %s/%s [%s]", f.Category, f.Name, f.Status)
+		}
+	}
+	if rep.Counts.Total != 3 || rep.Counts.OK != 1 {
+		t.Errorf("default counts total/ok = %d/%d, want full inventory 3/1", rep.Counts.Total, rep.Counts.OK)
+	}
+	if rep.Counts.Update != 1 || rep.Counts.StatusUnknown != 1 || rep.Counts.UnknownsTotal != 2 {
+		t.Errorf("default status counts = update:%d unknown:%d unknowns:%d, want 1/1/2", rep.Counts.Update, rep.Counts.StatusUnknown, rep.Counts.UnknownsTotal)
+	}
+
+	// --all (includeOK=true): the ok finding returns to the findings list and
+	// counts are unchanged.
+	rep = buildReport(all, unknowns, nil, today, true)
+	if len(rep.Findings) != 3 {
+		t.Fatalf("all findings = %d, want 3", len(rep.Findings))
+	}
+	foundOK := false
+	for _, f := range rep.Findings {
+		if f.Status == string(common.StatusOK) {
+			foundOK = true
+		}
+	}
+	if !foundOK {
+		t.Error("all findings must include the ok entry")
+	}
+	if rep.Counts.Total != 3 || rep.Counts.OK != 1 {
+		t.Errorf("all counts total/ok = %d/%d, want 3/1", rep.Counts.Total, rep.Counts.OK)
 	}
 }
 

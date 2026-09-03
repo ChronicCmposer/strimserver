@@ -15,10 +15,10 @@ import (
 )
 
 // Native tool integration: the Go toolchain (go list -u) owns the Go module
-// graph and pnpm owns the Stream Deck plugin's npm packages. These tools
-// already know how to compute current+latest for their ecosystems, so the
-// tool shells out to them instead of re-implementing resolution. A missing
-// toolchain is an "unknown" record, never a crash.
+// graph and corepack pnpm owns each discovered node sub-repo's npm packages.
+// These tools already know how to compute current+latest for their ecosystems,
+// so the tool shells out to them instead of re-implementing resolution. A
+// missing toolchain is an "unknown" record, never a crash.
 
 // ResolveNativeDeps discovers Go module and npm package pins that Phase 1 did
 // not extract (their pins live in lockfiles, not the build files) and returns
@@ -37,9 +37,11 @@ var _ common.BatchResolver = ResolveNativeDeps
 
 // unknownResolved builds a resolved record for a dependency whose latest
 // version could not be resolved at all (missing toolchain, missing directory).
-func unknownResolved(category, reason string) common.Resolved {
+// file tags the record with the repo-relative source file it belongs to, so a
+// per-sub-repo failure is attributable to that sub-repo.
+func unknownResolved(category, file, reason string) common.Resolved {
 	return common.Resolved{
-		Dep:     common.Dependency{Category: category},
+		Dep:     common.Dependency{Category: category, File: file},
 		Tier:    common.TierT3,
 		Status:  common.StatusUnknown,
 		Reasons: []string{reason},
@@ -59,7 +61,7 @@ func resolveGoModules(root string, timeout time.Duration, classifier *common.Cla
 	workDir := filepath.Join(root, "core", "controller")
 	out, err := runNativeTool(workDir, []string{"go", "list", "-m", "-u", "-json", "all"}, timeout)
 	if err != nil {
-		return []common.Resolved{unknownResolved(common.CategoryGo, nativeToolReason(err, out, nativeToolMessages{
+		return []common.Resolved{unknownResolved(common.CategoryGo, "core/controller/go.mod", nativeToolReason(err, out, nativeToolMessages{
 			dirMissing: "core/controller directory not found",
 			notFound:   "go toolchain not found",
 			timeout:    "go list -u timed out",
@@ -75,7 +77,7 @@ func resolveGoModules(root string, timeout time.Duration, classifier *common.Cla
 			if err == io.EOF {
 				break
 			}
-			return []common.Resolved{unknownResolved(common.CategoryGo, "cannot parse go list output: "+err.Error())}
+			return []common.Resolved{unknownResolved(common.CategoryGo, "core/controller/go.mod", "cannot parse go list output: "+err.Error())}
 		}
 		if mod.Path == "" || mod.Version == "" {
 			continue
@@ -96,29 +98,55 @@ func resolveGoModules(root string, timeout time.Duration, classifier *common.Cla
 	return res
 }
 
+// pnpmOutdated is the JSON shape of `pnpm outdated --json`. pnpm 9 reports
+// wanted (the version the current range resolves to) and latest per package and
+// no longer emits current, so wanted is the closest available pin.
 type pnpmOutdated map[string]struct {
-	Current string `json:"current"`
-	Wanted  string `json:"wanted"`
-	Latest  string `json:"latest"`
+	Wanted string `json:"wanted"`
+	Latest string `json:"latest"`
 }
 
-// resolvePNPM runs `pnpm outdated --json` in tools/streamdeck-plugin and turns
-// each outdated package into a classified record. `pnpm outdated` exits 1 when
-// anything is outdated, which is the expected success signal here; only other
-// exit codes are failures.
+// resolvePNPM runs `corepack pnpm outdated --json` in every discovered node
+// sub-repo that has a package.json and turns each outdated package into a
+// classified record tagged with that sub-repo's package.json. `pnpm outdated`
+// exits 1 when anything is outdated, which is the expected success signal here;
+// only other exit codes are failures. corepack provisions pnpm from the
+// sub-repo's packageManager pin (or its default when the manifest has none), so
+// no globally installed pnpm is required.
 func resolvePNPM(root string, timeout time.Duration, classifier *common.Classifier) []common.Resolved {
-	workDir := filepath.Join(root, "tools", "streamdeck-plugin")
-	out, err := runNativeTool(workDir, []string{"pnpm", "outdated", "--json"}, timeout)
+	var res []common.Resolved
+	for _, subRepo := range common.DiscoverNodeSubRepos(root) {
+		if !common.NodeConfigFile(root, subRepo, "package.json") {
+			// A .nvmrc-only sub-repo pins Node but has no npm dependency tree.
+			continue
+		}
+		res = append(res, resolvePNPMSubRepo(root, subRepo, timeout, classifier)...)
+	}
+	return res
+}
+
+// resolvePNPMSubRepo resolves one node sub-repo's npm dependency tree via
+// corepack pnpm.
+func resolvePNPMSubRepo(root, subRepo string, timeout time.Duration, classifier *common.Classifier) []common.Resolved {
+	packageJSON := filepath.Join(subRepo, "package.json")
+	out, err := runNativeTool(filepath.Join(root, subRepo), []string{"corepack", "pnpm", "outdated", "--json"}, timeout)
 	if err != nil && !isOutdatedExitOne(err) {
-		return []common.Resolved{unknownResolved(common.CategoryNPM, nativeToolReason(err, out, nativeToolMessages{
-			dirMissing: "tools/streamdeck-plugin directory not found",
-			notFound:   "pnpm not found; node/pnpm toolchain missing",
-			timeout:    "pnpm outdated timed out",
-			failed:     "pnpm outdated failed",
+		return []common.Resolved{unknownResolved(common.CategoryNPM, packageJSON, nativeToolReason(err, out, nativeToolMessages{
+			dirMissing: subRepo + " directory not found",
+			notFound:   "corepack/node not found; node toolchain missing",
+			timeout:    "corepack pnpm outdated timed out",
+			failed:     "corepack pnpm outdated failed",
 		}))}
 	}
 
 	var outdated pnpmOutdated
+	// node may emit deprecation warnings on stderr, which runNativeTool merges
+	// into the combined output ahead of the JSON; the report is the JSON
+	// object, so parse from the first '{'. Output with no object (including
+	// empty output) means everything is up to date.
+	if start := bytes.IndexByte(out, '{'); start > 0 {
+		out = out[start:]
+	}
 	if err := json.Unmarshal(out, &outdated); err != nil {
 		// Empty (or non-JSON) output means everything is up to date.
 		return []common.Resolved{}
@@ -129,8 +157,8 @@ func resolvePNPM(root string, timeout time.Duration, classifier *common.Classifi
 		dep := common.Dependency{
 			Category: common.CategoryNPM,
 			Name:     name,
-			Version:  info.Current,
-			File:     "tools/streamdeck-plugin/package.json",
+			Version:  info.Wanted,
+			File:     packageJSON,
 		}
 		r := classifier.Classify(dep, common.VersionInfo{Version: info.Latest})
 		res = append(res, r)
@@ -155,6 +183,13 @@ type nativeToolError struct {
 	kind  nativeToolErrKind
 	cause error  // underlying command error; nil for dir-missing
 	out   []byte // combined stdout+stderr from the command, when it ran
+}
+
+// Unwrap exposes the underlying command error so errors.As can reach the
+// *exec.ExitError inside a nativeToolError — isOutdatedExitOne relies on this
+// to recognize pnpm's exit-1 "outdated" success signal.
+func (e *nativeToolError) Unwrap() error {
+	return e.cause
 }
 
 // reason renders this error's human-readable failure phrase. It is the single

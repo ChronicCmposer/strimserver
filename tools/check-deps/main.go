@@ -29,6 +29,11 @@ type Options struct {
 	CacheTTL time.Duration
 	// Ignore applies deps-ignore.json to mark intentional pins as ignored.
 	Ignore bool
+	// All includes ok (current) dependencies in the findings list. By default
+	// only update, unknown, and hygiene findings are listed; ok pins are
+	// filtered from findings while counts still cover the full inventory.
+	// --all restores the complete findings list.
+	All bool
 
 	// Root is the repository root the run operates on.
 	Root string
@@ -51,9 +56,9 @@ type Options struct {
 	// MaxConcurrentFetches bounds how many network resolutions run in parallel;
 	// must be positive (run fails loudly if <= 0).
 	MaxConcurrentFetches int
-	// NativeTools enables the go list -u and pnpm outdated shell-outs. Defaults
-	// to true; the e2e test sets it false to keep the pipeline deterministic
-	// without a machine-dependent toolchain.
+	// NativeTools enables the go list -u and corepack pnpm outdated shell-outs.
+	// Defaults to true; the e2e test sets it false to keep the pipeline
+	// deterministic without a machine-dependent toolchain.
 	NativeTools bool
 	// HTTPTimeout bounds each upstream GET performed by the shared Fetcher.
 	HTTPTimeout time.Duration
@@ -73,6 +78,7 @@ func main() {
 	consoleFlag := flag.Bool("console", false, "emit the console report")
 	freshFlag := flag.Bool("fresh", false, "bypass the cache and refetch upstream results")
 	ignoreFlag := flag.Bool("ignore", false, "apply deps-ignore.json to mark intentional pins as ignored")
+	allFlag := flag.Bool("all", false, "include current (ok) dependencies in the findings; by default only update, unknown, and hygiene findings are listed")
 	flag.Parse()
 
 	opts := Options{
@@ -89,6 +95,7 @@ func main() {
 	opts.Console = *consoleFlag
 	opts.Fresh = *freshFlag
 	opts.Ignore = *ignoreFlag
+	opts.All = *allFlag
 	opts.Stdout = os.Stdout
 	opts.Stderr = os.Stderr
 	opts.Now = time.Now
@@ -251,7 +258,7 @@ func run(opts *Options, cache *Cache, resolvers []ResolverEntry, batchResolvers 
 		ignores = loadIgnore(opts.Root, opts.Warn)
 	}
 
-	rep := buildReport(all, unknowns, ignores, opts.Now())
+	rep := buildReport(all, unknowns, ignores, opts.Now(), opts.All)
 
 	return writeReport(rep, opts)
 }

@@ -241,6 +241,25 @@ func TestE2ERegressionConsole(t *testing.T) {
 	}
 }
 
+// TestE2EAllRestoresFullFindings asserts that --all restores the complete
+// findings list (ok deps included) and is byte-identical to the all-inclusive
+// golden, while the default regression (TestE2ERegressionJSON) proves the ok
+// findings are filtered out of the default output.
+func TestE2EAllRestoresFullFindings(t *testing.T) {
+	e := newE2EApp(t, e2eJSON, "", nil)
+	e.opts.All = true
+	if err := run(e.opts, e.cache, e.resolvers, nil, e.extractors, e.classifier); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	want, err := os.ReadFile(filepath.Join("testdata", "golden-nonet-all.json"))
+	if err != nil {
+		t.Fatalf("read golden-nonet-all.json: %v", err)
+	}
+	if got := e.stdout.Bytes(); !bytes.Equal(got, want) {
+		t.Errorf("JSON output differs from golden-nonet-all.json\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // TestE2ECacheHonoredAndFreshBypass proves the cache write/read path and the
 // --fresh bypass: a second run with the same cache dir must not re-invoke the
 // network resolvers, while --fresh must bypass the cache and refetch.
