@@ -58,7 +58,7 @@ http_archive(
 )
 http_archive(
     name = "mediamtx_dist",
-    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.17.0/mediamtx_v1.17.0_linux_amd64.tar.gz",
+    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.20.1/mediamtx_v1.20.1_linux_amd64.tar.gz",
 )
 http_file(
     name = "iperf3_apk",
@@ -90,7 +90,7 @@ oci.pull(
 	if got := findDep(t, deps, "tool-binary", "golangci_lint_linux_amd64"); got == nil || got.Version != "2.13.2" {
 		t.Errorf("http_archive golangci-lint not extracted: %v", got)
 	}
-	if got := findDep(t, deps, "tool-binary", "mediamtx_dist"); got == nil || got.Version != "1.17.0" {
+	if got := findDep(t, deps, "tool-binary", "mediamtx_dist"); got == nil || got.Version != "1.20.1" {
 		t.Errorf("http_archive mediamtx not extracted: %v", got)
 	}
 	if got := findDep(t, deps, "runtime", "iperf3"); got == nil || got.Version != "3.19.1-r1" {
@@ -257,16 +257,16 @@ QEMU_DISTLIB_URL="${QEMU_DISTLIB_URL:-https://files.pythonhosted.org/packages/02
 
 func TestScrapeOpenssh(t *testing.T) {
 	const script = `
-OPENSSH_TAG="${OPENSSH_TAG:-V_10_3_P1}"
-OPENSSH_VERSION="${OPENSSH_VERSION:-10.3p1}"
+OPENSSH_TAG="${OPENSSH_TAG:-V_10_5_P1}"
+OPENSSH_VERSION="${OPENSSH_VERSION:-10.5p1}"
 M4_SOURCE_URL="${M4_SOURCE_URL:-https://ftp.gnu.org/gnu/m4/m4-1.4.19.tar.gz}"
-AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023}"
+AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023.12.20260817.0}"
 `
 	deps, unknowns := scrapeOpenssh([]byte(script), "tools/openssh/build.sh", opensshBuildSpecs)
 	if len(unknowns) != 0 {
 		t.Fatalf("scrapeOpenssh build.sh unknowns = %v, want none", unknowns)
 	}
-	if got := findDep(t, deps, "script-pin", "openssh-portable"); got == nil || got.Version != "10.3p1" || got.Note != "git tag V_10_3_P1" {
+	if got := findDep(t, deps, "script-pin", "openssh-portable"); got == nil || got.Version != "10.5p1" || got.Note != "git tag V_10_5_P1" {
 		t.Errorf("openssh-portable not extracted: %v", got)
 	}
 	if got := findDep(t, deps, "script-pin", "GNU m4"); got == nil || got.Version != "1.4.19" {
@@ -277,7 +277,7 @@ AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023}"
 	if len(unknowns) != 0 {
 		t.Fatalf("scrapeOpenssh publish.sh unknowns = %v, want none", unknowns)
 	}
-	if got := findDep(t, deps, "base-image", "amazonlinux"); got == nil || got.Version != "2023" {
+	if got := findDep(t, deps, "base-image", "amazonlinux"); got == nil || got.Version != "2023.12.20260817.0" {
 		t.Errorf("amazonlinux not extracted: %v", got)
 	}
 }

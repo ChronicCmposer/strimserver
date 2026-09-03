@@ -105,9 +105,9 @@ func DebianResolve(f *common.Fetcher) common.Resolver {
 }
 
 // AmazonlinuxResolve builds a resolver for the amazonlinux base-image pin. The
-// tag is a floating year-major (2023), so the classifier reports hygiene; here
-// we just confirm the tag still exists upstream by scanning the shared
-// newestDockerHubTag helper for an exact name match.
+// tag is date-pinned (2023.12.20260817.0), so the classifier reports no
+// floating-tag hygiene; here we just confirm the tag still exists upstream by
+// scanning the shared newestDockerHubTag helper for an exact name match.
 func AmazonlinuxResolve(f *common.Fetcher) common.Resolver {
 	return func(dep common.Dependency) common.VersionInfo {
 		_, found, err := newestDockerHubTag("amazonlinux", 3, func(t dockerTag) bool {

@@ -256,12 +256,12 @@ pathDefaults:
   # * RTSP_PORT: RTSP server port
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  runOnReady:
+  runOnAvailable:
   # Restart the command if it exits.
-  runOnReadyRestart: no
+  runOnAvailableRestart: no
   # Command to run when the stream is not available anymore.
-  # Environment variables are the same of runOnReady.
-  runOnNotReady:
+  # Environment variables are the same of runOnAvailable.
+  runOnUnavailable:
 
   # Command to run when a client starts reading.
   # This is terminated with SIGINT when a client stops reading.
@@ -312,16 +312,16 @@ paths:
 
   ingress0:
     source: publisher
-    runOnReady: /notify.sh ingress0 ready
-    runOnNotReady: /notify.sh ingress0 not-ready
+    runOnAvailable: /notify.sh ingress0 ready
+    runOnUnavailable: /notify.sh ingress0 not-ready
     srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     alwaysAvailable: true
     alwaysAvailableFile: "/video-files/strimserver-offline-2160p60.mp4"
 
   normalized:
     source: 'unix+mpegts://${NORMALIZED_MPEGTS_SOCKET}'
-    runOnReady: /notify.sh normalized ready
-    runOnNotReady: /notify.sh normalized not-ready
+    runOnAvailable: /notify.sh normalized ready
+    runOnUnavailable: /notify.sh normalized not-ready
     record: yes
     # Path of recording segments.
     # Extension is added automatically.

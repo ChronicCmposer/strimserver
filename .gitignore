@@ -17,6 +17,7 @@ deploy/aws/__pycache__/
 tools/local-obs/
 
 # Local implementation plans — throwaway working docs; not part of the repo.
+ideas/
 plans/
 playbooks/
 

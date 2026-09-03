@@ -13,8 +13,8 @@
 # Every mutable path is prefixed with it; no host-absolute path is referenced.
 #
 # Pins (env-overridable):
-#   OPENSSH_TAG     V_10_3_P1            (git tag/branch to clone)
-#   OPENSSH_VERSION 10.3p1               (informational; RPM Version is 10.3)
+#   OPENSSH_TAG     V_10_5_P1            (git tag/branch to clone)
+#   OPENSSH_VERSION 10.5p1               (informational; RPM Version is 10.5)
 #   OPENSSH_REPO    https://github.com/openssh/openssh-portable.git
 #   NPROC           (host nproc)
 #
@@ -36,8 +36,8 @@ fi
 
 # --- inputs ------------------------------------------------------------------
 rootfs="${1:-/}"
-OPENSSH_TAG="${OPENSSH_TAG:-V_10_3_P1}"
-OPENSSH_VERSION="${OPENSSH_VERSION:-10.3p1}"
+OPENSSH_TAG="${OPENSSH_TAG:-V_10_5_P1}"
+OPENSSH_VERSION="${OPENSSH_VERSION:-10.5p1}"
 OPENSSH_REPO="${OPENSSH_REPO:-https://github.com/openssh/openssh-portable.git}"
 NPROC="${NPROC:-$(nproc)}"
 # Static GNU m4 for the qemu workaround (see the autoreconf branch below);
@@ -162,13 +162,13 @@ cp "$rootfs/sshd_config" "$destdir/usr/local/etc/sshd_config"
         -printf '/%P\n'
 } > "$filelist"
 
-# --- rpm spec (Version 10.3 / Release 1 per the migration plan) ---------------
+# --- rpm spec (Version 10.5 / Release 1 per the migration plan) ---------------
 cat > "$spec_file" <<EOF
 %global debug_package %{nil}
 %define _build_id_links none
 
 Name: openssh-experimental
-Version: 10.3
+Version: 10.5
 Release: 1
 Summary: Experimental OpenSSH ${OPENSSH_VERSION} build
 License: BSD
