@@ -33,5 +33,115 @@
     "id": "go/github.com/containerd/platforms",
     "reason": "platforms v1.0.0-rc.5 is a Windows-only compat fix, irrelevant to the linux/amd64 controller, and not yet coordinated by a containerd release. Wait for a containerd release.",
     "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/Microsoft/hcsshim",
+    "reason": "hcsshim is an indirect Windows-container runtime dep pinned by containerd/v2 v2.3.4's go.mod requirements; v0.15.0-rc.4 is not yet coordinated by a containerd release. Resolved via MVS, not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/felixge/httpsnoop",
+    "reason": "httpsnoop is an indirect dep required by the otelhttp instrumentation and grpc's HTTP layer; it is resolved via MVS from those direct deps' go.mod requirements and not independently editable. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/fsnotify/fsnotify",
+    "reason": "fsnotify is an indirect dep used by containerd's watch-based event handling; it is pinned by containerd/v2 v2.3.4's go.mod requirements and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/go-logr/logr",
+    "reason": "logr is the standard Go logging abstraction used by otel and grpc; it is pinned transitively via those direct deps' go.mod requirements and not independently editable. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/klauspost/compress",
+    "reason": "klauspost/compress is an indirect dep pinned by containerd/v2 v2.3.4 (snappy/zstd layer compression); it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/moby/sys/sequential",
+    "reason": "moby/sys/sequential is a Windows file-sequencing helper pinned by containerd/v2 v2.3.4's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/moby/sys/user",
+    "reason": "moby/sys/user is a user-namespace helper pinned by containerd/v2 v2.3.4's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/moby/sys/userns",
+    "reason": "moby/sys/userns is a user-namespace helper pinned by containerd/v2 v2.3.4's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/sirupsen/logrus",
+    "reason": "logrus is containerd's logging library, pinned by containerd/v2 v2.3.4's go.mod requirements; v1.10.2 is not yet coordinated. Resolved via MVS, not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp",
+    "reason": "otelhttp is part of the otel instrumentation family pinned transitively via grpc's go.mod; the otel modules must move together as one version set. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/go.opentelemetry.io/otel",
+    "reason": "otel SDK is pinned transitively via grpc's go.mod; the otel family (otel/metric/trace/otelhttp) must move together as one version set. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/go.opentelemetry.io/otel/metric",
+    "reason": "otel/metric must move in lockstep with the rest of the otel family (otel/trace/otelhttp), all pinned transitively via grpc's go.mod. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/go.opentelemetry.io/otel/trace",
+    "reason": "otel/trace must move in lockstep with the rest of the otel family (otel/metric/otelhttp), all pinned transitively via grpc's go.mod. Wait for grpc/otel coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/go.yaml.in/yaml/v2",
+    "reason": "yaml/v2 is an indirect dep pinned by containerd/v2 v2.3.4 (cri/plugin config parsing); it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/golang.org/x/mod",
+    "reason": "x/mod is pinned transitively via grpc's and containerd's go.mod requirements (module tooling); it is resolved via MVS and not independently editable. Wait for grpc/containerd coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/golang.org/x/net",
+    "reason": "x/net is pinned transitively via grpc's HTTP/2 transport and containerd's go.mod requirements; it is resolved via MVS and not independently editable. Wait for grpc/containerd coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/golang.org/x/sync",
+    "reason": "x/sync (errgroup/semaphore) is pinned transitively via grpc's and containerd's go.mod requirements; it is resolved via MVS and not independently editable. Wait for grpc/containerd coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/golang.org/x/sys",
+    "reason": "x/sys is pinned transitively via grpc's and containerd's go.mod requirements (platform syscalls); it is resolved via MVS and not independently editable. Wait for grpc/containerd coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/golang.org/x/text",
+    "reason": "x/text is pinned transitively via grpc's and containerd's go.mod requirements (unicode tables); it is resolved via MVS and not independently editable. Wait for grpc/containerd coordination.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/google.golang.org/genproto/googleapis/rpc",
+    "reason": "genproto/rpc is the generated stub set pinned by grpc's go.mod requirements; it must move with grpc and is not independently editable. Wait for a grpc release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/google.golang.org/grpc",
+    "reason": "grpc is pinned by containerd/v2 v2.3.4's go.mod requirements (containerd's RPC layer); bumping to v1.83.2 must be coordinated by a containerd release and with the otel family. Wait for a containerd release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/google.golang.org/protobuf",
+    "reason": "protobuf is the message runtime pinned transitively via grpc's go.mod requirements; the current pseudo-version tracks grpc's own pin and is not independently editable. Wait for a grpc release.",
+    "until": "2027-03-31"
   }
 ]

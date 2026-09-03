@@ -42,8 +42,8 @@ OPENSSH_REPO="${OPENSSH_REPO:-https://github.com/openssh/openssh-portable.git}"
 NPROC="${NPROC:-$(nproc)}"
 # Static GNU m4 for the qemu workaround (see the autoreconf branch below);
 # pinned source tarball, verified by sha256 before use.
-M4_SOURCE_URL="${M4_SOURCE_URL:-https://ftp.gnu.org/gnu/m4/m4-1.4.19.tar.gz}"
-M4_SOURCE_SHA256="${M4_SOURCE_SHA256:-3be4a26d825ffdfda52a56fc43246456989a3630093cced3fbddf4771ee58a70}"
+M4_SOURCE_URL="${M4_SOURCE_URL:-https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.gz}"
+M4_SOURCE_SHA256="${M4_SOURCE_SHA256:-38ae59f7a30bf9c108193cc5c25fbb06014f21e230c7ede2eff614f7b7c37ed8}"
 
 src_dir="$rootfs/tmp/openssh-src"
 destdir="$rootfs/tmp/openssh-root"
@@ -105,7 +105,7 @@ if [[ ! -f configure ]] || [[ m4/openssh.m4 -nt configure ]]; then
         if [[ ! -x "$m4_bin" ]]; then
             echo "==> building a static GNU m4 (the guest /usr/bin/m4 crashes qemu)"
             dnf install -y glibc-static
-            m4_tarball="$rootfs/tmp/m4-1.4.19.tar.gz"
+            m4_tarball="$rootfs/tmp/m4-1.4.21.tar.gz"
             curl -fsSL --retry 3 -o "$m4_tarball" "$M4_SOURCE_URL"
             printf '%s  %s\n' "$M4_SOURCE_SHA256" "$m4_tarball" | sha256sum -c - >/dev/null
             mkdir -p "$rootfs/tmp/m4-src"
@@ -118,7 +118,7 @@ if [[ ! -f configure ]] || [[ m4/openssh.m4 -nt configure ]]; then
             # install-exec does not build first, so the noinst convenience library
             # ../lib/libm4.a would be missing when src/m4 links.
             (
-                cd "$rootfs/tmp/m4-src/m4-1.4.19" \
+                cd "$rootfs/tmp/m4-src/m4-1.4.21" \
                     && ./configure --prefix=/usr --disable-shared LDFLAGS=-static \
                     && rm -f GNUmakefile \
                     && make -j"$NPROC" all install-exec DESTDIR="$m4_good_dir"

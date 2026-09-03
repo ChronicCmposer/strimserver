@@ -259,7 +259,7 @@ func TestScrapeOpenssh(t *testing.T) {
 	const script = `
 OPENSSH_TAG="${OPENSSH_TAG:-V_10_5_P1}"
 OPENSSH_VERSION="${OPENSSH_VERSION:-10.5p1}"
-M4_SOURCE_URL="${M4_SOURCE_URL:-https://ftp.gnu.org/gnu/m4/m4-1.4.19.tar.gz}"
+M4_SOURCE_URL="${M4_SOURCE_URL:-https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.gz}"
 AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023.12.20260817.0}"
 `
 	deps, unknowns := scrapeOpenssh([]byte(script), "tools/openssh/build.sh", opensshBuildSpecs)
@@ -269,7 +269,7 @@ AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023.12.20260817.0}"
 	if got := findDep(t, deps, "script-pin", "openssh-portable"); got == nil || got.Version != "10.5p1" || got.Note != "git tag V_10_5_P1" {
 		t.Errorf("openssh-portable not extracted: %v", got)
 	}
-	if got := findDep(t, deps, "script-pin", "GNU m4"); got == nil || got.Version != "1.4.19" {
+	if got := findDep(t, deps, "script-pin", "GNU m4"); got == nil || got.Version != "1.4.21" {
 		t.Errorf("m4 not extracted: %v", got)
 	}
 

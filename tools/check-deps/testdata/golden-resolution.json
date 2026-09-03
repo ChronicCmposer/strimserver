@@ -72,7 +72,7 @@
   "script-pin\u001fCUDA\u001fhttps://developer.download.nvidia.com/compute/cuda/redist\u001f13.0.2": {
     "version": "13.3.1"
   },
-  "script-pin\u001fGNU m4\u001fhttps://ftp.gnu.org/gnu/m4\u001f1.4.19": {
+  "script-pin\u001fGNU m4\u001fhttps://ftp.gnu.org/gnu/m4\u001f1.4.21": {
     "version": "1.4.21"
   },
   "script-pin\u001fdistlib\u001fhttps://files.pythonhosted.org\u001f0.4.3": {

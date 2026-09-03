@@ -186,15 +186,15 @@ func TestParseOpenSSHListing(t *testing.T) {
 }
 
 func TestParseGnuM4Listing(t *testing.T) {
-	const listing = `<a href="m4-1.4.19.tar.gz">m4-1.4.19.tar.gz</a>
-		<a href="m4-1.4.20.tar.gz">m4-1.4.20.tar.gz</a>`
+	const listing = `<a href="m4-1.4.20.tar.gz">m4-1.4.20.tar.gz</a>
+		<a href="m4-1.4.21.tar.gz">m4-1.4.21.tar.gz</a>`
 	versions := parseListing([]byte(listing), m4TarRe)
 	latest, err := latestOf(versions, utilities.CompareSemver)
 	if err != nil {
 		t.Fatalf("latestOf: %v", err)
 	}
-	if latest != "1.4.20" {
-		t.Errorf("m4 newest = %q, want 1.4.20", latest)
+	if latest != "1.4.21" {
+		t.Errorf("m4 newest = %q, want 1.4.21", latest)
 	}
 }
 

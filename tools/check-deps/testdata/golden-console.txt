@@ -21,8 +21,8 @@ T2 (review) — 13
   - qemu  8.2.2 -> 11.1.1  (https://download.qemu.org)  [tools/qemu/build-qemu.sh]  [update]
   - qemu  9.2.4 -> 11.1.1  (https://download.qemu.org)  [tools/qemu/build-qemu.sh]  [update]
 
-T3 (minor) — 18
-  names: github.com/Microsoft/hcsshim, github.com/containerd/platforms, github.com/containerd/ttrpc, github.com/containerd/typeurl/v2, github.com/felixge/httpsnoop, github.com/fsnotify/fsnotify, github.com/go-logr/logr, github.com/klauspost/compress, github.com/moby/sys/user, github.com/sirupsen/logrus, go.opentelemetry.io/otel, go.opentelemetry.io/otel/metric, go.opentelemetry.io/otel/trace, go.yaml.in/yaml/v2, google.golang.org/genproto/googleapis/rpc, google.golang.org/grpc, google.golang.org/protobuf, GNU m4
+T3 (minor) — 17
+  names: github.com/Microsoft/hcsshim, github.com/containerd/platforms, github.com/containerd/ttrpc, github.com/containerd/typeurl/v2, github.com/felixge/httpsnoop, github.com/fsnotify/fsnotify, github.com/go-logr/logr, github.com/klauspost/compress, github.com/moby/sys/user, github.com/sirupsen/logrus, go.opentelemetry.io/otel, go.opentelemetry.io/otel/metric, go.opentelemetry.io/otel/trace, go.yaml.in/yaml/v2, google.golang.org/genproto/googleapis/rpc, google.golang.org/grpc, google.golang.org/protobuf
 
 Unknown — 0
 

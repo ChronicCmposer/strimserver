@@ -155,7 +155,7 @@ func TestJSONSchemaDeterministicFieldOrder(t *testing.T) {
 func TestTierCollapseCounts(t *testing.T) {
 	all := []common.Resolved{
 		mkResolved(common.CategoryScriptPin, "qemu", "9.2.4", common.TierT2, common.StatusUpdate, "9.2.5"),
-		mkResolved(common.CategoryScriptPin, "m4", "1.4.19", common.TierT3, common.StatusUpdate, "1.4.20"),
+		mkResolved(common.CategoryScriptPin, "m4", "1.4.19", common.TierT3, common.StatusUpdate, "1.4.21"),
 		mkResolved(common.CategoryScriptPin, "ffmpeg", "8.0", common.TierT1, common.StatusUpdate, "8.0.1"),
 		mkResolved(common.CategoryBazelModule, "rules_nodejs", "6.7.3", common.TierT3, common.StatusUpdate, "6.7.5"),
 	}
