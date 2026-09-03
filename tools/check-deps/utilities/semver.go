@@ -1,15 +1,11 @@
-package common
+package utilities
 
-import (
-	"strings"
+import "strings"
 
-	"strimserver-check-deps/utilities"
-)
-
-// This file holds the hand-rolled version comparison used across the whole
-// tool. The module is stdlib-only and must not import golang.org/x/mod, so
-// semver semantics are implemented here with a chunked, numeric-aware compare
-// that degrades gracefully on non-semver strings.
+// This file holds the hand-rolled version comparison shared across the
+// check-deps packages. The module is stdlib-only and must not import
+// golang.org/x/mod, so semver semantics are implemented here with a chunked,
+// numeric-aware compare that degrades gracefully on non-semver strings.
 
 // CompareSemver compares two version strings and returns -1, 0, or 1 when a
 // sorts before, equal to, or after b. It strips a leading alphabetic tag
@@ -17,8 +13,8 @@ import (
 // core chunk-wise, and then applies semver prerelease precedence. Non-semver
 // strings are compared by their numeric/alpha chunks rather than rejected.
 func CompareSemver(a, b string) int {
-	aCore, aPre, hasPreA := utilities.SplitCoreAndPre(a)
-	bCore, bPre, hasPreB := utilities.SplitCoreAndPre(b)
+	aCore, aPre, hasPreA := SplitCoreAndPre(a)
+	bCore, bPre, hasPreB := SplitCoreAndPre(b)
 	if c := CompareChunks(aCore, bCore); c != 0 {
 		return c
 	}
@@ -28,7 +24,7 @@ func CompareSemver(a, b string) int {
 	case hasPreA && !hasPreB:
 		return -1
 	case hasPreA && hasPreB:
-		return ComparePrerelease(aPre, bPre)
+		return comparePrerelease(aPre, bPre)
 	}
 	return 0
 }
@@ -48,8 +44,8 @@ func CompareChunks(a, b string) int {
 		case b == "":
 			return 1
 		}
-		aNum := utilities.LeadingDigits(a)
-		bNum := utilities.LeadingDigits(b)
+		aNum := LeadingDigits(a)
+		bNum := LeadingDigits(b)
 		if aNum != "" || bNum != "" {
 			if c := compareBigInt(aNum, bNum); c != 0 {
 				return c
@@ -81,9 +77,9 @@ func CompareChunks(a, b string) int {
 	}
 }
 
-// ComparePrerelease orders prerelease identifiers per semver: numeric
+// comparePrerelease orders prerelease identifiers per semver: numeric
 // identifiers compare as integers and sort before alphanumeric identifiers.
-func ComparePrerelease(a, b string) int {
+func comparePrerelease(a, b string) int {
 	as := strings.Split(a, ".")
 	bs := strings.Split(b, ".")
 	short := len(as)
@@ -105,7 +101,7 @@ func ComparePrerelease(a, b string) int {
 }
 
 func comparePrereleaseIdent(a, b string) int {
-	aNum, bNum := utilities.IsAllDigits(a), utilities.IsAllDigits(b)
+	aNum, bNum := IsAllDigits(a), IsAllDigits(b)
 	switch {
 	case aNum && bNum:
 		return compareBigInt(a, b)

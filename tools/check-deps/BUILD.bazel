@@ -13,7 +13,6 @@ go_library(
         "common/depkey.go",
         "common/extract.go",
         "common/resolve.go",
-        "common/semver.go",
         "common/snapshot.go",
         "common/status.go",
         "common/tier.go",
@@ -22,14 +21,22 @@ go_library(
     ],
     importpath = "strimserver-check-deps/common",
     visibility = ["//visibility:private"],
-    deps = [":utilities"],
 )
 
 go_library(
     name = "utilities",
-    srcs = ["utilities/utilities.go"],
+    srcs = [
+        "utilities/semver.go",
+        "utilities/utilities.go",
+    ],
     importpath = "strimserver-check-deps/utilities",
     visibility = ["//visibility:private"],
+)
+
+go_test(
+    name = "utilities_test",
+    srcs = ["utilities/semver_test.go"],
+    embed = [":utilities"],
 )
 
 go_test(
@@ -68,7 +75,10 @@ go_test(
     name = "resolverimpl_test",
     srcs = ["resolverimpl/registry_test.go"],
     embed = [":resolverimpl"],
-    deps = [":common"],
+    deps = [
+        ":common",
+        ":utilities",
+    ],
 )
 
 go_library(

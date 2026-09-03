@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"strimserver-check-deps/common"
+	"strimserver-check-deps/utilities"
 )
 
 // BCR (Bazel Central Registry) client. Every bazel-module dependency (rules_go,
@@ -37,7 +38,7 @@ func latestNonYanked(versions []string, yanked map[string]string) (string, error
 		if _, isYanked := yanked[v]; isYanked {
 			continue
 		}
-		if latest == "" || common.CompareSemver(v, latest) > 0 {
+		if latest == "" || utilities.CompareSemver(v, latest) > 0 {
 			latest = v
 		}
 	}

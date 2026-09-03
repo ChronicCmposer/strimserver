@@ -72,7 +72,7 @@ func classifyDateTag(r common.Resolved, dep common.Dependency) (common.Resolved,
 		r.Reasons = append(r.Reasons, "cannot compare date tags "+dep.Version+"/"+r.Latest)
 		return r, true
 	}
-	if common.CompareChunks(latest, cur) > 0 {
+	if utilities.CompareChunks(latest, cur) > 0 {
 		// A newer date tag is an update, never a breaking bump; the tier rule
 		// still derives the final tier from the resting one (T1 stays T1).
 		markUpdate(&r, updateTier(r.Tier, false))
@@ -90,7 +90,7 @@ func classifySemver(r common.Resolved, dep common.Dependency) (common.Resolved, 
 	// dispatchers return early when they claim the dependency, so r.Tier is
 	// still the untouched resting tier here.
 	resting := r.Tier
-	switch c := common.CompareSemver(dep.Version, r.Latest); {
+	switch c := utilities.CompareSemver(dep.Version, r.Latest); {
 	case c == 0:
 		r.Status = common.StatusOK
 	case c < 0:

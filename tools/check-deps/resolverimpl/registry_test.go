@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"strimserver-check-deps/common"
+	"strimserver-check-deps/utilities"
 )
 
 // Phase 2 unit tests moved into the resolverimpl package: pure logic only
@@ -53,7 +54,7 @@ func TestParseDockerHubTags(t *testing.T) {
 			dates = append(dates, m[1])
 		}
 	}
-	newest, err := latestOf(dates, common.CompareChunks)
+	newest, err := latestOf(dates, utilities.CompareChunks)
 	if err != nil {
 		t.Fatalf("latestOf(trixie dates): %v", err)
 	}
@@ -136,7 +137,7 @@ func TestParseNvidiaRedistListing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseNvidiaRedistListing: %v", err)
 	}
-	latest, err := latestOf(versions, common.CompareChunks)
+	latest, err := latestOf(versions, utilities.CompareChunks)
 	if err != nil {
 		t.Fatalf("latestOf(nvidia): %v", err)
 	}
@@ -165,7 +166,7 @@ func TestParseQemuListing(t *testing.T) {
 		<a href="qemu-9.1.0.tar.xz">qemu-9.1.0.tar.xz</a>
 		<a href="qemu-9.2.4.tar.xz">qemu-9.2.4.tar.xz</a>`
 	versions := parseListing([]byte(listing), qemuTarRe)
-	latest, err := latestOf(versions, common.CompareSemver)
+	latest, err := latestOf(versions, utilities.CompareSemver)
 	if err != nil {
 		t.Fatalf("latestOf: %v", err)
 	}
@@ -178,7 +179,7 @@ func TestParseOpenSSHListing(t *testing.T) {
 	const listing = `<a href="openssh-10.3p1.tar.gz">openssh-10.3p1.tar.gz</a>
 		<a href="openssh-10.4p1.tar.gz">openssh-10.4p1.tar.gz</a>`
 	versions := parseListing([]byte(listing), opensshTarRe)
-	latest, err := latestOf(versions, common.CompareSemver)
+	latest, err := latestOf(versions, utilities.CompareSemver)
 	if err != nil {
 		t.Fatalf("latestOf: %v", err)
 	}
@@ -191,7 +192,7 @@ func TestParseGnuM4Listing(t *testing.T) {
 	const listing = `<a href="m4-1.4.19.tar.gz">m4-1.4.19.tar.gz</a>
 		<a href="m4-1.4.20.tar.gz">m4-1.4.20.tar.gz</a>`
 	versions := parseListing([]byte(listing), m4TarRe)
-	latest, err := latestOf(versions, common.CompareSemver)
+	latest, err := latestOf(versions, utilities.CompareSemver)
 	if err != nil {
 		t.Fatalf("latestOf: %v", err)
 	}
@@ -205,7 +206,7 @@ func TestParseFFmpegListing(t *testing.T) {
 		<a href="ffmpeg-8.0.tar.xz">ffmpeg-8.0.tar.xz</a>
 		<a href="ffmpeg-8.0.1.tar.xz">ffmpeg-8.0.1.tar.xz</a>`
 	versions := parseListing([]byte(listing), ffmpegTarRe)
-	latest, err := latestOf(versions, common.CompareSemver)
+	latest, err := latestOf(versions, utilities.CompareSemver)
 	if err != nil {
 		t.Fatalf("latestOf: %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"regexp"
 
 	"strimserver-check-deps/common"
+	"strimserver-check-deps/utilities"
 )
 
 // NVIDIA CUDA redistributable client. CUDA has no "latest" endpoint, so the
@@ -34,7 +35,7 @@ func NvidiaResolve(f *common.Fetcher) common.Resolver {
 			}
 			// CompareChunks is the sort -V style numeric-aware compare: 13.0.2
 			// sorts after 12.4.1.
-			return latestOf(versions, common.CompareChunks)
+			return latestOf(versions, utilities.CompareChunks)
 		})
 	}
 }

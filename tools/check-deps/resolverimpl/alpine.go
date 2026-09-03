@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"strimserver-check-deps/common"
+	"strimserver-check-deps/utilities"
 )
 
 // Alpine APKINDEX client. iperf3 is pinned from a specific Alpine branch
@@ -114,7 +115,7 @@ func AlpineResolve(f *common.Fetcher) common.Resolver {
 		}
 		vi.Version = pinned
 		if stable, err := fetchAPKIndexVersion(alpineLatestStableBranch, "iperf3", f); err == nil {
-			if common.CompareSemver(stable, pinned) > 0 {
+			if utilities.CompareSemver(stable, pinned) > 0 {
 				vi.Infos = append(vi.Infos,
 					"latest-stable alpine "+alpineLatestStableBranch+" has iperf3 "+stable+" (branch staleness, T3 informational)")
 			}

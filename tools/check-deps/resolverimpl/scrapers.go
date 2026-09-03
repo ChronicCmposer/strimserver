@@ -5,6 +5,7 @@ import (
 	"regexp"
 
 	"strimserver-check-deps/common"
+	"strimserver-check-deps/utilities"
 )
 
 // HTML directory-listing scrapers. Every scraper is two pieces: a PURE parser
@@ -96,6 +97,6 @@ func fetchAndParse(f *common.Fetcher, url string, parse func([]byte) (string, er
 // body, and returns the newest version as a common.VersionInfo.
 func scrapeListing(url string, re *regexp.Regexp, f *common.Fetcher) common.VersionInfo {
 	return fetchAndParse(f, url, func(data []byte) (string, error) {
-		return latestOf(parseListing(data, re), common.CompareSemver)
+		return latestOf(parseListing(data, re), utilities.CompareSemver)
 	})
 }
