@@ -191,6 +191,9 @@ func ExtractModuleBazel(root string) ([]common.Dependency, []common.ExtractionUn
 	return common.ReadAndParse(root, "MODULE.bazel", parseModuleBazel)
 }
 
+// ExtractModuleBazel must keep satisfying the common.Extractor contract.
+var _ common.Extractor = ExtractModuleBazel
+
 // parseModuleBazel extracts every pinned dependency declared in MODULE.bazel:
 // bazel_dep module registry pins, single_version_override module version pins,
 // http_archive/http_file downloads (golangci-lint, mediamtx, iperf3), the

@@ -19,6 +19,9 @@ func ExtractToolchains(root string) ([]common.Dependency, []common.ExtractionUnk
 	})
 }
 
+// ExtractToolchains must keep satisfying the common.Extractor contract.
+var _ common.Extractor = ExtractToolchains
+
 func parseBazelVersion(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
 	version := strings.TrimSpace(string(data))
 	if version == "" {

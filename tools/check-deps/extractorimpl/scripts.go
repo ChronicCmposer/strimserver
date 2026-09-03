@@ -55,6 +55,9 @@ func ExtractScripts(root string) ([]common.Dependency, []common.ExtractionUnknow
 	})
 }
 
+// ExtractScripts must keep satisfying the common.Extractor contract.
+var _ common.Extractor = ExtractScripts
+
 // scrapeScript applies the pin specs to one script's content. A spec whose
 // regex does not match becomes an unknown record, never a silent drop.
 func scrapeScript(content, file string, specs []pinSpec) ([]common.Dependency, []common.ExtractionUnknown) {

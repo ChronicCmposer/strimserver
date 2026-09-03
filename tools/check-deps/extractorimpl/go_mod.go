@@ -13,6 +13,9 @@ func ExtractGoMod(root string) ([]common.Dependency, []common.ExtractionUnknown)
 	return common.ReadAndParse(root, "core/controller/go.mod", parseGoMod)
 }
 
+// ExtractGoMod must keep satisfying the common.Extractor contract.
+var _ common.Extractor = ExtractGoMod
+
 // parseGoMod extracts the Go toolchain version from the `go` directive. The
 // individual Go module requires are checked in a later phase via `go list -u`.
 func parseGoMod(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {

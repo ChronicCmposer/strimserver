@@ -35,6 +35,9 @@ func ExtractWorkflows(root string) ([]common.Dependency, []common.ExtractionUnkn
 	return common.RunSourceSpecs(root, specs)
 }
 
+// ExtractWorkflows must keep satisfying the common.Extractor contract.
+var _ common.Extractor = ExtractWorkflows
+
 func isYAML(name string) bool {
 	return strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".yaml")
 }
