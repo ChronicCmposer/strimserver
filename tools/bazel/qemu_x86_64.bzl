@@ -1,11 +1,17 @@
 """Builds the buildkit-direct-execve patched qemu-x86_64 as a Bazel tool.
 
 QEMU_VERSION (env)
-    Overrides the emulator version (default "8.2.2", the ffmpeg-dist pin --
-    for cross-stripping any patched qemu works, but the default deliberately
-    matches the consumer whose artifact bytes are version-sensitive). Must be
-    a version tools/qemu/build-qemu.sh supports (8.2.2 or 9.2.4) or have
-    QEMU_SOURCE_SHA256 pinned.
+    Overrides the emulator version (default "11.0.2", the newest pin whose
+    buildkit-direct-execve series is verified upstream: tonistiigi/binfmt
+    ships patches/buildkit-direct-execve-v11.0/ for it, while 11.1.1 has no
+    verified series yet). For cross-stripping any patched qemu works, so the
+    default tracks the newest verified series rather than a consumer's
+    byte-identity pin. Must be a version tools/qemu/build-qemu.sh supports
+    (8.2.2, 9.2.4, or 11.0.2) or have QEMU_SOURCE_SHA256 pinned.
+
+    The out-of-band ffmpeg-dist / openssh-dist pipelines keep their own pins
+    (8.2.2 and 9.2.4) for their byte-identity contracts; this rule's default
+    does not affect them.
 
     This is a repo-rule env var: Bazel reads it only when the repository is
     (re)fetched, so changing it after a build requires `bazel shutdown` and a
@@ -87,7 +93,7 @@ qemu_x86_64 = repository_rule(
             doc = "The patched-qemu build script (tracks changes via the label).",
         ),
         "qemu_version": attr.string(
-            default = "8.2.2",
+            default = "11.0.2",
             doc = "QEMU_VERSION pin; must match a supported tools/qemu pin.",
         ),
         "build_timeout": attr.int(

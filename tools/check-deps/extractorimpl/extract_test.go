@@ -331,7 +331,7 @@ qemu_x86_64 = repository_rule(
             doc = "The patched-qemu build script (tracks changes via the label).",
         ),
         "qemu_version": attr.string(
-            default = "8.2.2",
+            default = "11.0.2",
             doc = "QEMU_VERSION pin; must match a supported tools/qemu pin.",
         ),
         "build_timeout": attr.int(
@@ -352,8 +352,8 @@ qemu_x86_64 = repository_rule(
 		t.Errorf("scrapeBzlPinQemu must not emit a script-pin qemu: %v", deps)
 	}
 	got := deps[0]
-	if got.Category != "bzl-pin" || got.Name != "qemu" || got.Version != "8.2.2" {
-		t.Errorf("bzl-pin qemu dep = %v, want bzl-pin/qemu 8.2.2", got)
+	if got.Category != "bzl-pin" || got.Name != "qemu" || got.Version != "11.0.2" {
+		t.Errorf("bzl-pin qemu dep = %v, want bzl-pin/qemu 11.0.2", got)
 	}
 	if got.Source != "https://download.qemu.org" {
 		t.Errorf("bzl-pin qemu source = %q, want https://download.qemu.org", got.Source)

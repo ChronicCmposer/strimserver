@@ -130,7 +130,7 @@ func syntheticExtract(_ string) ([]common.Dependency, []common.ExtractionUnknown
 		{Category: common.CategoryBaseImage, Name: "alpine", Version: "", Source: "docker.io/library/alpine", File: "MODULE.bazel", DigestPinned: true},
 		{Category: common.CategoryBaseImage, Name: "debian", Version: "20260824T082821Z", Source: "https://snapshot.debian.org/archive/debian", File: "MODULE.bazel"},
 		{Category: common.CategoryScriptPin, Name: "qemu", Version: "9.2.4", Source: "https://download.qemu.org", File: "tools/qemu/build-qemu.sh"},
-		{Category: common.CategoryBzlPin, Name: "qemu", Version: "8.2.2", Source: "https://download.qemu.org", File: "tools/bazel/qemu_x86_64.bzl"},
+		{Category: common.CategoryBzlPin, Name: "qemu", Version: "11.0.2", Source: "https://download.qemu.org", File: "tools/bazel/qemu_x86_64.bzl"},
 		{Category: common.CategoryCIAction, Name: "actions/checkout", Version: "v4", Source: "https://github.com/actions/checkout", File: ".github/workflows/controller-ci.yml"},
 		{Category: common.CategoryToolchain, Name: "Bazel", Version: "9.2.0", Source: ".bazelversion", File: ".bazelversion"},
 		{Category: common.CategoryScriptPin, Name: "no-such-pin", Version: "1.0.0", Source: "x", File: "tools/x/build.sh"},
