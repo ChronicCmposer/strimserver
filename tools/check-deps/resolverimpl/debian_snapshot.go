@@ -4,20 +4,22 @@ import (
 	"strings"
 
 	"strimserver-check-deps/common"
+	"strimserver-check-deps/utilities"
 )
 
 // snapshot.debian.org informational client. Debian source pins carry an exact
 // snapshot timestamp (20260824T082821Z); this is a T3 informational check that
 // reports when a newer snapshot exists, it never drives an update decision.
-// The timestamp pattern lives in common as SnapshotTsRe because the extractor
-// side (parseAPTSourcesList, Stage 3) matches the same pattern and cannot
-// import this package.
+// The timestamp pattern lives in utilities behind the
+// ExtractSnapshotTs/ExtractSnapshotTsAll accessors (the regexp is private)
+// because the extractor side (extractorimpl's parseAPTSourcesList) matches the
+// same pattern and cannot import this package.
 
 // parseDebianSnapshotListing extracts every snapshot timestamp from a
 // snapshot.debian.org listing body. Pure: takes the HTML body and returns
 // timestamp strings.
 func parseDebianSnapshotListing(data []byte) []string {
-	return common.SnapshotTsRe.FindAllString(string(data), -1)
+	return utilities.ExtractSnapshotTsAll(string(data))
 }
 
 // newestDebianSnapshot best-effort fetches the newest snapshot timestamp from

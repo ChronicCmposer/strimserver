@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"strimserver-check-deps/common"
+	"strimserver-check-deps/utilities"
 )
 
 // scanCallArgs returns the argument text of every call to callName in content,
@@ -342,7 +343,7 @@ func parseAPTSourcesList(content, file string) ([]common.Dependency, []common.Ex
 	var deps []common.Dependency
 	var unknowns []common.ExtractionUnknown
 	if args := scanCallArgs(content, "apt.sources_list"); len(args) > 0 {
-		snapshot := common.SnapshotTsRe.FindString(args[0])
+		snapshot := utilities.ExtractSnapshotTs(args[0])
 		if snapshot == "" {
 			unknowns = append(unknowns, common.ExtractionUnknown{File: file, Reason: "apt.sources_list without a Debian snapshot timestamp in its uris"})
 		} else {

@@ -13,7 +13,6 @@ go_library(
         "common/depkey.go",
         "common/extract.go",
         "common/resolve.go",
-        "common/snapshot.go",
         "common/status.go",
         "common/tier.go",
         "common/types.go",
@@ -35,7 +34,10 @@ go_library(
 
 go_test(
     name = "utilities_test",
-    srcs = ["utilities/semver_test.go"],
+    srcs = [
+        "utilities/semver_test.go",
+        "utilities/utilities_test.go",
+    ],
     embed = [":utilities"],
 )
 

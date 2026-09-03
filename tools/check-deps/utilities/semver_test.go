@@ -2,8 +2,8 @@ package utilities
 
 import "testing"
 
-// These tests exercise the version-comparison closure in semver.go and the
-// version/string helpers in utilities.go.
+// These tests exercise only the version-comparison closure in semver.go. The
+// string/date/snapshot helpers in utilities.go moved to utilities_test.go.
 
 // --- semver compare ---------------------------------------------------------
 
@@ -83,40 +83,6 @@ func TestCompareChunksEdgeCases(t *testing.T) {
 	for _, c := range cases {
 		if got := CompareChunks(c.a, c.b); got != c.want {
 			t.Errorf("CompareChunks(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
-		}
-	}
-}
-
-func TestStripTagPrefix(t *testing.T) {
-	cases := map[string]string{
-		"v2.13.2":          "2.13.2",
-		"n13.0.19.0":       "13.0.19.0",
-		"10.3p1":           "10.3p1",
-		"20260824T082821Z": "20260824T082821Z",
-	}
-	for in, want := range cases {
-		if got := StripTagPrefix(in); got != want {
-			t.Errorf("StripTagPrefix(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestLeadingInt(t *testing.T) {
-	cases := []struct {
-		in     string
-		want   int
-		wantOK bool
-	}{
-		{"", 0, false},
-		{"000", 0, true},
-		{"63", 63, true},
-		{"007", 7, true},
-		{"abc", 0, false},
-	}
-	for _, c := range cases {
-		got, ok := LeadingInt(c.in)
-		if got != c.want || ok != c.wantOK {
-			t.Errorf("LeadingInt(%q) = (%d, %v), want (%d, %v)", c.in, got, ok, c.want, c.wantOK)
 		}
 	}
 }

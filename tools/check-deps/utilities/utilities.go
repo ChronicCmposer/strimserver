@@ -83,7 +83,7 @@ func CoreVersion(s string) string {
 }
 
 // date8Re is the single 8-digit YYYYMMDD pattern. It deliberately stays a
-// standalone pattern rather than deriving from SnapshotTsRe's full timestamp
+// standalone pattern rather than deriving from snapshotTsRe's full timestamp
 // ([0-9]{8}T[0-9]{6}Z): ExtractDate must also handle plain 8-digit date tags
 // (e.g. "20260901") that carry no timestamp suffix.
 var date8Re = regexp.MustCompile(`[0-9]{8}`)
@@ -93,4 +93,24 @@ var date8Re = regexp.MustCompile(`[0-9]{8}`)
 // by the Debian/date-tag resolvers and the classification date-tag predicate.
 func ExtractDate(s string) string {
 	return date8Re.FindString(s)
+}
+
+// snapshotTsRe matches a Debian snapshot.debian.org timestamp
+// (YYYYMMDDTHHMMSSZ).
+var snapshotTsRe = regexp.MustCompile(`[0-9]{8}T[0-9]{6}Z`)
+
+// ExtractSnapshotTs returns the first Debian snapshot.debian.org timestamp
+// (YYYYMMDDTHHMMSSZ) inside s, or "" when there is none. It is used by the
+// extractor side (extractorimpl's parseAPTSourcesList) to pull a single
+// timestamp out of an apt.sources_list uri.
+func ExtractSnapshotTs(s string) string {
+	return snapshotTsRe.FindString(s)
+}
+
+// ExtractSnapshotTsAll returns every Debian snapshot.debian.org timestamp
+// (YYYYMMDDTHHMMSSZ) inside s. It is used by the resolver side (resolverimpl's
+// newestDebianSnapshot) to enumerate all timestamps in an archive listing and
+// pick the newest.
+func ExtractSnapshotTsAll(s string) []string {
+	return snapshotTsRe.FindAllString(s, -1)
 }
