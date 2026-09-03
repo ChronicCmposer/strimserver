@@ -50,7 +50,7 @@ package:
 # Requires the GitHub CLI (`gh auth login`).
 GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null)
 release:
-	GIT_TAG=$(GIT_TAG) bazel run //:release
+	GIT_TAG=$(GIT_TAG) bazel run --action_env=GIT_TAG //:release
 
 # Bump the latest vX.Y.Z git tag and push it (tag-based versioning; git tags
 # are the source of truth). Guards: clean tree, on `dev`, synced with
@@ -66,7 +66,7 @@ bump-version:
 # Requires AWS credentials and S3_BUCKET. Runs a single bazel target rather
 # than the individual publish-* targets (one server/analysis pass).
 publish-all:
-	S3_BUCKET=$(S3_BUCKET) bazel run //:publish_all
+	GIT_TAG=$(GIT_TAG) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG //:publish_all
 
 publish-strimserver:
 # The offline fallback clip is bundled directly from MODULE.bazel's
@@ -74,7 +74,7 @@ publish-strimserver:
 # tools/brb-screen/publish.sh.
 # Also uploads the Stream Deck plugin bundle (strimserver-streamdeck-plugin.zip
 # and .tar.gz).
-	S3_BUCKET=$(S3_BUCKET) bazel run //:publish_strimserver
+	GIT_TAG=$(GIT_TAG) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG //:publish_strimserver
 
 publish-iperf3:
 	S3_BUCKET=$(S3_BUCKET) bazel run //tools/bandwidth-test:publish_iperf3
@@ -82,7 +82,7 @@ publish-iperf3:
 # Publish ONLY the Stream Deck plugin bundle to S3 (same object keys as
 # publish-strimserver). Publishes both the .zip and .tar.gz variants.
 publish-streamdeck:
-	S3_BUCKET=$(S3_BUCKET) bazel run //tools/streamdeck-plugin:publish_streamdeck
+	GIT_TAG=$(GIT_TAG) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG //tools/streamdeck-plugin:publish_streamdeck
 
 check-ffmpeg-dist-deps:
 	./tools/ffmpeg-dist/check-deps.sh

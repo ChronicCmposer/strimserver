@@ -2,7 +2,7 @@
   "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
   "UUID": "com.chroniccmposer.strimserver",
   "Name": "Strimserver",
-  "Version": "0.0.0.0",
+  "Version": "__VERSION__",
   "Author": "chroniccmposer",
   "Description": "Control the strimserver pipeline from a Stream Deck.",
   "Category": "strimserver",

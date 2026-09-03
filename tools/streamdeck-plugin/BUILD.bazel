@@ -71,21 +71,44 @@ js_run_binary(
     mnemonic = "Rollup",
 )
 
+# --- Manifest (build-time version injection) --------------------------------
+# The StreamDeck manifest Version field must be exactly four numeric
+# dot-separated segments (schema pattern
+# ^(0|[1-9]\d*)(\.(0|[1-9]\d*)){3}$), so it is derived from the git tag at
+# build time rather than hardcoded. gen-manifest.sh maps:
+#   empty GIT_TAG (dev build) -> 0.0.0.0,  vX.Y.Z -> X.Y.Z.0,
+#   anything malformed        -> hard failure.
+# GIT_TAG reaches the action env via `--action_env=GIT_TAG` (see the Makefile);
+# its value is part of the action key, so dev and tagged builds never share a
+# cache entry. The generated file shadows the checked-in
+# com.chroniccmposer.strimserver.sdPlugin/manifest.json (kept at 0.0.0.0 for
+# dev-loading the source tree), so consumers must use :manifest -- never the
+# source label.
+genrule(
+    name = "manifest",
+    srcs = ["com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl"],
+    tools = ["gen-manifest.sh"],
+    outs = ["com.chroniccmposer.strimserver.sdPlugin/manifest.json"],
+    cmd = "$(location gen-manifest.sh) $(location com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl) $@",
+    visibility = ["//visibility:public"],
+)
+
 # --- Distributable bundle ---------------------------------------------------
 # The Stream Deck plugin ships as its own zip, published ALONGSIDE
 # strimserver-deployment.tar (never inside it). Everything already lives under
-# the com.chroniccmposer.strimserver.sdPlugin/ directory -- source tree
-# (manifest.json + imgs/**) and the :build outs (bin/plugin.js + .map). rules_pkg
-# 1.3.0's default strip_prefix is files_only() (every directory component is
-# dropped, flattening imgs/** and bin/ to the zip root), so it must be
-# overridden: strip_prefix removes the com.chroniccmposer.strimserver.sdPlugin/
-# package dir, and prefix re-adds it as the single top-level directory, so the
-# zip unzips directly into the plugin folder Stream Deck expects. logs/**
-# (runtime logs) is never part of the glob, so it is excluded by construction.
+# the com.chroniccmposer.strimserver.sdPlugin/ directory -- generated
+# manifest (the :manifest genrule above), source imgs/**, and the :build outs
+# (bin/plugin.js + .map). rules_pkg 1.3.0's default strip_prefix is files_only()
+# (every directory component is dropped, flattening imgs/** and bin/ to the zip
+# root), so it must be overridden: strip_prefix removes the
+# com.chroniccmposer.strimserver.sdPlugin/ package dir, and prefix re-adds it as
+# the single top-level directory, so the zip unzips directly into the plugin
+# folder Stream Deck expects. logs/** (runtime logs) is never part of the glob,
+# so it is excluded by construction.
 pkg_files(
     name = "streamdeck_bundle_files",
     srcs = [
-        "com.chroniccmposer.strimserver.sdPlugin/manifest.json",
+        ":manifest",
         ":build",
     ] + glob(["com.chroniccmposer.strimserver.sdPlugin/imgs/**"]),
     strip_prefix = "com.chroniccmposer.strimserver.sdPlugin",
