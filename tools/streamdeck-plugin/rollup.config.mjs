@@ -11,8 +11,6 @@ export default {
     format: "esm",
     sourcemap: true,
   },
-  // Stream Deck supplies Node built-ins; don't bundle them.
-  external: ["ws"],
   plugins: [
     typescript({ tsconfig: "./tsconfig.json" }),
     nodeResolve({ browser: false, exportConditions: ["node"] }),
