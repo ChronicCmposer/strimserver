@@ -1,6 +1,9 @@
 package common
 
-import "slices"
+import (
+	"maps"
+	"slices"
+)
 
 // This file contains the pure tier/status classifier. It has no network or
 // filesystem access: every branch is a pure function of the dependency record
@@ -35,11 +38,12 @@ func NewClassifier(tierPolicies []TierPolicy, baseTierRules []BaseTierRule) *Cla
 // generic semver policy is the fallback.
 func (c *Classifier) Classify(dep Dependency, vi VersionInfo) Resolved {
 	r := Resolved{
-		Dep:    dep,
-		Tier:   c.baseTier(dep),
-		Latest: vi.Version,
-		Date:   vi.Date,
-		Infos:  slices.Clone(vi.Infos),
+		Dep:      dep,
+		Tier:     c.baseTier(dep),
+		Latest:   vi.Version,
+		Date:     vi.Date,
+		Infos:    slices.Clone(vi.Infos),
+		Metadata: maps.Clone(vi.Metadata),
 	}
 
 	// Resolution failure: never fatal, surface the reason.

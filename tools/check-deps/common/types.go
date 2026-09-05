@@ -52,6 +52,8 @@ const (
 	CategoryBzlPin      = "bzl-pin"
 	CategoryGo          = "go"
 	CategoryNPM         = "npm"
+	// CategoryAMI covers pinned AWS AMI ids (opaque strings, not semvers).
+	CategoryAMI = "ami"
 )
 
 // ExtractionUnknown records an entry that could not be extracted. Extraction
@@ -67,11 +69,11 @@ type ExtractionUnknown struct {
 }
 
 // VersionInfo is the pure datum a resolver produces: the latest upstream
-// version, an optional release date, informational notes, and the error when
-// resolution failed (never fatal, always surfaced as "unknown"). The fields
-// are exported because resolvers construct this value directly; Classify
-// treats it as an untrusted boundary input and clones the slice before
-// storing it.
+// version, an optional release date, informational notes, optional structured
+// metadata, and the error when resolution failed (never fatal, always surfaced
+// as "unknown"). The fields are exported because resolvers construct this
+// value directly; Classify treats it as an untrusted boundary input and clones
+// the slice and map before storing them.
 type VersionInfo struct {
 	// Version is the latest/wanted version ("" when there is none to compare).
 	Version string
@@ -79,6 +81,10 @@ type VersionInfo struct {
 	Date string
 	// Infos are informational notes (yanked, deprecated, staleness, exemptions).
 	Infos []string
+	// Metadata carries optional structured metadata about the resolved version
+	// or pin, rendered by the output (e.g. AMI release names and creation
+	// dates); nil when none.
+	Metadata map[string]string
 	// Err is the resolution failure; nil means success.
 	Err error
 }

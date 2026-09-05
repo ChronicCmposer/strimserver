@@ -1,12 +1,13 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >
-  strimserver durable infrastructure: a security group and an IAM instance
-  profile for ephemeral GPU streaming instances, with an OPTIONAL self-contained
-  networking layer (VPC + public subnet + internet gateway). Instances are
-  created and terminated imperatively by deploy/aws/launch and
-  deploy/aws/terminate, which read this stack's outputs. No EC2 launch template
-  is created or required.
+  strimserver durable infrastructure: a security group, an IAM instance profile
+  for ephemeral GPU streaming instances, and the strimserver IAM service
+  account (read-only SSM access for the check-deps AMI resolver), with an
+  OPTIONAL self-contained networking layer (VPC + public subnet + internet
+  gateway). Instances are created and terminated imperatively by
+  deploy/aws/launch and deploy/aws/terminate, which read this stack's outputs.
+  No EC2 launch template is created or required.
 
 Parameters:
   ProjectName:
@@ -288,6 +289,35 @@ Resources:
     Properties:
       Roles: [!Ref InstanceRole]
 
+  # ----------------------------------------------------------------------------
+  # IAM service account (always) - strimserver check-deps AMI resolver
+  # ----------------------------------------------------------------------------
+  StrimserverServiceUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: strimserver
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  StrimserverDlamiReadPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: strimserver-ssm-dlami-readonly
+      # Public SSM parameters carry an empty account segment in their ARN,
+      # hence the `::` before `parameter` (AWS's documented public ARN shape).
+      Users:
+        - !Ref StrimserverServiceUser
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
+          - Effect: Allow
+            Action: ec2:DescribeImages
+            Resource: "*"
+
   # Optional: experimental OpenSSH port (separate sshd, see tools/openssh).
   # Added as a standalone ingress rule so it is cleanly conditional and does
   # not collide with the inline rules on the security group above.
@@ -341,3 +371,10 @@ Outputs:
     Value: !Ref ManagedSubnet
     Export:
       Name: !Sub "${AWS::StackName}-SubnetId"
+
+  StrimserverServiceUserArn:
+    Description: >
+      ARN of the strimserver IAM service account used by the check-deps AMI
+      resolver (read-only ssm:GetParameter on the DLAMI parameter). This user
+      has no console/SSO access; programmatic access keys only.
+    Value: !GetAtt StrimserverServiceUser.Arn

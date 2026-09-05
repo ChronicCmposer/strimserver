@@ -34,6 +34,11 @@ var (
 	nvCodecHeadersRe = regexp.MustCompile(`NV_CODEC_HEADERS_TAG:[-=]([^"}]+)\}`)
 	cudaManifestRe   = regexp.MustCompile(`CUDA_MANIFEST_URL:[-=][^"}]*redistrib_([0-9]+\.[0-9]+\.[0-9]+)\.json`)
 	debianSnapshotRe = regexp.MustCompile(`DEBIAN_SNAPSHOT:[-=]([0-9]{8}T[0-9]{6}Z)\}`)
+
+	// dlamiAmiIDRe targets the pinned AMI constant in deploy/aws/launch. The
+	// launch default is a hard-coded ami id (not the floating SSM resolution),
+	// so the regex reads exactly the DEFAULT_AMI_ID assignment.
+	dlamiAmiIDRe = regexp.MustCompile(`DEFAULT_AMI_ID = "(ami-[0-9a-f]{8,17})"`)
 )
 
 // ExtractScripts scrapes version pins out of the pinned-build shell scripts.
@@ -54,6 +59,7 @@ func ExtractScripts(root string) ([]common.Dependency, []common.ExtractionUnknow
 		{RelPath: "tools/ffmpeg-dist/publish.sh", Parse: scrapeFfmpeg},
 		{RelPath: "tools/ffmpeg-dist/publish.sh", Parse: scrapeQemuConsumer("ffmpeg-dist")},
 		{RelPath: "tools/bazel/qemu_x86_64.bzl", Parse: scrapeBzlPinQemu},
+		{RelPath: "deploy/aws/launch", Parse: scrapeDlami},
 	})
 }
 
@@ -133,6 +139,21 @@ func scrapeBzlPinQemu(data []byte, file string) ([]common.Dependency, []common.E
 		re:       bzlQemuVersionRe,
 		source:   "https://download.qemu.org",
 		note:     "qemu_x86_64 repo-rule default for cross-stripping amd64 mediamtx on non-x86_64 hosts",
+	}})
+}
+
+// scrapeDlami extracts the pinned us-east-2 Deep Learning AMI id from
+// deploy/aws/launch. The pin replaces the former /latest SSM float, so the
+// AMI is tracked like any other pinned dependency: check-deps compares it to
+// the current upstream id and flags when it goes stale.
+func scrapeDlami(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
+	content := string(data)
+	return scrapeScript(content, file, []pinSpec{{
+		name:     "dlami",
+		category: common.CategoryAMI,
+		re:       dlamiAmiIDRe,
+		source:   "https://aws.amazon.com/ec2/",
+		note:     "pinned AWS Deep Learning Base OSS Nvidia Driver GPU AMI (Amazon Linux 2023), x86_64, us-east-2",
 	}})
 }
 

@@ -366,6 +366,42 @@ qemu_x86_64 = repository_rule(
 	}
 }
 
+// TestScrapeDlami proves deploy/aws/launch's pinned DEFAULT_AMI_ID yields
+// exactly one ami/dlami dependency carrying the pinned id, the launch file,
+// and a us-east-2 annotation.
+func TestScrapeDlami(t *testing.T) {
+	const script = `DEFAULT_AMI_ID = "ami-07626c4fc6797c8e0"`
+	deps, unknowns := scrapeDlami([]byte(script), "deploy/aws/launch")
+	if len(unknowns) != 0 {
+		t.Fatalf("scrapeDlami unknowns = %v, want none", unknowns)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("scrapeDlami deps = %v, want exactly one", deps)
+	}
+	got := deps[0]
+	if got.Category != common.CategoryAMI || got.Name != "dlami" || got.Version != "ami-07626c4fc6797c8e0" {
+		t.Errorf("dlami dep = %v, want ami/dlami ami-07626c4fc6797c8e0", got)
+	}
+	if got.File != "deploy/aws/launch" {
+		t.Errorf("dlami file = %q, want deploy/aws/launch", got.File)
+	}
+	if !strings.Contains(got.Note, "us-east-2") {
+		t.Errorf("dlami note = %q, want one mentioning us-east-2", got.Note)
+	}
+}
+
+// TestScrapeDlamiMissingPin proves a launch file without the pinned constant
+// surfaces as an extraction unknown, never a silent drop.
+func TestScrapeDlamiMissingPin(t *testing.T) {
+	deps, unknowns := scrapeDlami([]byte("# no DEFAULT_AMI_ID here"), "deploy/aws/launch")
+	if len(deps) != 0 {
+		t.Fatalf("scrapeDlami deps = %v, want none", deps)
+	}
+	if len(unknowns) != 1 || unknowns[0].Reason != "pin not found: dlami" {
+		t.Errorf("scrapeDlami unknowns = %v, want the dlami pin-not-found unknown", unknowns)
+	}
+}
+
 func TestScrapeOpenssh(t *testing.T) {
 	const script = `
 OPENSSH_TAG="${OPENSSH_TAG:-V_10_5_P1}"

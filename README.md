@@ -783,7 +783,7 @@ launch template**. `terminate` tears down instances by their
 `Project` tag.
 
 Deploy (or update) the infrastructure stack first.
-`deploy/aws/deploy-template` shows the call; at minimum
+`deploy/aws/deploy-infra` shows the call; at minimum
 supply your operator CIDR (set `DeploymentBucketName` only
 when you deliver the bundle from S3 — omit it for an HTTPS
 release asset or a local file):
@@ -791,8 +791,14 @@ release asset or a local file):
 ```bash
 OPERATOR_CIDR="203.0.113.4/32" \
 S3_BUCKET_NAME="" \
-deploy/aws/deploy-template
+deploy/aws/deploy-infra
 ```
+
+`deploy-infra` deploys the stack and then prints the
+`[default]` credential block for the strimserver IAM service
+account (the user the check-deps AMI resolver reads). Paste
+that block into the local `~/.aws/credentials` file and set
+the region in the local `~/.aws/config`.
 
 Then configure `.env` and launch. `launch` resolves the
 security group, instance profile, and (when the stack

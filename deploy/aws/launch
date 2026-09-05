@@ -21,8 +21,10 @@ Env vars (typically sourced from deploy/aws/.env):
   KEY_NAME              EC2 key pair name for SSH (required)
   SUBNET_ID             subnet in the SG's VPC (optional; auto-selected if unset)
   INSTANCE_TYPE         default g6.xlarge (T4 / sm_75 - matches the default FFmpeg build)
-  AMI_ID                explicit AMI id (default: resolve:ssm:<DLAMI_SSM_PARAM>)
-  DLAMI_SSM_PARAM       SSM path to the AL2023 GPU DLAMI (sensible default below)
+  AMI_ID                explicit AMI id (default: DEFAULT_AMI_ID, the pinned
+                        us-east-2 AL2023 GPU DLAMI below)
+  DLAMI_SSM_PARAM       optional override: resolve the AL2023 GPU DLAMI via this
+                        SSM path instead of the pinned DEFAULT_AMI_ID (us-east-2)
   AWS_REGION            optional; otherwise your CLI's configured region is used
   SSH_HOST              hostname --wait offers to map in /etc/hosts (default:
                         PROJECT_NAME; ignored when it is already an IP address)
@@ -37,9 +39,20 @@ import sys
 import time
 from dataclasses import dataclass
 
-# Public SSM parameter for the latest x86_64 Amazon Linux 2023 GPU DLAMI
-# ("Deep Learning Base OSS Nvidia Driver GPU AMI"): ships the NVIDIA driver,
-# containerd, and the NVIDIA container toolkit (CDI) strimserver needs.
+# Pinned x86_64 Amazon Linux 2023 GPU DLAMI ("Deep Learning Base OSS Nvidia
+# Driver GPU AMI") for us-east-2: ships the NVIDIA driver, containerd, and the
+# NVIDIA container toolkit (CDI) strimserver needs. Pinned (not the /latest SSM
+# float) so the containerd runtime is deterministic across launches.
+#
+# NOTE: value is the base-oss-nvidia-driver GPU DLAMI (AL2023 x86_64) for
+# us-east-2, resolved via SSM on 2026-09-04 (the current date). Confirm it with
+#   aws ssm get-parameter --region us-east-2 --name "<DEFAULT_DLAMI_SSM_PARAM>"
+# if it ever needs re-resolving; tools/check-deps (ami/dlami, T1) flags when it
+# goes stale. Setting AMI_ID (or DLAMI_SSM_PARAM) overrides the pin.
+DEFAULT_AMI_ID = "ami-005d77a2bbebf1a47"
+
+# Explicit override only: the /latest SSM parameter for the same DLAMI family.
+# Setting DLAMI_SSM_PARAM re-enables floating resolution instead of the pin.
 DEFAULT_DLAMI_SSM_PARAM = (
     "/aws/service/deeplearning/ami/x86_64/"
     "base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
@@ -552,7 +565,15 @@ def launch_instance(cfg, use_spot, wait):
         sys.exit("KEY_NAME is required (an EC2 key pair name for SSH access).")
 
     subnet = resolve_subnet(cfg, sg)
-    ami = cfg.ami or f"resolve:ssm:{cfg.dlami_ssm_param}"
+    # Explicit overrides win in order: AMI_ID, then a custom DLAMI_SSM_PARAM,
+    # then the pinned DEFAULT_AMI_ID (us-east-2). The /latest SSM float is no
+    # longer the default, so the containerd runtime is deterministic.
+    if cfg.ami:
+        ami = cfg.ami
+    elif cfg.dlami_ssm_param != DEFAULT_DLAMI_SSM_PARAM:
+        ami = f"resolve:ssm:{cfg.dlami_ssm_param}"
+    else:
+        ami = DEFAULT_AMI_ID
 
     # Fold subnet + security group + public-IP request into a single primary NIC.
     # AWS forbids combining --associate-public-ip-address (or this NIC form) with

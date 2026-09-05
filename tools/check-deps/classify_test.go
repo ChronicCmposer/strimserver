@@ -168,6 +168,36 @@ func TestClassifyDebianDateTagUnparseable(t *testing.T) {
 	}
 }
 
+func TestClassifyAMI(t *testing.T) {
+	c := testClassifier()
+	pinned := "ami-07626c4fc6797c8e0"
+	dep := common.Dependency{Category: common.CategoryAMI, Name: "dlami", Version: pinned, File: "deploy/aws/launch"}
+
+	// Pinned == latest -> ok, resting T1.
+	r := c.Classify(dep, common.VersionInfo{Version: pinned})
+	if r.Status != common.StatusOK || r.Tier != common.TierT1 {
+		t.Errorf("current AMI pin: got %s/%s, want ok/T1", r.Status, r.Tier)
+	}
+
+	// Pinned != latest -> update; the resting T1 tier stays T1.
+	r = c.Classify(dep, common.VersionInfo{Version: "ami-0abcdefabcdefabcd"})
+	if r.Status != common.StatusUpdate || r.Tier != common.TierT1 {
+		t.Errorf("stale AMI pin: got %s/%s, want update/T1", r.Status, r.Tier)
+	}
+}
+
+func TestClassifyAMIDoesNotClaimOtherCategories(t *testing.T) {
+	c := testClassifier()
+	// A script-pin must still classify via the semver fallback, never the AMI
+	// string-inequality policy (which would report unknown/update for any
+	// non-ami value).
+	dep := common.Dependency{Category: common.CategoryScriptPin, Name: "ffmpeg", Version: "8.0"}
+	r := c.Classify(dep, common.VersionInfo{Version: "8.1"})
+	if r.Status != common.StatusUpdate {
+		t.Errorf("non-ami dep classified by classifyAMI: got %s, want semver update", r.Status)
+	}
+}
+
 func TestClassifySemverPinnedAheadOfLatest(t *testing.T) {
 	c := testClassifier()
 	dep := common.Dependency{Category: common.CategoryScriptPin, Name: "some-tool", Version: "2.0.0"}

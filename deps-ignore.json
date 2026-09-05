@@ -44,25 +44,19 @@
   {
     "id": "go/github.com/containerd/typeurl/v2",
     "file": "core/controller/go.mod",
-    "reason": "typeurl v2.3.0 removes gogo support but is not yet coordinated by a containerd release; containerd/v2 v2.3.4 still pins v2.2.3. Wait for a containerd release that coordinates these satellite modules.",
+    "reason": "typeurl v2.3.0 removes gogo support but is not yet coordinated by a containerd release; containerd/v2 v2.3.5 still pins v2.2.3. Wait for a containerd release that coordinates these satellite modules.",
     "until": "2027-03-31"
   },
   {
     "id": "go/github.com/containerd/ttrpc",
     "file": "core/controller/go.mod",
-    "reason": "ttrpc v1.2.9 forces grpc 1.80->1.81.1 and is not yet coordinated by a containerd release; containerd/v2 v2.3.4 still pins v1.2.8. Wait for a containerd release.",
-    "until": "2027-03-31"
-  },
-  {
-    "id": "go/github.com/containerd/platforms",
-    "file": "core/controller/go.mod",
-    "reason": "platforms v1.0.0-rc.5 is a Windows-only compat fix, irrelevant to the linux/amd64 controller, and not yet coordinated by a containerd release. Wait for a containerd release.",
+    "reason": "ttrpc v1.2.9 forces grpc 1.80->1.81.1 and is not yet coordinated by a containerd release; containerd/v2 v2.3.5 still pins v1.2.8. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
     "id": "go/github.com/Microsoft/hcsshim",
     "file": "core/controller/go.mod",
-    "reason": "hcsshim is an indirect Windows-container runtime dep pinned by containerd/v2 v2.3.4's go.mod requirements; v0.15.0-rc.4 is not yet coordinated by a containerd release. Resolved via MVS, not independently editable. Wait for a containerd release.",
+    "reason": "hcsshim is an indirect Windows-container runtime dep pinned by containerd/v2 v2.3.5's go.mod requirements; v0.15.0-rc.4 is not yet coordinated by a containerd release. Resolved via MVS, not independently editable. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
@@ -74,7 +68,7 @@
   {
     "id": "go/github.com/fsnotify/fsnotify",
     "file": "core/controller/go.mod",
-    "reason": "fsnotify is an indirect dep used by containerd's watch-based event handling; it is pinned by containerd/v2 v2.3.4's go.mod requirements and not independently editable. Wait for a containerd release.",
+    "reason": "fsnotify is an indirect dep used by containerd's watch-based event handling; it is pinned by containerd/v2 v2.3.5's go.mod requirements and not independently editable. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
@@ -86,31 +80,31 @@
   {
     "id": "go/github.com/klauspost/compress",
     "file": "core/controller/go.mod",
-    "reason": "klauspost/compress is an indirect dep pinned by containerd/v2 v2.3.4 (snappy/zstd layer compression); it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "reason": "klauspost/compress is an indirect dep pinned by containerd/v2 v2.3.5 (snappy/zstd layer compression); it is resolved via MVS and not independently editable. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
     "id": "go/github.com/moby/sys/sequential",
     "file": "core/controller/go.mod",
-    "reason": "moby/sys/sequential is a Windows file-sequencing helper pinned by containerd/v2 v2.3.4's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "reason": "moby/sys/sequential is a Windows file-sequencing helper pinned by containerd/v2 v2.3.5's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
     "id": "go/github.com/moby/sys/user",
     "file": "core/controller/go.mod",
-    "reason": "moby/sys/user is a user-namespace helper pinned by containerd/v2 v2.3.4's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "reason": "moby/sys/user is a user-namespace helper pinned by containerd/v2 v2.3.5's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
     "id": "go/github.com/moby/sys/userns",
     "file": "core/controller/go.mod",
-    "reason": "moby/sys/userns is a user-namespace helper pinned by containerd/v2 v2.3.4's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "reason": "moby/sys/userns is a user-namespace helper pinned by containerd/v2 v2.3.5's go.mod requirements; it is resolved via MVS and not independently editable. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
     "id": "go/github.com/sirupsen/logrus",
     "file": "core/controller/go.mod",
-    "reason": "logrus is containerd's logging library, pinned by containerd/v2 v2.3.4's go.mod requirements; v1.10.2 is not yet coordinated. Resolved via MVS, not independently editable. Wait for a containerd release.",
+    "reason": "logrus is containerd's logging library, pinned by containerd/v2 v2.3.5's go.mod requirements; v1.10.2 is not yet coordinated. Resolved via MVS, not independently editable. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
@@ -140,7 +134,7 @@
   {
     "id": "go/go.yaml.in/yaml/v2",
     "file": "core/controller/go.mod",
-    "reason": "yaml/v2 is an indirect dep pinned by containerd/v2 v2.3.4 (cri/plugin config parsing); it is resolved via MVS and not independently editable. Wait for a containerd release.",
+    "reason": "yaml/v2 is an indirect dep pinned by containerd/v2 v2.3.5 (cri/plugin config parsing); it is resolved via MVS and not independently editable. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
@@ -182,13 +176,25 @@
   {
     "id": "go/google.golang.org/grpc",
     "file": "core/controller/go.mod",
-    "reason": "grpc is pinned by containerd/v2 v2.3.4's go.mod requirements (containerd's RPC layer); bumping to v1.83.2 must be coordinated by a containerd release and with the otel family. Wait for a containerd release.",
+    "reason": "grpc is pinned by containerd/v2 v2.3.5's go.mod requirements (containerd's RPC layer); bumping to v1.83.2 must be coordinated by a containerd release and with the otel family. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
     "id": "go/google.golang.org/protobuf",
     "file": "core/controller/go.mod",
     "reason": "protobuf is the message runtime pinned transitively via grpc's go.mod requirements; the current pseudo-version tracks grpc's own pin and is not independently editable. Wait for a grpc release.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/tags.cncf.io/container-device-interface",
+    "file": "core/controller/go.mod",
+    "reason": "CDI is an indirect dep pinned by containerd/v2 v2.3.5's pkg/cdi wrapper (the controller only calls cdi.WithCDIDevices); v1.1.1 is not yet required by the module graph so MVS keeps v1.1.0. Re-evaluate when a containerd release coordinates it.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/tags.cncf.io/container-device-interface/specs-go",
+    "file": "core/controller/go.mod",
+    "reason": "specs-go is the CDI spec types module pinned alongside container-device-interface by containerd/v2 v2.3.5's pkg/cdi wrapper; v1.1.1 is not yet required by the module graph so MVS keeps v1.1.0. Re-evaluate when a containerd release coordinates it.",
     "until": "2027-03-31"
   }
 ]

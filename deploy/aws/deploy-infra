@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# deploy-infra: deploy the strimserver durable CloudFormation stack, then
+# ensure the strimserver IAM service account has a usable access key and print it.
+#
+# RUN WITH YOUR OWN ADMINISTRATOR CREDENTIALS. Idempotent: the stack deploy is
+# declarative (a no-op when nothing changed), and the access-key step rotates to
+# exactly one fresh key and prints the [default] credential block each run (an
+# IAM secret can only be shown once). Paste the printed block into the local
+# ~/.aws/credentials file the strimserver check-deps AMI resolver reads, and set
+# the region in the local ~/.aws/config.
+set -euo pipefail
+
+# --- Env-driven tunables (empty = omit / use defaults) ------------------------
+OPERATOR_CIDR="${OPERATOR_CIDR:-}"
+S3_BUCKET_NAME="${S3_BUCKET_NAME:-}"
+IAM_USER="${IAM_USER:-strimserver}"
+CFN_STACK_NAME="${CFN_STACK_NAME:-strimserver}"
+# ------------------------------------------------------------------------------
+
+command -v aws >/dev/null 2>&1 \
+  || { echo "deploy-infra: ERROR: aws CLI not found on PATH" >&2; exit 1; }
+aws sts get-caller-identity >/dev/null \
+  || { echo "deploy-infra: ERROR: not authenticated; configure AWS_PROFILE / credentials first" >&2; exit 1; }
+
+log() { printf 'deploy-infra: %s\n' "$*" >&2; }
+
+# --- 1. Deploy the durable CloudFormation stack -------------------------------
+aws cloudformation deploy \
+  --template-file deploy/aws/strimserver-infra.yaml \
+  --stack-name "$CFN_STACK_NAME" \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+      CreateNetwork="true" \
+      OperatorCidr="$OPERATOR_CIDR" \
+      IngestCidr="$OPERATOR_CIDR" \
+      EnableExperimentalSsh="true" \
+      DeploymentBucketName="$S3_BUCKET_NAME"   # omit when using https/local deploy
+
+# --- 2. Ensure the strimserver service account has a usable access key --------
+# The IAM user and its read-only ssm:GetParameter policy are created by the stack
+# above; CloudFormation cannot create IAM access keys, so create/rotate one here.
+if ! aws iam get-user --user-name "$IAM_USER" >/dev/null 2>&1; then
+  echo "deploy-infra: ERROR: IAM user '$IAM_USER' not found after stack deploy" >&2
+  exit 1
+fi
+
+EXISTING="$(aws iam list-access-keys --user-name "$IAM_USER" --query 'AccessKeyMetadata[].AccessKeyId' --output text)"
+if [ -n "$EXISTING" ]; then
+  log "rotating existing access key(s): $(echo "$EXISTING" | tr '\t' ' ')"
+  for key in $EXISTING; do
+    aws iam delete-access-key --user-name "$IAM_USER" --access-key-id "$key"
+  done
+fi
+
+log "creating access key for '$IAM_USER'"
+read -r ACCESS_KEY_ID SECRET < <(aws iam create-access-key --user-name "$IAM_USER" \
+  --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text)
+
+printf '\n[default]\naws_access_key_id = %s\naws_secret_access_key = %s\n' \
+  "$ACCESS_KEY_ID" "$SECRET"
+
+log "done. Paste the [default] block above into the local ~/.aws/credentials file the strimserver check-deps AMI resolver reads."
+log "Set the region in the local ~/.aws/config file the strimserver check-deps AMI resolver reads."

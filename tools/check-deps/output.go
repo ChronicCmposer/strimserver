@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -20,20 +21,21 @@ import (
 // field carries the typed enum for the console renderer (never serialized, no
 // json tag).
 type finding struct {
-	Category    string   `json:"category"`
-	Name        string   `json:"name"`
-	Current     string   `json:"current"`
-	Wanted      string   `json:"wanted"`
-	Latest      string   `json:"latest"`
-	Tier        string   `json:"tier"`
-	Source      string   `json:"source"`
-	URL         string   `json:"url"`
-	ReleaseDate string   `json:"releaseDate,omitempty"`
-	Status      string   `json:"status"`
-	Ignored     bool     `json:"ignored"`
-	File        string   `json:"file,omitempty"`
-	Reasons     []string `json:"reasons,omitempty"`
-	Infos       []string `json:"infos,omitempty"`
+	Category    string            `json:"category"`
+	Name        string            `json:"name"`
+	Current     string            `json:"current"`
+	Wanted      string            `json:"wanted"`
+	Latest      string            `json:"latest"`
+	Tier        string            `json:"tier"`
+	Source      string            `json:"source"`
+	URL         string            `json:"url"`
+	ReleaseDate string            `json:"releaseDate,omitempty"`
+	Status      string            `json:"status"`
+	Ignored     bool              `json:"ignored"`
+	File        string            `json:"file,omitempty"`
+	Reasons     []string          `json:"reasons,omitempty"`
+	Infos       []string          `json:"infos,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 
 	tier common.Tier
 }
@@ -116,6 +118,7 @@ func toFinding(r common.Resolved) finding {
 		File:        r.Dep.File,
 		Reasons:     slices.Clone(r.Reasons),
 		Infos:       slices.Clone(r.Infos),
+		Metadata:    maps.Clone(r.Metadata),
 		tier:        r.Tier.Normalized(),
 	}
 }
@@ -300,6 +303,15 @@ func writeFindingSection(b *strings.Builder, title string, findings []finding) {
 		}
 		if len(f.Infos) > 0 {
 			fmt.Fprintf(b, "  | %s", strings.Join(f.Infos, " | "))
+		}
+		if len(f.Metadata) > 0 {
+			keys := slices.Collect(maps.Keys(f.Metadata))
+			slices.Sort(keys)
+			pairs := make([]string, 0, len(keys))
+			for _, k := range keys {
+				pairs = append(pairs, k+"="+f.Metadata[k])
+			}
+			fmt.Fprintf(b, "  | metadata: %s", strings.Join(pairs, " | "))
 		}
 		fmt.Fprintf(b, "\n")
 	}

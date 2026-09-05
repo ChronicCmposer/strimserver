@@ -42,10 +42,11 @@ const testCacheTTL = 24 * time.Hour
 // the phase-3 unit tests.
 func testClassifier() *common.Classifier {
 	return common.NewClassifier(
-		[]common.TierPolicy{classifyFloatingBaseImage, classifyCIAction, classifyDateTag, classifySemver},
+		[]common.TierPolicy{classifyFloatingBaseImage, classifyCIAction, classifyDateTag, classifyAMI, classifySemver},
 		[]common.BaseTierRule{
 			{Category: common.CategoryBaseImage, Tier: common.TierT1},
 			{Category: common.CategoryRuntime, Tier: common.TierT1},
+			{Category: common.CategoryAMI, Tier: common.TierT1},
 			{Category: common.CategoryBazelModule, Tier: common.TierT2},
 			{Category: common.CategoryToolchain, Tier: common.TierT2},
 			{Category: common.CategoryCIAction, Tier: common.TierT2},

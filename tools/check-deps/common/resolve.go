@@ -37,4 +37,7 @@ type Resolved struct {
 	// Infos carry informational notes that are not failures: yanked or
 	// deprecated versions, branch staleness, exemption rationale.
 	Infos []string
+	// Metadata carries informational structured metadata surfaced to the
+	// report, e.g. AMI release names/dates; nil when none.
+	Metadata map[string]string
 }

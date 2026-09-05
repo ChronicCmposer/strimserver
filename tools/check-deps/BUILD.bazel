@@ -53,6 +53,7 @@ go_library(
     name = "resolverimpl",
     srcs = [
         "resolverimpl/alpine.go",
+        "resolverimpl/aws.go",
         "resolverimpl/bcr.go",
         "resolverimpl/debian_snapshot.go",
         "resolverimpl/dockerhub.go",
@@ -74,6 +75,7 @@ go_library(
 go_test(
     name = "resolverimpl_test",
     srcs = [
+        "resolverimpl/aws_test.go",
         "resolverimpl/nativetools_test.go",
         "resolverimpl/registry_test.go",
     ],

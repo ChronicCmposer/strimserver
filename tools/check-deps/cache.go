@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,9 +40,10 @@ func newCache(opts *Options, root string) *Cache {
 }
 
 type cacheEntry struct {
-	Version string   `json:"version"`
-	Date    string   `json:"date,omitempty"`
-	Infos   []string `json:"infos,omitempty"`
+	Version  string            `json:"version"`
+	Date     string            `json:"date,omitempty"`
+	Infos    []string          `json:"infos,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 type cacheFile struct {
@@ -69,17 +71,19 @@ func cacheKey(dep common.Dependency) string {
 // written.
 func versionInfoToEntry(vi common.VersionInfo) cacheEntry {
 	return cacheEntry{
-		Version: vi.Version,
-		Date:    vi.Date,
-		Infos:   slices.Clone(vi.Infos),
+		Version:  vi.Version,
+		Date:     vi.Date,
+		Infos:    slices.Clone(vi.Infos),
+		Metadata: maps.Clone(vi.Metadata),
 	}
 }
 
 func entryToVersionInfo(e cacheEntry) common.VersionInfo {
 	return common.VersionInfo{
-		Version: e.Version,
-		Date:    e.Date,
-		Infos:   slices.Clone(e.Infos),
+		Version:  e.Version,
+		Date:     e.Date,
+		Infos:    slices.Clone(e.Infos),
+		Metadata: maps.Clone(e.Metadata),
 	}
 }
 

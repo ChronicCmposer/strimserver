@@ -77,6 +77,23 @@ func classifyDateTag(r common.Resolved, dep common.Dependency) (common.Resolved,
 	return r, true
 }
 
+// classifyAMI handles AMI pins (category "ami"): AMI ids are opaque strings,
+// not semvers, so they compare by string inequality. A pin that differs from
+// the resolved upstream id is an update at the resting tier (T1 stays T1); an
+// equal id is current. Register it before classifySemver so ami pins never
+// fall through to the semver compare.
+func classifyAMI(r common.Resolved, dep common.Dependency) (common.Resolved, bool) {
+	if dep.Category != common.CategoryAMI {
+		return r, false
+	}
+	if dep.Version != r.Latest {
+		markUpdate(&r, updateTier(r.Tier, false))
+		return r, true
+	}
+	r.Status = common.StatusOK
+	return r, true
+}
+
 // classifySemver applies the generic semver compare to every dependency no
 // policy claimed. It is the unconditional fallback policy: it always claims
 // the dependency, so its ok flag is always true.

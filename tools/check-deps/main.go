@@ -141,6 +141,7 @@ func main() {
 		networkedDep(Matches(common.CategoryScriptPin, "CUDA"), resolverimpl.NvidiaResolve(fetcher)),
 		networkedDep(Matches(common.CategoryScriptPin, "distlib"), resolverimpl.PypiResolve(fetcher)),
 		networkedDep(matchesCategory(common.CategoryCIAction), resolverimpl.GithubActionResolve(fetcher)),
+		networkedDep(Matches(common.CategoryAMI, "dlami"), resolverimpl.DLAMIResolve(fetcher, opts.NativeToolTimeout)),
 		noopDep(matchesCategory(common.CategoryToolchain), resolverimpl.ToolchainResolve),
 	}
 
@@ -150,10 +151,11 @@ func main() {
 	}
 
 	classifier := common.NewClassifier(
-		[]common.TierPolicy{classifyFloatingBaseImage, classifyCIAction, classifyDateTag, classifySemver},
+		[]common.TierPolicy{classifyFloatingBaseImage, classifyCIAction, classifyDateTag, classifyAMI, classifySemver},
 		[]common.BaseTierRule{
 			{Category: common.CategoryBaseImage, Tier: common.TierT1},
 			{Category: common.CategoryRuntime, Tier: common.TierT1},
+			{Category: common.CategoryAMI, Tier: common.TierT1},
 			{Category: common.CategoryBazelModule, Tier: common.TierT2},
 			{Category: common.CategoryToolchain, Tier: common.TierT2},
 			{Category: common.CategoryCIAction, Tier: common.TierT2},
