@@ -5,7 +5,10 @@ Matches running/pending instances tagged Project=<PROJECT_NAME> (default
 strimserver) - the same tag deploy/aws/launch applies. Override the tag value
 with PROJECT_NAME, or let it come from the CloudFormation stack's ProjectName
 output (CFN_STACK_NAME, default strimserver).
+
+Pass -y/--yes to skip the confirmation prompt (headless / automation use).
 """
+import argparse
 import os
 import subprocess
 import sys
@@ -48,6 +51,12 @@ def get_running_instances(project):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Terminate running strimserver instances found by tag Project=<name>.")
+    parser.add_argument("-y", "--yes", action="store_true",
+                        help="skip the interactive confirmation prompt")
+    args = parser.parse_args()
+
     project = project_name()
     instance_ids = get_running_instances(project)
     if not instance_ids:
@@ -55,10 +64,11 @@ def main():
         sys.exit(0)
 
     print(f"Terminating (Project={project}): {', '.join(instance_ids)}")
-    confirm = input("Type 'yes' to confirm termination: ").strip().lower()
-    if confirm != "yes":
-        print("Aborted.")
-        sys.exit(1)
+    if not args.yes:
+        confirm = input("Type 'yes' to confirm termination: ").strip().lower()
+        if confirm != "yes":
+            print("Aborted.")
+            sys.exit(1)
 
     aws(["ec2", "terminate-instances", "--instance-ids"] + instance_ids)
     subprocess.run(["date"], check=True)
