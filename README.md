@@ -442,7 +442,7 @@ env-overridable default `QEMU_VERSION="${QEMU_VERSION:-8.2.2}"`; the
 builder verifies the source tarball's sha256 for the pinned version
 (8.2.2, 9.2.4, 11.0.2, and 11.0.4 are all mapped) and caches the built binary at a
 version-stamped path,
-`${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist/qemu-x86_64-patched-${QEMU_VERSION}`,
+`${XDG_CACHE_HOME:-$HOME/.cache}/qemu/qemu-x86_64-patched-${QEMU_VERSION}`,
 so the two consumers never share a qemu binary:
 `tools/ffmpeg-dist/publish.sh` pins **qemu 8.2.2** for byte-identical
 reproducibility (qemu 8.1.5 exposes a different guest CPUID — leaf

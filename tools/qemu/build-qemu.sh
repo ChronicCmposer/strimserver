@@ -31,7 +31,7 @@
 #                      hand-port), 9.2.4 -> qemu-patches (v9.2), 11.0.2 and
 #                      11.0.4 -> qemu-patches-11.0 (v11.0); relative to this
 #                      script; env-overridable
-#   QEMU_CACHE         ${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist/qemu-x86_64-patched-${QEMU_VERSION}
+#   QEMU_CACHE         ${XDG_CACHE_HOME:-$HOME/.cache}/qemu/qemu-x86_64-patched-${QEMU_VERSION}
 #   QEMU_PYTHON        $(command -v python3), with a venv-capable fallback
 #   NPROC              host nproc (env-overridable)
 # =============================================================================
@@ -92,7 +92,7 @@ if [[ ! -d "$QEMU_PATCH_DIR" ]]; then
   echo "       QEMU_PATCH_DIR to an existing directory." >&2
   exit 1
 fi
-QEMU_CACHE="${QEMU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist/qemu-x86_64-patched-${QEMU_VERSION}}"
+QEMU_CACHE="${QEMU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/qemu/qemu-x86_64-patched-${QEMU_VERSION}}"
 QEMU_PYTHON="${QEMU_PYTHON:-$(command -v python3 || true)}"
 NPROC="${NPROC:-$(nproc)}"
 # qemu's configure-time venv (mkvenv) needs the distlib module; when the
@@ -196,7 +196,7 @@ qemu_python_has_distlib() {
 }
 
 # --- provision distlib (qemu's configure-time venv requires it) ---------------
-download_dir="${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist"
+download_dir="${XDG_CACHE_HOME:-$HOME/.cache}/qemu"
 mkdir -p "$download_dir"
 if ! qemu_python_has_distlib "$QEMU_PYTHON"; then
   echo "==> provisioning distlib for qemu's configure-time venv (mkvenv requires it)"
