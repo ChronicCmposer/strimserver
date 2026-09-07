@@ -196,7 +196,7 @@ gracefully on shutdown.
 | FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
 | Intermediate Debian image | `debian:trixie` snapshot `20260824T082821Z` | Base for the artifact producer (`tools/ffmpeg-dist`: pulled via the Docker Hub registry API into a rootfs by `publish.sh`); the same snapshot supplies the scratch-image runtime libs via the `@trixie` rules_distroless apt extension |
 | Go toolchain | `go 1.26.4` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
-| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.20.1`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
+| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.21.0`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
 | `libfdk-aac` | `libfdk-aac2t64` (Debian trixie package from `@trixie`) | AAC encode support through FFmpeg (`libfdk-aac.so.2` in the ffmpeg image) |
 | busybox / `gettext-base` (`envsubst`) | Debian trixie packages from `@trixie` | Shell + tools for the scratch runtime images and MediaMTX template rendering |
 | iperf3 | `3.19.1-r1` `.apk` (`@iperf3_apk` http_file) on alpine `3.23.3` (digest-pinned `@alpine_linux_amd64` oci.pull) | Optional bandwidth-test image |
@@ -440,9 +440,9 @@ emulator from source when no valid one is available, via the shared
 `tools/qemu/build-qemu.sh`. Qemu is pinned **per consumer**, with an
 env-overridable default `QEMU_VERSION="${QEMU_VERSION:-8.2.2}"`; the
 builder verifies the source tarball's sha256 for the pinned version
-(8.2.2, 9.2.4, and 11.0.2 are all mapped) and caches the built binary at a
+(8.2.2, 9.2.4, 11.0.2, and 11.0.4 are all mapped) and caches the built binary at a
 version-stamped path,
-`${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist/qemu-x86_64-patched-${QEMU_VERSION}`,
+`${XDG_CACHE_HOME:-$HOME/.cache}/qemu/qemu-x86_64-patched-${QEMU_VERSION}`,
 so the two consumers never share a qemu binary:
 `tools/ffmpeg-dist/publish.sh` pins **qemu 8.2.2** for byte-identical
 reproducibility (qemu 8.1.5 exposes a different guest CPUID — leaf
@@ -454,7 +454,7 @@ glibc grep/awk/m4 crash under 8.2.2 when reading `/proc/self/maps`).
 Separately, the `qemu_x86_64` repo rule
 (`tools/bazel/qemu_x86_64.bzl`) — the cross-strip tool the in-tree
 genrule uses for the amd64 mediamtx binary — defaults to **qemu
-11.0.2**, which is also a mapped/supported pin in
+11.0.4**, which is also a mapped/supported pin in
 `tools/qemu/build-qemu.sh`. The `buildkit-direct-execve` patch series
 is version-specific too:
 qemu 8.2.2 uses the hand-ported v8.1 series committed at
@@ -462,8 +462,8 @@ qemu 8.2.2 uses the hand-ported v8.1 series committed at
 hand-ported to 8.2.2's `ImageSource` API because no upstream v8.2
 patch set exists — tonistiigi/binfmt jumps from v8.1 to v9.2), and
 qemu 9.2.4 uses the v9.2 series at `tools/qemu/qemu-patches/`, and
-qemu 11.0.2 uses the upstream v11.0 series at
-`tools/qemu/qemu-patches-11.0.2/`. Host build dependencies — meson,
+qemu 11.0.2 and 11.0.4 use the upstream v11.0 series at
+`tools/qemu/qemu-patches-11.0/`. Host build dependencies — meson,
 ninja, python3, pkg-config, gcc, g++, and libglib2.0-dev — are
 required only on non-amd64 hosts;
 `tools/qemu/build-qemu.sh` fails loudly with the exact `apt-get

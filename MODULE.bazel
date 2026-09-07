@@ -173,8 +173,8 @@ http_file(
 http_archive(
     name = "mediamtx_dist",
     build_file_content = "exports_files([\"mediamtx\"])",
-    sha256 = "81b143f55a5d23d4a8c028d52869c14ea4a59919900528698fcc97a747fd69c6",
-    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.20.1/mediamtx_v1.20.1_linux_amd64.tar.gz",
+    sha256 = "e02e34c3337a35f20ac9e5aa31524566108964e6e37dbc46cf8292169f6c792b",
+    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.0/mediamtx_v1.21.0_linux_amd64.tar.gz",
 )
 
 # --- FFmpeg -------------------------------------------------------------

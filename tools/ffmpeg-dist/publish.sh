@@ -124,7 +124,7 @@ host_arch="$(uname -m)"
 # This consumer pins qemu 8.2.2 (openssh-dist pins 9.2.4) and uses a
 # version-stamped cache (tools/qemu/build-qemu.sh), so the two artifact
 # pipelines never share a qemu binary.
-qemu_cache_path="${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist/qemu-x86_64-patched-${QEMU_VERSION}"
+qemu_cache_path="${XDG_CACHE_HOME:-$HOME/.cache}/qemu/qemu-x86_64-patched-${QEMU_VERSION}"
 
 # --- resolve the qemu emulator (only needed on non-x86_64 hosts) ---
 # qemu_is_patched <path> -- true iff <path> is a usable buildkit-direct-execve
