@@ -23,14 +23,14 @@
 #
 # Pins (env-overridable):
 #   QEMU_VERSION       8.2.2 (ffmpeg-dist's pin; openssh-dist overrides to
-#                      9.2.4; 11.0.2 also supported -- the qemu_x86_64
-#                      repo-rule's cross-strip default)
+#                      9.2.4; 11.0.2 and 11.0.4 also supported -- the
+#                      qemu_x86_64 repo-rule's cross-strip default is 11.0.4)
 #   QEMU_SOURCE_SHA256 verified per pin (see the case below; env-overridable)
 #   QEMU_SOURCE_URL    https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz
 #   QEMU_PATCH_DIR     per QEMU_VERSION: 8.2.2 -> qemu-patches-8.2.2 (v8.1
-#                      hand-port), 9.2.4 -> qemu-patches (v9.2), 11.0.2 ->
-#                      qemu-patches-11.0.2 (v11.0); relative to this script;
-#                      env-overridable
+#                      hand-port), 9.2.4 -> qemu-patches (v9.2), 11.0.2 and
+#                      11.0.4 -> qemu-patches-11.0 (v11.0); relative to this
+#                      script; env-overridable
 #   QEMU_CACHE         ${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist/qemu-x86_64-patched-${QEMU_VERSION}
 #   QEMU_PYTHON        $(command -v python3), with a venv-capable fallback
 #   NPROC              host nproc (env-overridable)
@@ -57,11 +57,12 @@ case "$QEMU_VERSION" in
   8.2.2) QEMU_SOURCE_SHA256="${QEMU_SOURCE_SHA256:-847346c1b82c1a54b2c38f6edbd85549edeb17430b7d4d3da12620e2962bc4f3}" ;;
   9.2.4) QEMU_SOURCE_SHA256="${QEMU_SOURCE_SHA256:-f3cc1c4eabfdb288218ac3e33763dbe9e276d8bc890b867a2335d58de2ddd39a}" ;;
   11.0.2) QEMU_SOURCE_SHA256="${QEMU_SOURCE_SHA256:-3745f6ea88e2e87fe0dc838b2b1d4e0a770bf48e01a1d5a186842a1fff76ccf5}" ;;
+  11.0.4) QEMU_SOURCE_SHA256="${QEMU_SOURCE_SHA256:-b099a10abe4a98ac1a53a4f52cb2367651ad9fcd1c0531beb14921f1524ca9ae}" ;;
   *)     QEMU_SOURCE_SHA256="${QEMU_SOURCE_SHA256:-}" ;;
 esac
 if [[ -z "$QEMU_SOURCE_SHA256" ]]; then
   echo "error: no verified sha256 pinned for qemu-${QEMU_VERSION}.tar.xz;" >&2
-  echo "       set QEMU_SOURCE_SHA256 explicitly or use a supported QEMU_VERSION (8.2.2, 9.2.4, 11.0.2)." >&2
+  echo "       set QEMU_SOURCE_SHA256 explicitly or use a supported QEMU_VERSION (8.2.2, 9.2.4, 11.0.2, 11.0.4)." >&2
   exit 1
 fi
 # Patch dir selection: each supported QEMU_VERSION pins its own committed
@@ -71,7 +72,8 @@ if [[ -z "${QEMU_PATCH_DIR:-}" ]]; then
   case "$QEMU_VERSION" in
     8.2.2) qemu_patch_dir_rel="qemu-patches-8.2.2" ;;
     9.2.4) qemu_patch_dir_rel="qemu-patches" ;;
-    11.0.2) qemu_patch_dir_rel="qemu-patches-11.0.2" ;;
+    11.0.2) qemu_patch_dir_rel="qemu-patches-11.0" ;;
+    11.0.4) qemu_patch_dir_rel="qemu-patches-11.0" ;;
     *)
       echo "error: no committed patch dir for qemu-${QEMU_VERSION}." >&2
       echo "       Add one under tools/qemu/qemu-patches-${QEMU_VERSION}/" >&2
@@ -251,10 +253,11 @@ for patch_file in "$QEMU_PATCH_DIR"/*.patch; do
     echo "       qemu-8.2.2 uses the hand-ported v8.1 set (qemu-patches-8.2.2/," >&2
     echo "       restored from d7d16d0 tools/ffmpeg-dist/qemu-patches/)," >&2
     echo "       qemu-9.2.4 uses the v9.2 set (qemu-patches/), and qemu-11.0.2" >&2
-    echo "       uses the upstream v11.0 set (qemu-patches-11.0.2/). A series" >&2
-    echo "       failing to apply to its own pinned version usually means the" >&2
-    echo "       source tarball drifted from QEMU_SOURCE_SHA256; verify that pin, or" >&2
-    echo "       refresh from https://github.com/tonistiigi/binfmt/tree/master/patches" >&2
+    echo "       and 11.0.4 use the upstream v11.0 set (qemu-patches-11.0/)." >&2
+    echo "       A series failing to apply to its own pinned version usually" >&2
+    echo "       means the source tarball drifted from QEMU_SOURCE_SHA256;" >&2
+    echo "       verify that pin, or refresh from" >&2
+    echo "       https://github.com/tonistiigi/binfmt/tree/master/patches" >&2
     echo "       when bumping QEMU_VERSION." >&2
     exit 1
   fi

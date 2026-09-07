@@ -196,5 +196,10 @@
     "file": "core/controller/go.mod",
     "reason": "specs-go is the CDI spec types module pinned alongside container-device-interface by containerd/v2 v2.3.5's pkg/cdi wrapper; v1.1.1 is not yet required by the module graph so MVS keeps v1.1.0. Re-evaluate when a containerd release coordinates it.",
     "until": "2027-03-31"
+  },
+  {
+    "id": "bzl-pin/qemu",
+    "reason": "qemu pinned to 11.0.4, the newest 11.0.x whose buildkit-direct-execve patch series is verified/applies cleanly; 11.1.1 has no verified buildkit series yet. Re-evaluate when tonistiigi/binfmt ships a verified v11.1 series.",
+    "until": "2027-12-31"
   }
 ]
