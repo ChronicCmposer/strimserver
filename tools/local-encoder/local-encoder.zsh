@@ -1,5 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
+# zsh nices `&` jobs by +5 unless told otherwise; ffmpeg is backgrounded below.
+setopt NO_BG_NICE
 
 : "${LOCAL_ENCODER_ENV:?LOCAL_ENCODER_ENV is not set}"
 
@@ -71,7 +73,9 @@ STRIMSERVER_SRT_URL="$(printf 'srt://%s:%d?mode=caller&streamid=publish:%s&pkt_s
 
 rm -f "$INPUT_SOCKET"
 
-exec "$FFMPEG_CMD" \
+# ffmpeg runs as this user (root must never create $INPUT_SOCKET, or OBS can't
+# connect), in the background so FFMPEG_NICE can be applied to it afterwards.
+"$FFMPEG_CMD" \
   -fflags +nobuffer \
   -flags low_delay \
   -analyzeduration 0 \
@@ -85,5 +89,29 @@ exec "$FFMPEG_CMD" \
   -flush_packets 1 \
   -avioflags direct \
   -f mpegts \
-  "$STRIMSERVER_SRT_URL"
+  "$STRIMSERVER_SRT_URL" &
+ffmpeg_pid=$!
+
+# Apply FFMPEG_NICE. Under the LaunchDaemon (Nice=-10 in the plist) ffmpeg already
+# inherits it and this is a no-op; when started by hand the renice needs the
+# NOPASSWD rule from tools/stream-mode/sudoers.stream-mode. A failure is fatal:
+# FFMPEG_NICE is a requirement, not a hint.
+current_nice=$(ps -o ni= -p "$ffmpeg_pid" | tr -d ' ')
+if [[ -n "$current_nice" && "$current_nice" != "$FFMPEG_NICE" ]]; then
+  if ! sudo -n /usr/bin/renice "$FFMPEG_NICE" -p "$ffmpeg_pid" >/dev/null; then
+    print -u2 "local-encoder: cannot renice ffmpeg (pid $ffmpeg_pid) from $current_nice to $FFMPEG_NICE; install tools/stream-mode/sudoers.stream-mode"
+    kill -TERM "$ffmpeg_pid" 2>/dev/null || true
+    wait "$ffmpeg_pid" || true
+    exit 1
+  fi
+fi
+print -u2 "local-encoder: ffmpeg pid $ffmpeg_pid nice $(ps -o ni= -p "$ffmpeg_pid" | tr -d ' ')"
+
+# Forward INT/TERM (launchctl kill, Ctrl-C) to ffmpeg, then reap it.
+trap 'kill -TERM "$ffmpeg_pid" 2>/dev/null' TERM
+trap 'kill -INT "$ffmpeg_pid" 2>/dev/null' INT
+rc=0
+wait "$ffmpeg_pid" || rc=$?
+while kill -0 "$ffmpeg_pid" 2>/dev/null; do wait "$ffmpeg_pid" || rc=$?; done
+exit $rc
 

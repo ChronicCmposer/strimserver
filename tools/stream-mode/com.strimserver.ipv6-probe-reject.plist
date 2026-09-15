@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.strimserver.ipv6-probe-reject — stream-mode plan 3.4 / round 2 Q6.
+
+  This Mac has no IPv6 default route, so Chromium's IPv6-reachability probe
+  (2001:4860:4860::8888, sent by Chrome, Spotify, Stream Deck, Discord and OBS's
+  CEF helpers) is a routing-table miss every time, and the Dante Virtual
+  Soundcard control plane treats each RTM_MISS as an interface change (20-30
+  re-scans/min, dvs_manager_step up to 1.24 s on an idle machine). A host reject
+  route makes the lookup match: no RTM_MISS, and Chromium still concludes
+  "IPv6 unreachable" exactly as before. The route does not survive a reboot;
+  this daemon re-adds it at boot (and is harmless if it already exists).
+
+  Install:
+    sudo install -m 0644 -o root -g wheel tools/stream-mode/com.strimserver.ipv6-probe-reject.plist /Library/LaunchDaemons/
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.strimserver.ipv6-probe-reject.plist
+  Verify:  route -n get -inet6 2001:4860:4860::8888 | grep -q REJECT && echo ok   (preflight checks this too)
+  Remove:
+    sudo launchctl bootout system/com.strimserver.ipv6-probe-reject
+    sudo rm /Library/LaunchDaemons/com.strimserver.ipv6-probe-reject.plist
+    sudo route -n delete -inet6 -host 2001:4860:4860::8888
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.strimserver.ipv6-probe-reject</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/sbin/route</string>
+		<string>-n</string>
+		<string>add</string>
+		<string>-inet6</string>
+		<string>-host</string>
+		<string>2001:4860:4860::8888</string>
+		<string>::1</string>
+		<string>-reject</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/var/log/com.strimserver.ipv6-probe-reject.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/com.strimserver.ipv6-probe-reject.log</string>
+</dict>
+</plist>

@@ -22,6 +22,7 @@ tools/ffmpeg-dist/check-deps
 # python caches / local-only obs paths
 deploy/aws/__pycache__/
 tools/local-obs/
+tools/stream-mode/__pycache__/
 
 # Local implementation plans — throwaway working docs; not part of the repo.
 ideas/

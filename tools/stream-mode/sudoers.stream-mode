@@ -1,0 +1,12 @@
+# /etc/sudoers.d/stream-mode — source: tools/stream-mode/sudoers.stream-mode
+#
+# Lets stream-mode apply its priority policy (renice/taskpolicy on OBS, the
+# local-encoder ffmpeg, Spotify, and the root-owned DVS daemons) and run the two
+# root-only instruments (powermetrics, spindump) without a password. Scoped to
+# exact binaries; the pkill rule is argument-exact so it can only stop
+# powermetrics. Everything else still prompts.
+#
+# Install:  sudo install -m 0440 tools/stream-mode/sudoers.stream-mode /etc/sudoers.d/stream-mode && sudo visudo -c
+# Remove:   sudo rm /etc/sudoers.d/stream-mode
+Cmnd_Alias STREAM_MODE = /usr/bin/renice, /usr/sbin/taskpolicy, /usr/bin/powermetrics, /usr/sbin/spindump, /usr/bin/pkill -x powermetrics
+connor ALL=(root) NOPASSWD: STREAM_MODE
