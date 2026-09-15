@@ -45,11 +45,11 @@ from dataclasses import dataclass
 # float) so the containerd runtime is deterministic across launches.
 #
 # NOTE: value is the base-oss-nvidia-driver GPU DLAMI (AL2023 x86_64) for
-# us-east-2, resolved via SSM on 2026-09-04 (the current date). Confirm it with
+# us-east-2, resolved via SSM on 2026-09-08 (the current date). Confirm it with
 #   aws ssm get-parameter --region us-east-2 --name "<DEFAULT_DLAMI_SSM_PARAM>"
 # if it ever needs re-resolving; tools/check-deps (ami/dlami, T1) flags when it
 # goes stale. Setting AMI_ID (or DLAMI_SSM_PARAM) overrides the pin.
-DEFAULT_AMI_ID = "ami-005d77a2bbebf1a47"
+DEFAULT_AMI_ID = "ami-01874134a5fc06051"
 
 # Explicit override only: the /latest SSM parameter for the same DLAMI family.
 # Setting DLAMI_SSM_PARAM re-enables floating resolution instead of the pin.
