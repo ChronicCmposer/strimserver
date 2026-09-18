@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.strimserver.ipv6-reject-default — stream-mode round 3, Q4 fallback B (NOT installed
+  by default; option A is `sudo networksetup -setv6off "USB 10/100/1G/2.5G LAN"`).
+
+  The wired LAN service (en8) carries a router-advertised ULA (fd9e:ed64:cd8b:452c::/64),
+  so the resolver hands out AAAA records, and with no IPv6 default route every connect to
+  an Apple address (2620:149::/32: 454–595 RTM_MISS per stream) is a routing-table miss
+  the Dante Virtual Soundcard control plane treats as an interface change (one full
+  IOKit interface enumeration in dvsd each). A reject default route makes every
+  unroutable IPv6 lookup *match* (apps get EHOSTUNREACH at once instead of ENETUNREACH),
+  so no RTM_MISS reaches DVS. Use it only if option A leaves misses behind (the fd71…
+  ULA-peer misses of 2026-09-16 15:39 would not be covered by A). Like the probe-route
+  daemon, it re-adds the route at boot and is harmless if the route already exists.
+
+  Install:
+    sudo install -m 0644 -o root -g wheel tools/stream-mode/com.strimserver.ipv6-reject-default.plist /Library/LaunchDaemons/
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.strimserver.ipv6-reject-default.plist
+  Verify:  route -n get -inet6 2620:149:1360:101::d | grep -q REJECT && echo ok
+           then 10 min of `route -n monitor` with no RTM_MISS to 2620:149
+  Remove:
+    sudo launchctl bootout system/com.strimserver.ipv6-reject-default
+    sudo rm /Library/LaunchDaemons/com.strimserver.ipv6-reject-default.plist
+    sudo route -n delete -inet6 default
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.strimserver.ipv6-reject-default</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/sbin/route</string>
+		<string>-n</string>
+		<string>add</string>
+		<string>-inet6</string>
+		<string>default</string>
+		<string>::1</string>
+		<string>-reject</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/var/log/com.strimserver.ipv6-reject-default.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/com.strimserver.ipv6-reject-default.log</string>
+</dict>
+</plist>

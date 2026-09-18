@@ -5,9 +5,11 @@
 #   stream-mode.zsh preflight        checks only (warns about Zoom; 'on' quits it)
 #   stream-mode.zsh on [--force] [--no-quit]   preflight, then start the priority loop + instruments
 #                                    (--force: ignore [FAIL]s; --no-quit: dry run, keep Zoom)
-#   stream-mode.zsh off              stop instruments, revert priorities, snapshot logs, analyze
+#   stream-mode.zsh off [--none-heard]   stop instruments, revert priorities, snapshot logs, analyze
+#                                    (--none-heard: record that no dropout was audible all session)
 #   stream-mode.zsh status           what is running, current priorities, latest readings
 #   stream-mode.zsh mark [note]      append a dropout mark (same as the Mark Dropout app)
+#   stream-mode.zsh mark none-heard [note]   record "nothing heard" (makes 0 marks a result)
 STREAM_MODE_DIR=${0:A:h}; SM_NAME=stream-mode
 source $STREAM_MODE_DIR/lib.zsh
 
@@ -19,6 +21,16 @@ info() { print -r -- "  [info] $*" }
 hdr()  { print -r -- "== $* ==" }
 
 app_version() { defaults read "$1/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || print -r -- "?" }
+
+# --- round 3 (H6/H7/H9, Q1/Q2/Q4/Q7): the network-side state that fires DVS re-scan storms ---
+wifi_power()  { networksetup -getairportpower $WIFI_IFACE 2>/dev/null | sed -n 's/.*: //p' }   # On | Off | ""
+awdl_status() { ifconfig awdl0 2>/dev/null | sed -n 's/^[[:space:]]*status: //p' }            # active | inactive | ""
+# Apple mobile devices (iPad/iPhone/iPod) on the USB tree, comma-joined product names
+apple_usb_devices() { ioreg -p IOUSB -l 2>/dev/null | sed -n -E 's/.*"USB Product Name" = "((iPad|iPhone|iPod)[^"]*)".*/\1/p' | paste -sd, - }
+# non-link-local IPv6 addresses on the LAN service (the router's autoconf ULA → AAAA answers → RTM_MISS storms)
+lan_global_ipv6() { ifconfig $LAN_IFACE inet6 2>/dev/null | awk '$1 == "inet6" && $2 !~ /^fe80:/ { print $2 }' | paste -sd, - }
+encoder_sock()   { [[ -S $ENCODER_SOCK ]] && print listening || print absent }
+net_state_line() { print -r -- "Wi-Fi ${$(wifi_power):-?}, awdl0 ${$(awdl_status):-?}, Apple USB devices: ${$(apple_usb_devices):-none}, $LAN_IFACE global IPv6: ${$(lan_global_ipv6):-none}, encoder socket $(encoder_sock)" }
 
 # "name=status net0=type:iface; …" for every Parallels VM; empty without prlctl. A VM start or
 # stop on a bridged adapter toggles promiscuous mode on the host NIC, which fires ~100 DVS
@@ -97,6 +109,21 @@ PY
   else wrn "IPv6 probe reject route missing (plan 3.4) — sudo route -n add -inet6 -host $IPV6_PROBE_ADDR ::1 -reject   (not persistent across reboots)"; fi
   [[ -r $DVS_DEBUG_CONFIG ]] && ok "DVS debug logging: enabled ($DVS_DEBUG_CONFIG)" || wrn "DVS debug logging: off — Phase 3.3: sudo \"$DVS_TOOLS_DIR/DVSEnableDebugLogging.command\""
   info "versions: DVS $(app_version '/Applications/Dante Virtual Soundcard.app'), Dante Controller $(app_version '/Applications/Dante Controller.app'), Loopback $(app_version /Applications/Loopback.app), OBS $(app_version /Applications/OBS.app)"
+  # --- network (round 3: H6 AWDL cycles, H7 Wi-Fi dual-homing, H9 Apple IPv6 misses) ---
+  local wp=$(wifi_power) aw=$(awdl_status) ausb=$(apple_usb_devices) v6=$(lan_global_ipv6)
+  case $wp in
+    Off) ok "Wi-Fi ($WIFI_IFACE): off" ;;
+    On)  bad "Wi-Fi ($WIFI_IFACE) is ON — every Universal Control/Continuity reconnect over AWDL cycles awdl0 and fires a 60–130-event DVS re-scan storm (round 3, H6); Wi-Fi joining the LAN while wired flaps the default route (H7): networksetup -setairportpower $WIFI_IFACE off" ;;
+    *)   wrn "Wi-Fi ($WIFI_IFACE): power state unknown (networksetup -getairportpower $WIFI_IFACE)" ;;
+  esac
+  case $aw in
+    inactive) ok "awdl0: inactive" ;;
+    active)   bad "awdl0 is ACTIVE (AWDL peer link up: Universal Control / AirDrop / Handoff / Sidecar) — each reconnect is a DVS re-scan storm (round 3, H6); turn Wi-Fi off" ;;
+    *)        info "awdl0: no status (interface absent?)" ;;
+  esac
+  [[ -n $ausb ]] && wrn "Apple mobile device on the USB tree: $ausb — each attach/detach brings a USB-NCM interface up/down = a 50–100-event DVS re-scan burst (round 3, Q2); unplug it for the stream, or never attach/detach it mid-stream" || ok "no Apple mobile device on USB"
+  [[ -n $v6 ]] && wrn "$LAN_IFACE has a non-link-local IPv6 address ($v6) — the router-advertised ULA makes the resolver return AAAA records and every Apple connect an RTM_MISS = one DVS re-scan (round 3, H9/Q4): sudo networksetup -setv6off \"USB 10/100/1G/2.5G LAN\"   (reversible: -setv6automatic)" || ok "$LAN_IFACE IPv6: link-local only"
+  [[ -S $ENCODER_SOCK ]] && ok "local-encoder socket listening ($ENCODER_SOCK)" || wrn "local-encoder socket absent ($ENCODER_SOCK) — OBS's first Record fails until the LaunchAgent (local.connor.chroniccmposer.local-encoder) is up (round 3, Q7: reported only, started on demand)"
   # --- apps ---
   local a present=()
   for a in $QUIT_APPS; do pgrep -x "$a" >/dev/null && wrn "$a is running (quit by 'on')"; done
@@ -141,9 +168,11 @@ cmd_on() {
     print -r -- "  \"start\": \"$(ts)\", \"host\": \"$(hostname)\", \"macos\": \"$(sw_vers -productVersion)\","
     print -r -- "  \"obs\": \"$(app_version /Applications/OBS.app)\", \"dvs\": \"$(app_version '/Applications/Dante Virtual Soundcard.app')\", \"loopback\": \"$(app_version /Applications/Loopback.app)\","
     print -r -- "  \"sudo_ok\": $(sudo_ok && print true || print false), \"dvs_method\": \"$DVS_METHOD\", \"vms\": \"$(vm_state)\","
+    print -r -- "  \"wifi\": \"$(wifi_power)\", \"awdl0\": \"$(awdl_status)\", \"apple_usb\": \"$(apple_usb_devices)\", \"lan_global_ipv6\": \"$(lan_global_ipv6)\", \"encoder_sock\": \"$(encoder_sock)\","
     print -r -- "  \"policy\": {\"obs_nice\": $OBS_NICE, \"ffmpeg_nice\": $FFMPEG_NICE, \"spotify_nice\": $SPOTIFY_NICE, \"dvs_nice\": $DVS_NICE, \"background\": \"${(j:, :)BACKGROUND_APPS}\"}"
     print -r -- "}"
   } > $SESSION/session.json
+  info "network: $(net_state_line)"
   export STREAM_SESSION=$SESSION OBS_WS_URL OBS_WS_CONFIG OBS_STATS_INTERVAL
   start_job unified-log    $STREAM_MODE_DIR/unified-log.zsh
   start_job route-monitor  $STREAM_MODE_DIR/route-monitor.zsh
@@ -158,7 +187,29 @@ cmd_on() {
   cmd_status
 }
 
+# Every OBS log whose span overlaps the session → obs-log-<launch>.txt (the crashed instance's
+# log was left behind on 2026-09-16 when only the newest was copied), and every OBS crash report
+# written inside the session or up to 30 min after it (round 3, 1.2). The log file name is the
+# launch time ('2026-09-16 13-16-52.txt'); its mtime is the last line written.
+copy_obs_logs() {   # copy_obs_logs <session start epoch> <session end epoch>
+  local s0=$1 s1=$2 f launch lm n=0
+  for f in "$OBS_CONFIG_DIR"/logs/*.txt(N); do
+    launch=$(date -j -f '%Y-%m-%d %H-%M-%S' "${${f:t}%.txt}" +%s 2>/dev/null) || continue
+    lm=$(stat -f %m "$f")
+    (( launch <= s1 && lm >= s0 )) || continue
+    cp -p "$f" "$SESSION/obs-log-${${${f:t}%.txt}// /T}.txt" && (( n++ )) && log "copied OBS log ${f:t}"
+  done
+  (( n )) || warn "no OBS log overlaps the session (OBS not running?)"
+  for f in ~/Library/Logs/DiagnosticReports/OBS*.ips(N) ~/Library/Logs/DiagnosticReports/Retired/OBS*.ips(N); do
+    lm=$(stat -f %m "$f")
+    (( lm >= s0 && lm <= s1 + 1800 )) || continue
+    cp -p "$f" $SESSION/ && log "copied OBS crash report ${f:t} (OBS crashed during the session!)"
+  done
+}
+
 cmd_off() {
+  local none_heard=0 arg
+  for arg in "$@"; do case $arg in --none-heard) none_heard=1 ;; *) die "usage: ${0:t} off [--none-heard]" ;; esac; done
   require_session
   hdr "off ← $SESSION"
   stop_job priority-loop
@@ -170,22 +221,29 @@ cmd_off() {
   stop_job route-monitor
   stop_job unified-log
   snapshot_system end
-  local obslog=$(ls -t "$OBS_CONFIG_DIR"/logs/*.txt 2>/dev/null | head -1)
-  [[ -n $obslog ]] && cp -p "$obslog" $SESSION/obs-log.txt && log "copied OBS log ${obslog:t}"
+  (( none_heard )) && print -r -- "$(ts)	none-heard	off --none-heard" >> $SESSION/marks.log
   print -r -- "$(ts)	session	off" >> $SESSION/marks.log
-  print -r -- "{\"end\": \"$(ts)\", \"vms_end\": \"$(vm_state)\"}" > $SESSION/session-end.json
+  print -r -- "{\"end\": \"$(ts)\", \"vms_end\": \"$(vm_state)\", \"wifi_end\": \"$(wifi_power)\", \"awdl0_end\": \"$(awdl_status)\", \"apple_usb_end\": \"$(apple_usb_devices)\", \"encoder_sock_end\": \"$(encoder_sock)\"}" > $SESSION/session-end.json
+  local start=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["start"])' $SESSION/session.json 2>/dev/null)
+  local s0=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "${start:-$(ts)}" +%s 2>/dev/null || print 0)
+  copy_obs_logs $s0 $EPOCHSECONDS
   [[ -r $PARALLELS_LOG ]] && python3 $STREAM_MODE_DIR/parallels-vm-log.py --src $PARALLELS_LOG $SESSION 2>&1 | while IFS= read -r l; do log "$l"; done
-  local marks=$(grep -c $'\tmark' $SESSION/marks.log 2>/dev/null); [[ -n $marks ]] || marks=0   # grep -c prints 0 *and* exits 1
+  local marks=$(grep -c $'\tmark\t' $SESSION/marks.log 2>/dev/null); [[ -n $marks ]] || marks=0   # grep -c prints 0 *and* exits 1
+  local nh=$(grep -c $'\tnone-heard\t' $SESSION/marks.log 2>/dev/null); [[ -n $nh ]] || nh=0
   if python3 $STREAM_MODE_DIR/analyze.py $SESSION > $SESSION/analyze.out 2>&1; then log "analysis → $SESSION/timeline.md"
   else warn "analyze.py failed (see $SESSION/analyze.out); run it by hand later"; fi
   if [[ -s $SESSION/powermetrics.plist ]]; then   # after the analysis (it reads the plist; it also reads .plist.gz for re-runs)
     log "gzip powermetrics.plist ($(du -h $SESSION/powermetrics.plist | cut -f1)) …"
     nice gzip $SESSION/powermetrics.plist && log "→ powermetrics.plist.gz ($(du -h $SESSION/powermetrics.plist.gz | cut -f1))"
   fi
-  local start=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["start"])' $SESSION/session.json 2>/dev/null)
-  print -r -- "- ${SESSION:t}: session ${start:-?} → $(ts); ${marks} dropout marks; logs in \`$SESSION\`; see \`timeline.md\` there" >> $STREAM_MODE_DIR/CHANGELOG.md
+  local marktxt="${marks} dropout marks"
+  if (( marks == 0 )); then
+    marktxt="0 marks (none heard: $( (( nh )) && print recorded || print 'NOT recorded' ))"
+    (( nh )) || warn "0 marks and no none-heard mark: the session says nothing about audibility — next time end with 'off --none-heard' (or 'mark none-heard') when nothing was heard"
+  fi
+  print -r -- "- ${SESSION:t}: session ${start:-?} → $(ts); ${marktxt}; logs in \`$SESSION\`; see \`timeline.md\` there" >> $STREAM_MODE_DIR/CHANGELOG.md
   rm -f $STREAM_LOG_ROOT/current
-  log "off complete; ${marks} marks; logs: $SESSION"
+  log "off complete; ${marktxt}; logs: $SESSION"
 }
 
 cmd_status() {

@@ -13,13 +13,20 @@ tools/stream-mode/stream-mode.zsh preflight      # checks only (reports Zoom, do
 tools/stream-mode/stream-mode.zsh on             # T-15 min: quit Zoom, preflight, start everything
 tools/stream-mode/stream-mode.zsh status         # jobs, current priorities, latest readings
 tools/stream-mode/stream-mode.zsh mark [note]    # dropout mark (the Stream Deck app does the same)
-tools/stream-mode/stream-mode.zsh off            # stop, revert priorities, snapshot logs, analyze
+tools/stream-mode/stream-mode.zsh mark none-heard   # nothing was audible (makes 0 marks a result)
+tools/stream-mode/stream-mode.zsh off [--none-heard]   # stop, revert priorities, snapshot logs, analyze
 ```
 
 `on` refuses to start over a running session and aborts on `[FAIL]` preflight items
-(`--force` overrides; `--no-quit` keeps Zoom for dry runs). Everything a
-session produces lands in `~/stream-logs/<YYYY-MM-DD>/` (`-HHMM` suffixed when a
-second session starts the same day); `~/stream-logs/current` points at the active one.
+(`--force` overrides; `--no-quit` keeps Zoom for dry runs). Since round 3 preflight
+**fails** on Wi-Fi power on / `awdl0` active (every Universal Control reconnect over
+AWDL is a DVS re-scan storm) and warns on an iPad/iPhone on the USB tree, a global
+IPv6 address on `en8`, and a missing local-encoder socket. Everything a session
+produces lands in `~/stream-logs/<YYYY-MM-DD>/` (`-HHMM` suffixed when a second session
+starts the same day); `~/stream-logs/current` points at the active one. End a session
+with `off --none-heard` (or `mark none-heard` any time) when no dropout was audible —
+`off` warns when a session ends with 0 marks and no none-heard mark, because such a
+session says nothing about audibility.
 
 Machine-local overrides of anything in [`stream-mode.conf`](stream-mode.conf) go in
 `~/.config/stream-mode/stream-mode.conf` (same zsh syntax).
@@ -51,26 +58,40 @@ Machine-local overrides of anything in [`stream-mode.conf`](stream-mode.conf) go
    ```bash
    sudo install -m 0644 -o root -g wheel tools/stream-mode/com.strimserver.ipv6-probe-reject.plist /Library/LaunchDaemons/ && sudo launchctl bootstrap system /Library/LaunchDaemons/com.strimserver.ipv6-probe-reject.plist
    ```
+6. **Apple IPv6 misses** (round 3, H9/Q4) — `en8` carries the router's autoconf ULA, so the
+   resolver returns AAAA records and every connect to `2620:149::/32` is an `RTM_MISS` (=
+   one DVS re-scan; 454–595 per stream). Option A turns IPv6 off on the LAN service
+   (reversible with `-setv6automatic`); option B, only if misses remain, is a reject
+   default route daemon (`com.strimserver.ipv6-reject-default.plist`, instructions inside):
+   ```bash
+   sudo networksetup -setv6off "USB 10/100/1G/2.5G LAN" && ifconfig en8 inet6
+   ```
+7. **Before each stream** (round 3, Q1/Q2/Q8): reboot, Wi-Fi off (`networksetup
+   -setairportpower en0 off` — this also disables AWDL: Universal Control, AirDrop, Handoff,
+   Sidecar), no iPad/iPhone on USB; `preflight` verifies all of it.
 
 ## What runs during a session
 
 | Job | Instrument | Writes |
 |-----|-----------|--------|
 | `priority-loop.zsh` | policy table below, every 30 s, idempotent | `priorities.log` (ni/pri of the policy processes + DVS thread PRIs), `priority-loop.out` |
-| `memory-sampler.zsh` | #2 memory every 5 s; top 25 processes by RSS every 60 s; #7 watchdog | `memory.csv`, `top-rss.log`, `watchdog.log` + macOS notification on pressure ≥ warn or swap +1 GB |
+| `memory-sampler.zsh` | #2 memory every 5 s; top 25 processes by RSS and top 15 by compressed memory every 60 s; #7 watchdog, incl. the footprint escalation (swap or compressed logical footprint +2 GB within 10 min → `footprint -p` of the 3 biggest compressed holders, ≤ 1 per 10 min; `memory-sampler.zsh footprint` does it by hand) | `memory.csv`, `top-rss.log`, `top-cmprs.log`, `watchdog.log`, `footprint-<ts>.txt` + macOS notification on pressure ≥ warn, swap +1 GB, or footprint growth (naming the processes) |
 | `obs-stats.py` | #3 obs-websocket `GetStats`/`GetRecordStatus`/`GetStreamStatus` at 1 Hz (stdlib WebSocket client; reconnects forever) | `obs-stats.csv`, `obs-events.log` (record/stream state changes) |
-| `unified-log.zsh` | #4 `log stream` (ndjson): coreaudiod overloads/timeouts, kernel memorystatus/jetsam/thermal/en7/en8/USB/bridge, thermalmonitord, arkaudiod — minus known noise families | `unified-log.ndjson` |
+| `unified-log.zsh` | #4 `log stream` (ndjson): coreaudiod overloads/timeouts, kernel memorystatus/jetsam/thermal/en7/en8/USB/bridge (incl. iPad/iPhone attach/detach), thermalmonitord, arkaudiod, and the AWDL actors — rapportd `WiFi P2P transaction` / `_needsAWDL` / `Bonjour AWDL advertiser` / `Read EOF`, UniversalControl `CLinkClient`, sharingd `Wi-Fi power` — minus known noise families | `unified-log.ndjson` |
 | `route-monitor.zsh` | #8 `route -n monitor`: every routing-socket message (type, address; kernel-generated misses carry pid 0) — what the DVS control plane re-scans on | `route-monitor.log` |
-| `stall-watch.zsh` | #6 tails the DVS daemon logs + the unified-log capture; timestamps DVS stalls, HAL overloads and re-scan bursts (≥ 15 `INTERFACE_CHANGE` within 30 s); on the `dvs`/`dvs-rescan` triggers takes a *targeted* spindump of the DVS daemons (`spindump dvsd 3 -onlyTarget -proc conmon_server -proc dvs_ape`, background band; ≤ 1 per 120 s, ≤ 20 per session) — HAL overloads no longer trigger one (observer effect, see Caveats) | `dvs-events.log`, `spindump-<ts>-<trigger>.txt` |
+| `stall-watch.zsh` | #6 tails the DVS daemon logs + the unified-log capture; timestamps DVS stalls, HAL overloads and re-scan bursts (≥ 15 `INTERFACE_CHANGE` within 30 s); on the `dvs` trigger (a new `dvs_manager_step` maximum / keepalive / timed out) takes a *targeted* spindump of the DVS daemons (`spindump dvsd 3 -onlyTarget -proc conmon_server -proc dvs_ape`, background band; ≤ 1 per 120 s, ≤ 20 per session) — HAL overloads (observer effect, see Caveats) and, since round 3, re-scan bursts (33 identical dumps; the cause is in `route-monitor.log`) no longer trigger one | `dvs-events.log`, `spindump-<ts>-<trigger>.txt` |
 | `powermetrics.zsh` | #1 `powermetrics -i 10000 -s cpu_power,gpu_power,thermal,tasks --show-cpu-qos --show-process-qos --format plist` (root) | `powermetrics.plist` (NUL-separated plists; ~170 MB/h at 10 s; gzipped by `off` after the analysis) |
 
 `on` also snapshots `ps`, `vm_stat`/swap, the DVS thread priorities, the Parallels VM
-state (`prlctl list`, into `session.json`) and **copies the DVS logs** (`dvs-logs-start/`);
-`off` repeats that (`dvs-logs-end/`, `session-end.json`), slices the Parallels dispatcher
-log's VM state changes into `parallels-vm.log` (`parallels-vm-log.py`), copies the newest
-OBS log (`obs-log.txt`), reverts every priority the loop changed, runs `analyze.py`, gzips
-`powermetrics.plist`, and appends a line to `CHANGELOG.md`. The DVS daemons truncate their
-logs when DVS restarts, so the snapshots and the live tail are the only durable copies.
+state (`prlctl list`), the Wi-Fi/awdl0/Apple-USB/IPv6/encoder-socket state (all into
+`session.json`) and **copies the DVS logs** (`dvs-logs-start/`); `off` repeats that
+(`dvs-logs-end/`, `session-end.json`), slices the Parallels dispatcher log's VM state
+changes into `parallels-vm.log` (`parallels-vm-log.py`), copies **every OBS log whose span
+overlaps the session** (`obs-log-<launch>.txt` — a crashed instance's log is not the newest
+one) and any `OBS*.ips` crash report written during the session or up to 30 min after it,
+reverts every priority the loop changed, runs `analyze.py`, gzips `powermetrics.plist`, and
+appends a line to `CHANGELOG.md`. The DVS daemons truncate their logs when DVS restarts, so
+the snapshots and the live tail are the only durable copies.
 
 ### Priority policy (`stream-mode.conf`)
 
@@ -116,15 +137,22 @@ thread to 31T and the spawn type to `interactive (4)`.
 `python3 tools/stream-mode/analyze.py ~/stream-logs/<date>` (run automatically by
 `off`) writes `timeline.md`:
 
-- **Success criteria** (round 2) measured.
+- **Success criteria** (round 3) measured: marks explained (or a none-heard mark), HAL
+  episodes excluding OBS crashes, awdl0 cycles / re-scan burst minutes / Apple IPv6 misses
+  per hour, DVS keepalive timeouts *and* creation failures / new `dvs_manager_step` maximum
+  above the pre-session value (with the "blind below X s" note when the daemons are younger
+  than the session) / `dvs_ape` updates per minute, OBS crash + encode skips, pressure /
+  swap / compressed-footprint growth with the top compressed holder.
 - **Per mark**: every mechanism that fired in `[mark − 30 s, mark + 5 s]`, earliest
   first, plus episodes already in progress (a pressure episode, a re-scan burst) and the
   busiest tasks from the nearest powermetrics sample.
 - **Per HAL client-timeout episode** (ClientTimeout reports ≤ 10 s apart): the same
   table over `[−60 s, +5 s]` — a *pseudo-mark*, so every episode is attributed even when
   nobody pressed Mark. The attribution is the first non-HAL mechanism at or before the
-  episode (same-second ties broken causally: VM state → bridge → re-scan → stall), labelled
-  VM bridge cycle / DVS re-scan burst or stall / memory pressure (+ page faults) / none.
+  episode (same-second ties broken causally: VM state / AWDL cycle / Wi-Fi flap → routing
+  churn → re-scan → stall), labelled OBS crash/restart (a crash within ±30 s) / VM bridge
+  cycle / AWDL cycle / Wi-Fi flap / DVS re-scan burst or stall / memory pressure (+ page
+  faults) / none.
 - **Verdict per mechanism**: confirmed / suspect / eliminated, from how often it was
   present and first in mark windows versus how often it fired elsewhere (real marks only).
 - **Merged timeline** of everything (jetsam sweeps, arkaudiod chatter and USB-NIC error
@@ -139,14 +167,21 @@ the atkAudio plugin's audio server (round 2, Q3).
 Mechanisms: `hal-timeout` (coreaudiod report with `cause=ClientTimeout`, one event per
 report with the client, device, buffer size, IO duration and page-fault fields parsed),
 `hal-overload` (other causes), `hal-pagefault` (a report with page faults inside the IO
-cycle — nanoseconds in the report, shown in µs), `dvs-stall`, `dvs-rescan` (≥ 10
-`INTERFACE_CHANGE` in a minute; each burst lists the routing-socket messages that preceded
-it), `dvs-error`, `vm-bridge` (VM state changes from `parallels-vm.log` and `enN: promiscuous
-mode` toggles), `route` (routing-socket messages), `obs-encode`, `obs-render`,
-`obs-audio`, `memory` (one event per pressure episode, with the top-RSS processes at its
-minimum free), `jetsam`, `thermal` (powermetrics `thermal_pressure ≠ Nominal` or
-`thermalmonitord` only), `dante-flow` (new UDP socket to a Dante audio port on en7 = flow
-re-created), `nic-usb`, `ark`.
+cycle — nanoseconds in the report, shown in µs), `dvs-stall` (incl. `Failed to create
+keepalive`, counted apart from timeouts), `dvs-rescan` (≥ 10 `INTERFACE_CHANGE` in a minute;
+each burst lists the awdl0 cycle it sits on and the routing-socket message types × interfaces
+that preceded it; plus `dvs_ape` "Updating interfaces" minutes ≥ 20 that no manager burst
+covers), `dvs-error`, `vm-bridge` (VM state changes from `parallels-vm.log` and `enN:
+promiscuous mode` toggles), `awdl` (one event per `awdl0` `RTM_NEWADDR` = one AWDL cycle,
+plus the rapportd/UniversalControl actor lines), `wifi` (`en0` address add/delete,
+default-route add/delete with the gateway, sharingd Wi-Fi power), `route` (the other
+routing-socket messages, with the interface name), `obs-crash` (crash report, the OBS-log
+`Failed to lock QIOSurfaceGraphicsBuffer` line, an obs-websocket re-connect), `obs-encode`,
+`obs-render`, `obs-audio`, `memory` (one event per pressure episode, with the top-RSS and
+top-compressed processes at its minimum free; footprint escalations), `jetsam`, `thermal`
+(powermetrics `thermal_pressure ≠ Nominal` or `thermalmonitord` only), `dante-flow` (new UDP
+socket to a Dante audio port on en7 = flow re-created), `nic-usb` (incl. iPad/iPhone
+attach/detach), `ark`.
 
 OBS skip counters restart with every output start; the analyzer sums them per output run
 and lists the runs in the header.
@@ -170,8 +205,16 @@ A replay of an un-instrumented stream can be built by hand — `dvs-logs-end/`, 
   "Second underflow occured." per sample) over 7.5 h, hence `-i 10000` and the gzip at
   `off` (`analyze.py` reads `.plist.gz`). Delete old session directories when done with them.
 - `dvs_manager_step` is only logged when it sets a *new maximum*, so a stall shorter than
-  the session's running max is invisible in the DVS log; the re-scan bursts and the
-  `dvs-rescan` spindumps are the proxy for the stalls that follow.
+  the session's running max is invisible in the DVS log — and after a reboot the boot-time
+  value (3.413 s on 2026-09-16 20:56) blinds the criterion for the whole session. The
+  analyzer prints the pre-session maximum and the "blind below" note; the re-scan bursts and
+  `dvs_ape`'s "Updating interfaces" rate are the proxy for the stalls that follow.
+- `top-rss.log` cannot see a swapped-out process: the 2026-09-16 leak (~46 GB in the OBS
+  tree, ~1 GB/min) never appeared in it. `top-cmprs.log` (`top -o cmprs`) and the footprint
+  escalation exist for that; `top -l 1` costs ~0.5 s of CPU per sample, hence the 60 s
+  cadence in the background band.
+- `/usr/bin/python3` is 3.9 on this Mac (`lib.zsh` puts `/usr/bin` first): no f-string
+  backslashes, no `match`.
 - The HAL report durations (`HAL_client_IO_duration`, `io_cycle_budget`,
   `multi_cycle_io_page_faults_duration`) are nanoseconds: the 512-frame client's budget is
   reported as 11,354,166 = 11.35 ms, so the page-fault figures are microseconds, not ms.
