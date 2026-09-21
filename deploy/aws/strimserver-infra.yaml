@@ -306,6 +306,10 @@ Resources:
       ManagedPolicyName: strimserver-ssm-dlami-readonly
       # Public SSM parameters carry an empty account segment in their ARN,
       # hence the `::` before `parameter` (AWS's documented public ARN shape).
+      # Both DLAMI SSM families are readable: the x86_64 one (the amd64 path's
+      # SSM float, used when DLAMI_SSM_PARAM is set) and the arm64 one (the
+      # aarch64 path's default float for g5g.2xlarge launches). The pinned
+      # x86_64 AMI id itself is not an SSM parameter, so the pin needs no ARN.
       Users:
         - !Ref StrimserverServiceUser
       PolicyDocument:
@@ -313,7 +317,9 @@ Resources:
         Statement:
           - Effect: Allow
             Action: ssm:GetParameter
-            Resource: !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
+              - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
           - Effect: Allow
             Action: ec2:DescribeImages
             Resource: "*"

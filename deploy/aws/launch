@@ -20,11 +20,19 @@ Env vars (typically sourced from deploy/aws/.env):
   IAM_INSTANCE_PROFILE  override the stack's InstanceProfileName output (profile NAME)
   KEY_NAME              EC2 key pair name for SSH (required)
   SUBNET_ID             subnet in the SG's VPC (optional; auto-selected if unset)
-  INSTANCE_TYPE         default g6.xlarge (T4 / sm_75 - matches the default FFmpeg build)
-  AMI_ID                explicit AMI id (default: DEFAULT_AMI_ID, the pinned
-                        us-east-2 AL2023 GPU DLAMI below)
+  INSTANCE_TYPE         default g4dn.xlarge (x86_64 T4 / sm_75 - matches the
+                        default FFmpeg build); g6.xlarge also supported. The
+                        arm64 target is --type g5g.2xlarge (Graviton2 + T4G /
+                        sm_75) for the aarch64 controller
+  ARCH                  optional override: "amd64"/"x86_64" or "arm64"/"aarch64";
+                        default: inferred from the INSTANCE_TYPE family
+                        (g5g/c6g/m6g/r6g/a1/g6g/7g -> arm64, everything else amd64)
+  AMI_ID                explicit AMI id (default: arch-aware - the pinned x86_64
+                        DEFAULT_AMI_ID for amd64, the arm64 DLAMI SSM float for
+                        arm64; see DEFAULT_DLAMI_SSM_PARAM_ARM64)
   DLAMI_SSM_PARAM       optional override: resolve the AL2023 GPU DLAMI via this
-                        SSM path instead of the pinned DEFAULT_AMI_ID (us-east-2)
+                        SSM path instead of the architecture default (amd64: the
+                        pinned DEFAULT_AMI_ID; arm64: the arm64 DLAMI SSM float)
   AWS_REGION            optional; otherwise your CLI's configured region is used
   SSH_HOST              hostname --wait offers to map in /etc/hosts (default:
                         PROJECT_NAME; ignored when it is already an IP address)
@@ -57,6 +65,59 @@ DEFAULT_DLAMI_SSM_PARAM = (
     "/aws/service/deeplearning/ami/x86_64/"
     "base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
 )
+
+# arm64 DLAMI SSM family (aarch64: Graviton CPU + T4G GPU). Unlike the x86_64
+# path there is NO pinned arm64 AMI id here: the /latest float is resolved via
+# SSM so the region's current arm64 NVIDIA DLAMI (if any) is used. OPERATOR MUST
+# VERIFY this path exists in their region before an arm64 launch:
+#   aws ssm get-parameter --region <region> --name "<DEFAULT_DLAMI_SSM_PARAM_ARM64>"
+# An arm64 NVIDIA DLAMI may or may not exist for the region (they are
+# region/availability dependent). If the parameter 404s, set AMI_ID to a stock
+# AL2023 arm64 AMI (manual NVIDIA driver/container-toolkit install path) or set
+# DLAMI_SSM_PARAM to a known-good arm64 SSM path. The x86_64 defaults above are
+# untouched by this - amd64 keeps its pinned behavior exactly.
+DEFAULT_DLAMI_SSM_PARAM_ARM64 = (
+    "/aws/service/deeplearning/ami/arm64/"
+    "base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
+)
+
+
+def resolve_arch(instance_type, arch_override=""):
+    """The instance's CPU architecture: "amd64" or "arm64".
+
+    An explicit ARCH override wins; otherwise it is inferred from the EC2
+    instance type family. Graviton families (g5g, c6g, m6g, r6g, a1, g6g, 7g)
+    are arm64; everything else is treated as amd64, so the long-standing x86_64
+    defaults are untouched.
+    """
+    override = (arch_override or "").strip().lower()
+    if override:
+        if override in ("arm64", "aarch64"):
+            return "arm64"
+        if override in ("amd64", "x86_64"):
+            return "amd64"
+        sys.exit(f"invalid ARCH '{arch_override}': expected amd64/x86_64 or arm64/aarch64")
+
+    family = (instance_type or "").lower()
+    graviton_prefixes = ("g5g", "c6g", "m6g", "r6g", "a1", "graviton")
+    if family.startswith(graviton_prefixes) or "g6g" in family or "7g" in family:
+        return "arm64"
+    return "amd64"
+
+
+def select_ami(cfg):
+    """The AMI id to launch with, in override order: AMI_ID, then a custom
+    DLAMI_SSM_PARAM, then an architecture default. amd64 keeps the pinned
+    DEFAULT_AMI_ID (us-east-2) exactly as before; arm64 resolves the arm64 DLAMI
+    SSM float (operator must verify it exists in their region - see the
+    DEFAULT_DLAMI_SSM_PARAM_ARM64 note above)."""
+    if cfg.ami:
+        return cfg.ami
+    if cfg.dlami_ssm_param != DEFAULT_DLAMI_SSM_PARAM:
+        return f"resolve:ssm:{cfg.dlami_ssm_param}"
+    if cfg.arch == "arm64":
+        return f"resolve:ssm:{DEFAULT_DLAMI_SSM_PARAM_ARM64}"
+    return DEFAULT_AMI_ID
 
 
 def aws(args, capture=True):
@@ -212,12 +273,15 @@ class Config:
     (see the module docstring for what each var means). `security_group`,
     `instance_profile`, `project`, `subnet`, and `ami` hold explicit overrides
     ("" when unset) that resolve_infra/resolve_subnet fill from stack outputs.
-    AWS_REGION is deliberately not here: aws() is its sole reader.
+    `arch` is parsed once from ARCH / the INSTANCE_TYPE family by resolve_arch,
+    so the rest of the module trusts it ("amd64" or "arm64"). AWS_REGION is
+    deliberately not here: aws() is its sole reader.
     """
     stack: str
     project: str
     key_name: str
     instance_type: str
+    arch: str
     subnet: str
     ami: str
     dlami_ssm_param: str
@@ -227,11 +291,13 @@ class Config:
 
     @classmethod
     def from_env(cls, instance_type=None):
+        instance_type = instance_type or os.environ.get("INSTANCE_TYPE", "g4dn.xlarge")
         return cls(
             stack=os.environ.get("CFN_STACK_NAME", "strimserver"),
             project=os.environ.get("PROJECT_NAME", "").strip(),
             key_name=os.environ.get("KEY_NAME", "").strip(),
-            instance_type=instance_type or os.environ.get("INSTANCE_TYPE", "g4dn.xlarge"),
+            instance_type=instance_type,
+            arch=resolve_arch(instance_type, os.environ.get("ARCH", "")),
             subnet=os.environ.get("SUBNET_ID", "").strip(),
             ami=os.environ.get("AMI_ID", "").strip(),
             dlami_ssm_param=os.environ.get("DLAMI_SSM_PARAM", DEFAULT_DLAMI_SSM_PARAM),
@@ -565,15 +631,12 @@ def launch_instance(cfg, use_spot, wait):
         sys.exit("KEY_NAME is required (an EC2 key pair name for SSH access).")
 
     subnet = resolve_subnet(cfg, sg)
-    # Explicit overrides win in order: AMI_ID, then a custom DLAMI_SSM_PARAM,
-    # then the pinned DEFAULT_AMI_ID (us-east-2). The /latest SSM float is no
-    # longer the default, so the containerd runtime is deterministic.
-    if cfg.ami:
-        ami = cfg.ami
-    elif cfg.dlami_ssm_param != DEFAULT_DLAMI_SSM_PARAM:
-        ami = f"resolve:ssm:{cfg.dlami_ssm_param}"
-    else:
-        ami = DEFAULT_AMI_ID
+    # Override order (select_ami): AMI_ID, then a custom DLAMI_SSM_PARAM, then
+    # an architecture default - amd64 keeps the pinned DEFAULT_AMI_ID (us-east-2)
+    # exactly as before, arm64 resolves the arm64 DLAMI SSM float. The /latest
+    # SSM float is no longer the x86_64 default, so the containerd runtime is
+    # deterministic on the amd64 path.
+    ami = select_ami(cfg)
 
     # Fold subnet + security group + public-IP request into a single primary NIC.
     # AWS forbids combining --associate-public-ip-address (or this NIC form) with
@@ -634,7 +697,11 @@ if __name__ == "__main__":
         description="Launch a strimserver GPU instance (no launch template).")
     parser.add_argument(
         "--type", default=os.environ.get("INSTANCE_TYPE", "g4dn.xlarge"),
-        help="EC2 instance type (default g6.xlarge: T4/sm_75, matches the default FFmpeg build)")
+        help="EC2 instance type (default g4dn.xlarge: x86_64 T4/sm_75, matches "
+             "the default FFmpeg build; g6.xlarge also supported). Use "
+             "--type g5g.2xlarge for the arm64 target (Graviton2 CPU + T4G "
+             "GPU/sm_75 for the aarch64 controller). ARCH is inferred from the "
+             "family unless ARCH is set.")
     parser.add_argument("--no-spot", action="store_true",
                         help="Use an on-demand instance instead of spot.")
     parser.add_argument(

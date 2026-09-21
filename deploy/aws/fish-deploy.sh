@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
 
+# fish is an operator convenience shell, not required by strimserver. The pinned
+# release URL below is x86_64-only; on any other architecture (e.g. aarch64 on
+# the g5g.2xlarge arm64 target) we skip the install loudly rather than download
+# a wrong-arch binary. This script is `source`d by deploy.sh, so the guard uses
+# `return` - an `exit` would kill the parent deploy.
+MACHINE="$(uname -m)"
+if [[ "$MACHINE" != "x86_64" && "$MACHINE" != "amd64" ]]; then
+   printf "\n*** fish shell: skipped on %s ***\n" "$MACHINE"
+   printf "The pinned fish 4.3.1 release URL is x86_64-only and strimserver does not\n"
+   printf "ship a pinned aarch64 fish build. fish is an operator convenience shell,\n"
+   printf "not required by strimserver - install it manually later if you want it:\n"
+   printf "  sudo dnf install fish     # or build from https://github.com/fish-shell/fish-shell\n\n"
+   return 0
+fi
+
 printf "configuring fish shell...\n"
 FISH_DIST_URL="https://github.com/fish-shell/fish-shell/releases/download/4.3.1/fish-4.3.1-linux-x86_64.tar.xz"
 FISH_DIST_CHECKSUM="dda2233dde1f36918a4ee2055a2bbbb61ddbdc9d81e77004885529b25560ba1f"

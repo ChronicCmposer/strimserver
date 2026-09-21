@@ -3,5 +3,6 @@ exports_files([
     "fish-deploy.sh",
     "imdslib.sh",
     "prompt_login.fish",
+    "setup-gpu.sh",
     "strimserver.service",
 ])

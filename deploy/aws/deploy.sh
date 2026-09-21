@@ -57,6 +57,16 @@ else
 fi
 # ------------------------------------------------------------------------------
 
+# NVIDIA GPU runtime: arch-aware (the DLAMI carries the driver + container
+# toolkit; on arm64 the assembly controller uses Option C - per-container task
+# options point the runc shim at nvidia-container-runtime for the GPU stages,
+# with the default runtime left unchanged; on amd64 the Go controller injects
+# CDI itself from /etc/cdi/nvidia.yaml). Runs BEFORE the containerd block below
+# so the single restart picks up any GPU wiring together with the root/state
+# config prepend.
+./setup-gpu.sh
+rm -f /mnt/nvme/setup-gpu.sh
+
 # containerd
 printf "configuring containerd...\n"
 set -x

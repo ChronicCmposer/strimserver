@@ -47,6 +47,7 @@ pkg_files(
         "//deploy/aws:fish-deploy.sh",
         "//deploy/aws:imdslib.sh",
         "//deploy/aws:prompt_login.fish",
+        "//deploy/aws:setup-gpu.sh",
         "//deploy/aws:strimserver.service",
         "//core:strimserver.env",
         "//core:mediamtx.yaml.template",
