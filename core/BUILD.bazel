@@ -456,6 +456,20 @@ pkg_files(
     prefix = "/lib64",
 )
 
+# The aarch64 loader's ELF interpreter path is /lib/ld-linux-aarch64.so.1 (there
+# is no /lib64 on aarch64; the amd64 loader lives at /lib64/ld-linux-x86-64.so.2,
+# matching the amd64 binary's interpreter). :ld_linux keeps the amd64 output
+# basename on both arches (byte-identical amd64 image), so the arm64 image
+# additionally places the loader at its canonical interpreter path -- the path
+# the kernel resolves when exec'ing the arm64 ffmpeg.
+pkg_files(
+    name = "ffmpeg_arm64_loader_interp",
+    srcs = [":ld_linux"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib",
+    renames = {":ld_linux": "ld-linux-aarch64.so.1"},
+)
+
 pkg_files(
     name = "ffmpeg_libs",
     srcs = [
@@ -511,9 +525,15 @@ pkg_files(
     renames = {":nsswitch_conf": "nsswitch.conf"},
 )
 
+# One ffmpeg artifact per architecture (like @mediamtx_dist): the amd64 build
+# @ffmpeg_dist (linux-x86_64 CUDA keys) or the arm64 build @ffmpeg_dist_arm64
+# (linux-sbsa CUDA keys), both pinned in MODULE.bazel and both targeting sm_75.
 pkg_files(
     name = "ffmpeg_root",
-    srcs = ["@ffmpeg_dist//:ffmpeg"],
+    srcs = select({
+        "//tools/bazel:is_amd64_target": ["@ffmpeg_dist//:ffmpeg"],
+        "//tools/bazel:is_arm64_target": ["@ffmpeg_dist_arm64//:ffmpeg"],
+    }),
     attributes = pkg_attributes(mode = "0755"),
     prefix = "/",
 )
@@ -528,7 +548,10 @@ pkg_tar(
         ":ffmpeg_nsswitch",
         ":ffmpeg_root",
         ":libfdk_aac_soname_link",
-    ],
+    ] + select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": [":ffmpeg_arm64_loader_interp"],
+    }),
     symlinks = {
         "/bin/sh": "/usr/bin/busybox",
         "/usr/bin/cat": "/usr/bin/busybox",
@@ -586,7 +609,12 @@ filegroup(
 sh_test(
     name = "ffmpeg_smoke_test",
     srcs = ["ffmpeg_smoke_test.sh"],
-    args = ["$(location :ffmpeg_files_tar)"],
+    args = [
+        "$(location :ffmpeg_files_tar)",
+    ] + select({
+        "//tools/bazel:is_amd64_target": ["amd64"],
+        "//tools/bazel:is_arm64_target": ["arm64"],
+    }),
     data = [":ffmpeg_files_tar"],
 )
 

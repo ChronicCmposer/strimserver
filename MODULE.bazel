@@ -390,26 +390,36 @@ http_archive(
 )
 
 # --- FFmpeg -------------------------------------------------------------
-# The ffmpeg binary is built out-of-band by tools/ffmpeg-dist/publish.sh
+# The ffmpeg binaries are built out-of-band by tools/ffmpeg-dist/publish.sh
 # (compiling FFmpeg against CUDA needs nvcc, not a GPU; see README.md's
-# "FFmpeg reproducibility and artifact pipeline" section). S3 is the
-# canonical source; the GitHub Release asset is a mirror. The sha256 is the
-# integrity pin. The S3 bucket and region come from the STRIMSERVER_S3_BUCKET
-# / STRIMSERVER_S3_REGION env vars (no committed defaults); when they are
-# unset, the GitHub Release mirror below is used.
+# "FFmpeg reproducibility and artifact pipeline" section). One artifact per
+# architecture, both with the same sm_75 CUDA arch: @ffmpeg_dist is the amd64
+# build (linux-x86_64 manifest keys), @ffmpeg_dist_arm64 the arm64 build
+# (linux-sbsa manifest keys, built natively on an aarch64 host -- see
+# FFMPEG_ARCH in tools/ffmpeg-dist/publish.sh). S3 is the canonical source;
+# the GitHub Release asset is a mirror. Each sha256 is the integrity pin. The
+# S3 bucket and region come from the STRIMSERVER_S3_BUCKET / STRIMSERVER_S3_REGION
+# env vars (no committed defaults); when they are unset, the GitHub Release
+# mirrors below are used.
 #
-# TODO(arm64): @ffmpeg_dist is the amd64 build (linux-x86_64, sm_75 CUDA
-# arch). An arm64 ffmpeg (linux-sbsa, sm_75) must be built by the out-of-band
-# tools/ffmpeg-dist pipeline; when it is produced, add an ffmpeg_dist_arm64
-# pin here and make core/BUILD.bazel's ffmpeg_image srcs/architecture select
-# it per target architecture (the lib paths are already selectable via the
-# @trixie deb_file wiring).
+# NOTE: the arm64 artifact below was built locally (SKIP_UPLOAD=1); it must be
+# uploaded out-of-band to S3 (ffmpeg/ffmpeg-8.1-...-arm64.tar.gz) and as a
+# GitHub Release asset before arm64 builds can fetch it. The sha256 is real
+# (computed from the local build), not a placeholder.
 s3_http_archive(
     name = "ffmpeg_dist",
     build_file_content = 'exports_files(["ffmpeg", "BUILD-INFO.txt"])',
     mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/ffmpeg-artifacts/ffmpeg-8.1-deb20260824-cuda13.2.2-sm75-1a748fe.tar.gz"],
     s3_key = "ffmpeg/ffmpeg-8.1-deb20260824-cuda13.2.2-sm75-1a748fe.tar.gz",
     sha256 = "44021ca11d9c5a3f1921b57150dfe68562cb291658afbef40b231a3554a82120",
+)
+
+s3_http_archive(
+    name = "ffmpeg_dist_arm64",
+    build_file_content = 'exports_files(["ffmpeg", "BUILD-INFO.txt"])',
+    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/ffmpeg-artifacts/ffmpeg-8.1-deb20260824-cuda13.2.2-sm75-1a748fe-arm64.tar.gz"],
+    s3_key = "ffmpeg/ffmpeg-8.1-deb20260824-cuda13.2.2-sm75-1a748fe-arm64.tar.gz",
+    sha256 = "ba285eba5bd32fa2095a59dcf5c16822c02c964889de58478569ba93e34c910c",
 )
 
 # --- Offline fallback segment ----------------------------------------------

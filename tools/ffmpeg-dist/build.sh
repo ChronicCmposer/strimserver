@@ -15,6 +15,12 @@
 # Pinned inputs (env, defaults defined in this script):
 #   FFMPEG_VERSION         8.1
 #   FFMPEG_COMMIT          1a748fe2cd43e3ead22fafb1b5b7d77f153898a8
+#   FFMPEG_ARCH            amd64|arm64 (default amd64). Selects the CUDA
+#                          redistributable platform key for CUDA_COMPONENTS:
+#                          amd64 -> linux-x86_64, arm64 -> linux-sbsa. amd64
+#                          is the default and produces the byte-identical
+#                          pinned artifact. All other pins and configure
+#                          flags are arch-independent (GENCODE stays sm_75).
 #   NV_CODEC_HEADERS_TAG   n13.0.19.1
 #   NV_CODEC_HEADERS_COMMIT 88fee5c37318c991a8762d423530f91681e32e3a
 #   CUDA_MANIFEST_URL      https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json
@@ -60,6 +66,15 @@ fi
 # --- pins (env, defaults defined in this script) ----------------------------
 : "${FFMPEG_VERSION:=8.1}"
 : "${FFMPEG_COMMIT:=1a748fe2cd43e3ead22fafb1b5b7d77f153898a8}"
+: "${FFMPEG_ARCH:=amd64}"
+case "$FFMPEG_ARCH" in
+  amd64) CUDA_MANIFEST_KEY="linux-x86_64" ;;
+  arm64) CUDA_MANIFEST_KEY="linux-sbsa" ;;
+  *)
+    echo "error: unsupported FFMPEG_ARCH '$FFMPEG_ARCH' (expected 'amd64' or 'arm64')" >&2
+    exit 1
+    ;;
+esac
 : "${NV_CODEC_HEADERS_TAG:=n13.0.19.1}"
 : "${NV_CODEC_HEADERS_COMMIT:=88fee5c37318c991a8762d423530f91681e32e3a}"
 : "${CUDA_MANIFEST_URL:=https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json}"
@@ -146,8 +161,8 @@ if [[ "$reuse" != 1 ]]; then
     mkdir -p /opt/cuda/downloads /opt/cuda/merged /usr/local/cuda
     curl -fsSL "$CUDA_MANIFEST_URL" -o /opt/cuda/manifest.json
     for component in $CUDA_COMPONENTS; do
-        relative_path="$(jq -r --arg c "$component" '.[$c]["linux-x86_64"].relative_path' /opt/cuda/manifest.json)"
-        sha256="$(jq -r --arg c "$component" '.[$c]["linux-x86_64"].sha256' /opt/cuda/manifest.json)"
+        relative_path="$(jq -r --arg c "$component" --arg k "$CUDA_MANIFEST_KEY" '.[$c][$k].relative_path' /opt/cuda/manifest.json)"
+        sha256="$(jq -r --arg c "$component" --arg k "$CUDA_MANIFEST_KEY" '.[$c][$k].sha256' /opt/cuda/manifest.json)"
         curl -fsSL "$cuda_redist_base/$relative_path" -o "/opt/cuda/downloads/${component}.tar.xz"
         printf '%s  %s\n' "$sha256" "/opt/cuda/downloads/${component}.tar.xz" | sha256sum -c -
         tar -xJf "/opt/cuda/downloads/${component}.tar.xz" -C /opt/cuda/merged --strip-components=1 --no-same-owner
@@ -275,7 +290,7 @@ cuda_version="$(basename "$CUDA_MANIFEST_URL" | sed -E 's/^redistrib_([0-9.]+)\.
     printf 'cuda_manifest_url: %s\n' "$CUDA_MANIFEST_URL"
     for component in $CUDA_COMPONENTS; do
         printf 'cuda_component %s sha256: %s\n' "$component" \
-            "$(jq -r --arg c "$component" '.[$c]["linux-x86_64"].sha256' /opt/cuda/manifest.json)"
+            "$(jq -r --arg c "$component" --arg k "$CUDA_MANIFEST_KEY" '.[$c][$k].sha256' /opt/cuda/manifest.json)"
     done
     printf 'gencode: %s\n' "$GENCODE"
     printf 'libfdk_aac_dev_version: %s\n' "$(dpkg-query -W -f='${Version}' libfdk-aac-dev)"

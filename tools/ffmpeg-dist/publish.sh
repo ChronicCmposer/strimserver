@@ -11,17 +11,32 @@
 # host is not x86_64. The build itself is the shared build.sh, the same single
 # source of truth for the pinned artifact.
 #
+# Architecture (FFMPEG_ARCH): the guest runs natively whenever the host arch
+# matches the target arch (amd64 on x86_64, arm64 on aarch64); otherwise the
+# amd64 guest runs under the patched qemu-x86_64. Only amd64 guests can be
+# emulated (the pipeline has no qemu-aarch64); building the arm64 artifact on
+# an x86_64 host is rejected up front. The arm64 rootfs is the arm64 variant
+# of the same pinned Debian snapshot, the CUDA components come from the
+# manifest's linux-sbsa keys (build.sh derives that from FFMPEG_ARCH), and
+# the artifact name gains an -arm64 discriminator so it never collides with
+# the amd64 name.
+#
 # The resulting /out payload (ffmpeg + BUILD-INFO.txt) is tared as
-#   ffmpeg-<FFMPEG_VERSION>-deb<YYYYMMDD>-cuda<X.Y.Z>-sm<N>-<shortsha>.tar.gz
+#   ffmpeg-<FFMPEG_VERSION>-deb<YYYYMMDD>-cuda<X.Y.Z>-sm<N>-<shortsha>[-arm64].tar.gz
 # (written into the current directory), uploaded to $S3_BUCKET/ffmpeg/ with
 # no ACL modification (objects get the bucket's default private ACL; the
 # IP-scoped HTTPS-only bucket policy from scripts/bucket-cidr-policy.sh is the only
 # access gate), then the s3_http_archive block is printed for MODULE.bazel
-# (name = "ffmpeg_dist").
+# (name = "ffmpeg_dist", or "ffmpeg_dist_arm64" for FFMPEG_ARCH=arm64).
 #
 # Env vars (defaults mirror the build.sh pins):
 #   FFMPEG_VERSION       default 8.1
 #   FFMPEG_COMMIT        default 1a748fe2cd43e3ead22fafb1b5b7d77f153898a8
+#   FFMPEG_ARCH          default amd64; amd64|arm64 selects the guest/rootfs
+#                        arch, the CUDA manifest key (linux-x86_64 /
+#                        linux-sbsa, derived in build.sh) and the -arm64
+#                        artifact-name discriminator. Default amd64 is
+#                        byte-identical to the pre-parameterization behavior.
 #   NV_CODEC_HEADERS_TAG default n13.0.19.1
 #   NV_CODEC_HEADERS_COMMIT default 88fee5c37318c991a8762d423530f91681e32e3a
 #   CUDA_MANIFEST_URL    default .../redistrib_13.2.2.json
@@ -34,22 +49,25 @@
 #                        guest CPUID leaves, which changes codegen and so the
 #                        ffmpeg artifact). Passed to tools/qemu/build-qemu.sh
 #                        on self-heal; the version-stamped cache keeps it
-#                        separate from openssh-dist's 9.2.4 pin.
+#                        separate from openssh-dist's 9.2.4 pin. Only used
+#                        when the guest arch differs from the host arch.
 #   QEMU_BIN             default: unset. Explicit override for the patched qemu
 #                        used on non-x86_64 hosts; must be a
 #                        buildkit-direct-execve patched qemu (verified via the
 #                        'safe_execve' marker), otherwise it is ignored with a
 #                        warning. Resolution order: QEMU_BIN (validated) >
 #                        cached patched qemu (re-validated) > self-heal source
-#                        build via tools/qemu/build-qemu.sh. amd64 hosts
-#                        run the guest natively with no qemu at all.
+#                        build via tools/qemu/build-qemu.sh. Native builds
+#                        (host arch == FFMPEG_ARCH) run the guest natively
+#                        with no qemu at all.
 #   FFMPEG_DIST_ROOTFS   default unset; when set to an already-extracted rootfs
 #                        the Docker Hub registry pull is skipped entirely.
 #   FFMPEG_DIST_CACHE    default ${XDG_CACHE_HOME:-$HOME/.cache}/ffmpeg-dist;
 #                        the persistent version-stamped rootfs cache. The rootfs
 #                        is keyed by DEBIAN_SNAPSHOT + FFMPEG_COMMIT + CUDA
 #                        version + NV_CODEC_HEADERS_COMMIT + SM target +
-#                        QEMU_VERSION (every build-determining pin) and stamped
+#                        QEMU_VERSION (+ -arm64 for the arm64 build, so the
+#                        two arch rootfs caches never collide) and stamped
 #                        with a .provisioned sentinel (provisioned into
 #                        $rootfs.new then atomically mv'd into place), so an
 #                        aborted build resumes from the cached rootfs on the
@@ -72,6 +90,7 @@ set -euo pipefail
 # --- inputs (defaults mirror the build.sh pins) ---
 FFMPEG_VERSION="${FFMPEG_VERSION:-8.1}"
 FFMPEG_COMMIT="${FFMPEG_COMMIT:-1a748fe2cd43e3ead22fafb1b5b7d77f153898a8}"
+FFMPEG_ARCH="${FFMPEG_ARCH:-amd64}"
 NV_CODEC_HEADERS_TAG="${NV_CODEC_HEADERS_TAG:-n13.0.19.1}"
 NV_CODEC_HEADERS_COMMIT="${NV_CODEC_HEADERS_COMMIT:-88fee5c37318c991a8762d423530f91681e32e3a}"
 CUDA_MANIFEST_URL="${CUDA_MANIFEST_URL:-https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json}"
@@ -94,6 +113,19 @@ if [[ ! "$FFMPEG_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
+# --- derive the per-arch values from FFMPEG_ARCH (single source of truth) ---
+# ROOTFS_ARCH selects the Debian image platform; ARTIFACT_ARCH_SUFFIX keeps the
+# arm64 artifact name distinct from the amd64 one. CUDA_MANIFEST_KEY is derived
+# in build.sh from the same FFMPEG_ARCH, so the two scripts cannot disagree.
+case "$FFMPEG_ARCH" in
+  amd64) ROOTFS_ARCH="amd64"; ARTIFACT_ARCH_SUFFIX="" ;;
+  arm64) ROOTFS_ARCH="arm64"; ARTIFACT_ARCH_SUFFIX="-arm64" ;;
+  *)
+    echo "error: unsupported FFMPEG_ARCH '$FFMPEG_ARCH' (expected 'amd64' or 'arm64')" >&2
+    exit 1
+    ;;
+esac
+
 # --- derive the artifact name from the pins (single source of truth) ---
 cuda_version="$(basename "$CUDA_MANIFEST_URL" | sed -E 's/^redistrib_([0-9.]+)\.json$/\1/')"
 deb_date="${DEBIAN_SNAPSHOT%%T*}"
@@ -110,7 +142,14 @@ if [[ ! "$sm_suffix" =~ ^sm[0-9]+$ ]]; then
   echo "error: cannot derive the sm target from GENCODE='$GENCODE' (expected e.g. 'arch=compute_75,code=sm_75')" >&2
   exit 1
 fi
-artifact="ffmpeg-${FFMPEG_VERSION}-deb${deb_date}-cuda${cuda_version}-${sm_suffix}-${FFMPEG_COMMIT:0:7}.tar.gz"
+artifact="ffmpeg-${FFMPEG_VERSION}-deb${deb_date}-cuda${cuda_version}-${sm_suffix}-${FFMPEG_COMMIT:0:7}${ARTIFACT_ARCH_SUFFIX}.tar.gz"
+# The MODULE.bazel repository name follows the same convention as the other
+# dual-arch pins (@mediamtx_dist / @mediamtx_dist_arm64).
+if [[ "$FFMPEG_ARCH" == "arm64" ]]; then
+  stanza_name="ffmpeg_dist_arm64"
+else
+  stanza_name="ffmpeg_dist"
+fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="$(mktemp -d)"
@@ -121,10 +160,30 @@ trap 'rm -rf "$work" 2>/dev/null || true' EXIT
 mkdir -p "$work/out"
 
 host_arch="$(uname -m)"
+case "$host_arch" in
+  x86_64) host_arch="amd64" ;;
+  aarch64) host_arch="arm64" ;;
+esac
 # This consumer pins qemu 8.2.2 (openssh-dist pins 9.2.4) and uses a
 # version-stamped cache (tools/qemu/build-qemu.sh), so the two artifact
 # pipelines never share a qemu binary.
 qemu_cache_path="${XDG_CACHE_HOME:-$HOME/.cache}/qemu/qemu-x86_64-patched-${QEMU_VERSION}"
+
+# qemu is only needed when the guest arch differs from the host arch (the
+# amd64 guest emulated on a non-x86_64 host). Native builds (host arch ==
+# FFMPEG_ARCH) run the guest directly with no qemu at all. Only amd64 guests
+# can be emulated: the pipeline has no qemu-aarch64, so building the arm64
+# artifact on an x86_64 host is rejected up front (fail fast) rather than
+# attempted under an emulator that would change the artifact.
+need_qemu=0
+if [[ "$FFMPEG_ARCH" != "$host_arch" ]]; then
+  if [[ "$FFMPEG_ARCH" == "arm64" ]]; then
+    echo "error: cannot build the arm64 artifact on a $host_arch host: this pipeline has no qemu-aarch64 emulator." >&2
+    echo "       Only amd64 guests are emulated (with the patched qemu-x86_64); build arm64 natively on an aarch64 host." >&2
+    exit 1
+  fi
+  need_qemu=1
+fi
 
 # --- resolve the qemu emulator (only needed on non-x86_64 hosts) ---
 # qemu_is_patched <path> -- true iff <path> is a usable buildkit-direct-execve
@@ -198,12 +257,12 @@ resolve_qemu() {
   exit 1
 }
 
-if [[ "$host_arch" != "x86_64" ]]; then
+if [[ "$need_qemu" == 1 ]]; then
   qemu=""
   if ! resolve_qemu || ! "$qemu" --version >/dev/null 2>&1; then
-    echo "error: host arch is '$host_arch' (not x86_64) and no usable qemu-x86_64 was found." >&2
-    echo "       publish.sh runs natively on amd64 hosts with no qemu at all." >&2
-    echo "       arm64 hosts need the tonistiigi buildkit-direct-execve patched qemu" >&2
+    echo "error: host arch is '$host_arch' and the amd64 guest needs qemu-x86_64, but no usable patched qemu-x86_64 was found." >&2
+    echo "       Native builds (host arch == FFMPEG_ARCH) run the guest with no qemu at all." >&2
+    echo "       Cross builds need the tonistiigi buildkit-direct-execve patched qemu" >&2
     echo "       (upstream qemu cannot intercept the guest's execve and the" >&2
     echo "       buildkit-bundled qemu segfaults on NVIDIA's cicc)." >&2
     echo "       publish.sh self-heals by building it from source (build-qemu.sh);" >&2
@@ -218,11 +277,11 @@ fi
 
 # --- rootfs provisioning: pull the pinned base image via the registry API ---
 # provision_rootfs <rootfs> <tag> -- pulls the <tag> manifest list from the
-# Docker Hub registry (plain curl+jq), selects the linux/amd64 image, and
+# Docker Hub registry (plain curl+jq), selects the $ROOTFS_ARCH image, and
 # extracts its layers into <rootfs>. Returns non-zero on any failure; the
 # caller prints the loud error with the FFMPEG_DIST_ROOTFS fallback hint.
 provision_rootfs() {
-  local rootfs="$1" tag="$2" token manifest_list amd64_digest manifest layer_digests layer_digest
+  local rootfs="$1" tag="$2" token manifest_list arch_digest manifest layer_digests layer_digest
   token="$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull" | jq -r '.token')" \
     || return 1
   manifest_list="$(curl -fsSL \
@@ -231,13 +290,13 @@ provision_rootfs() {
       "https://registry-1.docker.io/v2/library/debian/manifests/$tag" \
     | jq -c .)" \
     || return 1
-  amd64_digest="$(printf '%s' "$manifest_list" | jq -r '.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .digest')" \
+  arch_digest="$(printf '%s' "$manifest_list" | jq -r --arg a "$ROOTFS_ARCH" '.manifests[] | select(.platform.os=="linux" and .platform.architecture==$a) | .digest')" \
     || return 1
-  [[ -n "$amd64_digest" ]] || return 1
+  [[ -n "$arch_digest" ]] || return 1
   manifest="$(curl -fsSL \
       -H "Authorization: Bearer $token" \
       -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
-      "https://registry-1.docker.io/v2/library/debian/manifests/$amd64_digest" \
+      "https://registry-1.docker.io/v2/library/debian/manifests/$arch_digest" \
     | jq -c .)" \
     || return 1
   layer_digests="$(printf '%s' "$manifest" | jq -r '.layers[].digest')" \
@@ -253,11 +312,15 @@ provision_rootfs() {
   return 0
 }
 
-rootfs="${FFMPEG_DIST_ROOTFS:-$FFMPEG_DIST_CACHE/rootfs-${DEBIAN_SNAPSHOT}-${FFMPEG_COMMIT}-cuda${cuda_version}-nv${NV_CODEC_HEADERS_COMMIT:0:7}-sm${sm_suffix}-${QEMU_VERSION}}"
+rootfs_arch_tag=""
+if [[ "$FFMPEG_ARCH" == "arm64" ]]; then
+  rootfs_arch_tag="-arm64"
+fi
+rootfs="${FFMPEG_DIST_ROOTFS:-$FFMPEG_DIST_CACHE/rootfs-${DEBIAN_SNAPSHOT}-${FFMPEG_COMMIT}-cuda${cuda_version}-nv${NV_CODEC_HEADERS_COMMIT:0:7}-sm${sm_suffix}${rootfs_arch_tag}-${QEMU_VERSION}}"
 if [[ -z "$FFMPEG_DIST_ROOTFS" ]]; then
   base_tag="debian:trixie-${deb_date}-slim"
   if [[ ! -f "$rootfs/.provisioned" ]]; then
-    echo "==> provisioning $base_tag (linux/amd64) via the Docker Hub registry API"
+    echo "==> provisioning $base_tag (linux/${ROOTFS_ARCH}) via the Docker Hub registry API"
     rm -rf "$rootfs" "$rootfs.new"
     mkdir -p "$rootfs.new"
     if ! provision_rootfs "$rootfs.new" "${base_tag#debian:}"; then
@@ -284,11 +347,11 @@ if [[ -L "$rootfs/etc/resolv.conf" ]]; then
 fi
 cp "$repo_root/tools/ffmpeg-dist/build.sh" "$rootfs/build.sh"
 chmod +x "$rootfs/build.sh"
-if [[ "$host_arch" != "x86_64" ]]; then
+if [[ "$need_qemu" == 1 ]]; then
   cp -f "$QEMU_BIN" "$rootfs/usr/local/bin/qemu-x86_64"
 fi
 
-# --- inner harness: mounts + chroot (+ qemu when the host is not amd64) ---
+# --- inner harness: mounts + chroot (+ qemu when the guest arch is emulated) ---
 {
   printf '#!/usr/bin/env bash\n'
   printf 'set -euo pipefail\n'
@@ -299,11 +362,11 @@ fi
   printf '  mount --bind "/dev/$n" "$rootfs/dev/$n"\n'
   printf 'done\n'
   printf 'mount --bind "$rootfs/etc/resolv.conf" "$rootfs/etc/resolv.conf"\n'
-  for pin in FFMPEG_VERSION FFMPEG_COMMIT NV_CODEC_HEADERS_TAG NV_CODEC_HEADERS_COMMIT \
+  for pin in FFMPEG_VERSION FFMPEG_COMMIT FFMPEG_ARCH NV_CODEC_HEADERS_TAG NV_CODEC_HEADERS_COMMIT \
              CUDA_MANIFEST_URL DEBIAN_SNAPSHOT CUDA_COMPONENTS GENCODE NPROC; do
     printf 'export %s=%s\n' "$pin" "$(printf %q "${!pin}")"
   done
-  if [[ "$host_arch" != "x86_64" ]]; then
+  if [[ "$need_qemu" == 1 ]]; then
     printf 'chroot "$rootfs" /usr/local/bin/qemu-x86_64 /bin/bash -eux -o pipefail /build.sh\n'
   else
     printf 'chroot "$rootfs" /bin/bash -eux -o pipefail /build.sh\n'
@@ -311,10 +374,14 @@ fi
 } > "$work/inner.sh"
 chmod +x "$work/inner.sh"
 
-# The artifact is always linux/amd64 (matches .bazelrc's
-# --platforms=//tools/bazel:linux_amd64), so on arm64 hosts this is a
-# cross-arch build through QEMU -- expected, and slow.
-echo "==> building $artifact (linux/amd64) via chroot+qemu (no docker)"
+# The artifact is built for FFMPEG_ARCH (matching the .bazelrc
+# --platforms=//tools/bazel:linux_<arch> selection); when the host arch
+# differs, the amd64 guest runs under the patched qemu -- expected, and slow.
+if [[ "$need_qemu" == 1 ]]; then
+  echo "==> building $artifact (linux/${FFMPEG_ARCH}) via chroot+qemu (no docker)"
+else
+  echo "==> building $artifact (linux/${FFMPEG_ARCH}) via chroot natively (no docker)"
+fi
 
 # --- privilege wrapper: root, passwordless sudo, or a fresh user namespace ---
 if [[ $EUID -eq 0 ]]; then
@@ -372,7 +439,7 @@ mirror_url="https://github.com/${GITHUB_REPOSITORY:-ChronicCmposer/strimserver}/
 
 printf '\n# --- MODULE.bazel: paste this s3_http_archive block into MODULE.bazel ---\n'
 printf 's3_http_archive(\n'
-printf '    name = "ffmpeg_dist",\n'
+printf '    name = "%s",\n' "$stanza_name"
 printf '    s3_key = "ffmpeg/%s",\n' "$artifact"
 printf '    sha256 = "%s",\n' "$sha256"
 printf '    mirror_urls = ["%s"],\n' "$mirror_url"
