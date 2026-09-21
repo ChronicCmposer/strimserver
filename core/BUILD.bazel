@@ -2,7 +2,7 @@ load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_distroless//distroless:defs.bzl", "cacerts")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
-load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files", "pkg_mklink")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("//tools/bazel:deb_file.bzl", "deb_file")
 
@@ -65,9 +65,24 @@ genrule(
     cmd = "touch $@",
 )
 
+# The mediamtx release ships one binary per architecture; the strip genrule
+# consumes whichever matches the target platform (the amd64 build uses
+# @mediamtx_dist, the arm64 build @mediamtx_dist_arm64 -- both pinned in
+# MODULE.bazel). Both binaries are statically linked Go; stripping is a pure
+# size optimization. The arm64 binary is stripped natively when the exec host
+# is aarch64 (the host's GNU strip handles aarch64 ELFs directly); on any
+# other host there is no arm64 cross-strip toolchain, so it skips fail-soft.
+filegroup(
+    name = "mediamtx_dist_bin",
+    srcs = select({
+        "//tools/bazel:is_amd64_target": ["@mediamtx_dist//:mediamtx"],
+        "//tools/bazel:is_arm64_target": ["@mediamtx_dist_arm64//:mediamtx"],
+    }),
+)
+
 genrule(
     name = "mediamtx_bin_stripped",
-    srcs = ["@mediamtx_dist//:mediamtx"],
+    srcs = [":mediamtx_dist_bin"],
     tools = [
         ":amd64_strip_bin",
         ":amd64_strip_libbfd",
@@ -75,14 +90,18 @@ genrule(
         ":amd64_strip_libz",
         ":amd64_strip_libzstd",
         ":amd64_strip_libgcc_s",
-        ":ld_linux",
-        ":libc_so",
+        # The qemu sysroot below needs the *amd64* loader + libc regardless of
+        # target arch, and tools are built for the exec platform, so these are
+        # amd64-only deb_files (strip_ld_linux / strip_libc_so), not the
+        # arch-aware :ld_linux / :libc_so used by the image layers.
+        ":strip_ld_linux",
+        ":strip_libc_so",
         ":qemu_x86_64_patched_tool",
     ],
     outs = ["mediamtx"],
     cmd = """
 set -eu
-cp $(location @mediamtx_dist//:mediamtx) $@
+cp $(location :mediamtx_dist_bin) $@
 chmod +w $@
 host="$$(uname -m)"
 machine="$$(readelf -h $@ | awk -F': *' '/Machine:/{print $$2}' | tr '[:upper:]' '[:lower:]')"
@@ -102,9 +121,9 @@ case "$$machine" in
       sysroot="$$(mktemp -d)"
       trap 'rm -rf "$$sysroot"' EXIT
       mkdir -p "$$sysroot/lib64" "$$sysroot/lib/x86_64-linux-gnu"
-      cp "$(location :ld_linux)" "$$sysroot/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+      cp "$(location :strip_ld_linux)" "$$sysroot/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
       ln -s ../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "$$sysroot/lib64/ld-linux-x86-64.so.2"
-      cp "$(location :libc_so)" "$$sysroot/lib/x86_64-linux-gnu/libc.so.6"
+      cp "$(location :strip_libc_so)" "$$sysroot/lib/x86_64-linux-gnu/libc.so.6"
       cp "$(location :amd64_strip_libbfd)" "$$sysroot/lib/x86_64-linux-gnu/libbfd-2.44-system.so"
       cp "$(location :amd64_strip_libsframe)" "$$sysroot/lib/x86_64-linux-gnu/libsframe.so.1"
       cp "$(location :amd64_strip_libz)" "$$sysroot/lib/x86_64-linux-gnu/libz.so.1"
@@ -113,6 +132,17 @@ case "$$machine" in
       if ! "$$qemu" -L "$$sysroot" "$$strip_tool" "$@"; then
         echo "note: skipping strip of $$machine mediamtx on $$host host (qemu cross-strip failed)" >&2
       fi
+    fi
+    ;;
+  *aarch64*)
+    if [ "$$host" = aarch64 ]; then
+      # Native host strip: the exec host's GNU strip handles aarch64 ELFs
+      # directly, exactly like the amd64 native case above.
+      strip $@
+    else
+      # No arm64 cross-strip toolchain (deliberately no qemu-aarch64 here):
+      # fail-soft with a loud note -- the unstripped binary is fine.
+      echo "note: skipping strip of $$machine mediamtx on $$host host (no cross strip)" >&2
     fi
     ;;
   *)
@@ -124,50 +154,55 @@ esac
 
 deb_file(
     name = "busybox_bin",
-    data = "@trixie//busybox-static/amd64:data",
+    data = "@trixie//busybox-static:data",
     path = "usr/bin/busybox",
 )
 
 deb_file(
     name = "nice_bin",
-    data = "@trixie//coreutils/amd64:data",
+    data = "@trixie//coreutils:data",
     path = "usr/bin/nice",
 )
 
 deb_file(
     name = "envsubst_bin",
-    data = "@trixie//gettext-base/amd64:data",
+    data = "@trixie//gettext-base:data",
     path = "usr/bin/envsubst",
 )
 
 deb_file(
     name = "ld_linux",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
 )
 
 deb_file(
     name = "libc_so",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/libc.so.6",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/libc.so.6",
 )
 
 deb_file(
     name = "libm_so",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/libm.so.6",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/libm.so.6",
 )
 
 deb_file(
     name = "libpthread_so",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/libpthread.so.0",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/libpthread.so.0",
 )
 
 deb_file(
     name = "libresolv_so",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/libresolv.so.2",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/libresolv.so.2",
 )
 
 # --- amd64 GNU strip tool ----------------------------------------------------
@@ -217,9 +252,32 @@ deb_file(
     path = "usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
 )
 
+# The amd64 loader + libc for the qemu cross-strip sysroot (mediamtx_bin_stripped
+# above). These are exec tools, so they are deliberately amd64-ONLY: the
+# qemu-x86_64 emulator rejects a non-x86-64 ELF loader with "Invalid ELF image
+# for this architecture". Do NOT point them at the arch-selecting alias or add
+# path_arm64 -- the arch-aware :ld_linux / :libc_so above serve the image
+# layers instead.
+deb_file(
+    name = "strip_ld_linux",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    out = "strip-ld-linux-x86-64.so.2",
+)
+
+deb_file(
+    name = "strip_libc_so",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libc.so.6",
+    out = "strip-libc.so.6",
+)
+
+# ca-certificates is Arch:all, so the arch-selecting alias
+# @trixie//ca-certificates:data resolves to the same content tar for amd64
+# and arm64 (the amd64 bytes are unchanged).
 cacerts(
     name = "cacerts",
-    package = "@trixie//ca-certificates/amd64:data",
+    package = "@trixie//ca-certificates:data",
 )
 
 pkg_files(
@@ -249,7 +307,10 @@ pkg_files(
         ":libresolv_so",
     ],
     attributes = pkg_attributes(mode = "0755"),
-    prefix = "/lib/x86_64-linux-gnu",
+    prefix = select({
+        "//tools/bazel:is_amd64_target": "/lib/x86_64-linux-gnu",
+        "//tools/bazel:is_arm64_target": "/lib/aarch64-linux-gnu",
+    }),
 )
 
 pkg_files(
@@ -305,7 +366,10 @@ pkg_tar(
 
 oci_image(
     name = "mediamtx_image",
-    architecture = "amd64",
+    architecture = select({
+        "//tools/bazel:is_amd64_target": "amd64",
+        "//tools/bazel:is_arm64_target": "arm64",
+    }),
     entrypoint = ["/entrypoint.sh"],
     os = "linux",
     tars = [
@@ -336,37 +400,43 @@ sh_test(
 
 deb_file(
     name = "libdl_so",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/libdl.so.2",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/libdl.so.2",
 )
 
 deb_file(
     name = "librt_so",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/librt.so.1",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/librt.so.1",
 )
 
 deb_file(
     name = "libnss_dns_so",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/libnss_dns.so.2",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/libnss_dns.so.2",
 )
 
 deb_file(
     name = "libnss_files_so",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/libnss_files.so.2",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/libnss_files.so.2",
 )
 
 # libfdk-aac2t64 ships libfdk-aac.so.2 as a SYMLINK to libfdk-aac.so.2.0.3, and
 # deb_file (tar -xzf of a single member + cp -p) cannot copy a dangling symlink
 # (the target member is not extracted). Extract the real versioned file here and
-# recreate the soname symlink in :ffmpeg_files_tar -- matching the Debian
-# package layout (and the soname symlink the Debian package ships).
+# recreate the soname symlink in :libfdk_aac_soname_link below -- matching the
+# Debian package layout (and the soname symlink the Debian package ships). The
+# versioned filename is identical on both architectures.
 deb_file(
     name = "libfdk_aac_real",
-    data = "@trixie//libfdk-aac2t64/amd64:data",
+    data = "@trixie//libfdk-aac2t64:data",
     path = "usr/lib/x86_64-linux-gnu/libfdk-aac.so.2.0.3",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/libfdk-aac.so.2.0.3",
 )
 
 pkg_files(
@@ -399,14 +469,38 @@ pkg_files(
         ":libnss_files_so",
     ],
     attributes = pkg_attributes(mode = "0755"),
-    prefix = "/lib/x86_64-linux-gnu",
+    prefix = select({
+        "//tools/bazel:is_amd64_target": "/lib/x86_64-linux-gnu",
+        "//tools/bazel:is_arm64_target": "/lib/aarch64-linux-gnu",
+    }),
 )
 
 pkg_files(
     name = "ffmpeg_fdk_libs",
     srcs = [":libfdk_aac_real"],
     attributes = pkg_attributes(mode = "0755"),
-    prefix = "/usr/lib/x86_64-linux-gnu",
+    prefix = select({
+        "//tools/bazel:is_amd64_target": "/usr/lib/x86_64-linux-gnu",
+        "//tools/bazel:is_arm64_target": "/usr/lib/aarch64-linux-gnu",
+    }),
+)
+
+# The Debian package ships libfdk-aac.so.2 as a symlink to the versioned file
+# above. pkg_tar's `symlinks` dict cannot hold a select() (the keys of an
+# attr.string_dict are not configurable in Bazel), so the soname symlink is
+# declared with pkg_mklink instead: its `link_name` is an attr.string, which
+# select()s between the amd64 and arm64 multiarch dirs. `target` stays the
+# same relative versioned filename on both architectures, and mode 0555
+# matches what pkg_tar's default mode used to stamp on the legacy symlinks
+# dict entry, keeping the amd64 tar byte-identical.
+pkg_mklink(
+    name = "libfdk_aac_soname_link",
+    link_name = select({
+        "//tools/bazel:is_amd64_target": "/usr/lib/x86_64-linux-gnu/libfdk-aac.so.2",
+        "//tools/bazel:is_arm64_target": "/usr/lib/aarch64-linux-gnu/libfdk-aac.so.2",
+    }),
+    target = "libfdk-aac.so.2.0.3",
+    attributes = pkg_attributes(mode = "0555"),
 )
 
 pkg_files(
@@ -433,6 +527,7 @@ pkg_tar(
         ":ffmpeg_fdk_libs",
         ":ffmpeg_nsswitch",
         ":ffmpeg_root",
+        ":libfdk_aac_soname_link",
     ],
     symlinks = {
         "/bin/sh": "/usr/bin/busybox",
@@ -443,22 +538,36 @@ pkg_tar(
         "/usr/bin/rm": "/usr/bin/busybox",
         "/usr/bin/sh": "/usr/bin/busybox",
         "/usr/bin/wget": "/usr/bin/busybox",
-        # soname symlink for the real libfdk-aac.so.2.0.3 shipped above
-        "/usr/lib/x86_64-linux-gnu/libfdk-aac.so.2": "libfdk-aac.so.2.0.3",
     },
+)
+
+# rules_oci's oci_image macro only accepts `env` as a dict or a label to a
+# file, and a dict cannot hold a select() (the macro stringifies values at
+# load time). Generate the env file here so LD_LIBRARY_PATH can be
+# arch-aware: on amd64 it is /usr/lib64 (the NVIDIA container runtime mounts
+# driver libs there); on arm64 the aarch64 dynamic loader searches
+# /lib/aarch64-linux-gnu for libc, so LD_LIBRARY_PATH points at the aarch64
+# multiarch dir where the glibc set lands. The amd64 bytes are identical to
+# the old dict literal (same key=value lines, same order, no trailing
+# newline).
+genrule(
+    name = "ffmpeg_env",
+    outs = ["ffmpeg.env.txt"],
+    cmd = select({
+        "//tools/bazel:is_amd64_target": "printf 'NVIDIA_VISIBLE_DEVICES=all\\nNVIDIA_DRIVER_CAPABILITIES=compute,utility,video\\nLD_LIBRARY_PATH=/usr/lib64\\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' > $@",
+        "//tools/bazel:is_arm64_target": "printf 'NVIDIA_VISIBLE_DEVICES=all\\nNVIDIA_DRIVER_CAPABILITIES=compute,utility,video\\nLD_LIBRARY_PATH=/lib/aarch64-linux-gnu\\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' > $@",
+    }),
 )
 
 oci_image(
     name = "ffmpeg_image",
-    architecture = "amd64",
+    architecture = select({
+        "//tools/bazel:is_amd64_target": "amd64",
+        "//tools/bazel:is_arm64_target": "arm64",
+    }),
     os = "linux",
     tars = [":ffmpeg_files_tar"],
-    env = {
-        "NVIDIA_VISIBLE_DEVICES": "all",
-        "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video",
-        "LD_LIBRARY_PATH": "/usr/lib64",
-        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    },
+    env = ":ffmpeg_env",
 )
 
 oci_load(

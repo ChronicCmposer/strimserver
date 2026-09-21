@@ -8,6 +8,7 @@ module(
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "rules_shell", version = "0.8.0")
+bazel_dep(name = "rules_cc", version = "0.1.1")
 
 # --- Go controller -----------------------------------------------------------
 bazel_dep(name = "rules_go", version = "0.63.0")
@@ -68,7 +69,9 @@ use_repo(
 # old v1 line stopped at v1.64.8 and refuses to analyze a go.mod declaring a
 # newer Go version than it was built with, so it cannot lint this module's
 # `go 1.26.4`. See the "version: 2" line added to .golangci.yml alongside
-# this pin.
+# this pin. The amd64/arm64 tarballs are both pinned; core/controller's lint
+# sh_test selects the one matching the target platform (the test runs on the
+# target platform via --use_target_platform_for_tests).
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
@@ -93,12 +96,27 @@ http_archive(
     url = "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-amd64.tar.gz",
 )
 
+http_archive(
+    name = "golangci_lint_linux_arm64",
+    build_file_content = "exports_files([\"golangci-lint\"])",
+    sha256 = "a2a4e0065aa41be71f7c5ac90f271b61751331e5d04314e62afe4027855f0893",
+    strip_prefix = "golangci-lint-2.13.2-linux-arm64",
+    url = "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-arm64.tar.gz",
+)
+
 # --- Debian donor packages for the FROM-scratch images ----------------------
 # The runtime debs below come from a snapshot.debian.org timestamp instead of
 # a rolling mirror, per rules_distroless's own reproducibility guidance.
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.sources_list(
-    architectures = ["amd64"],
+    # Both donor architectures are declared so the apt extension resolves every
+    # install package below for amd64 AND arm64, generating @trixie//<pkg>/<arch>:data
+    # targets for both (rules_distroless resolves un-arch-suffixed install
+    # packages for every architecture the sources_list declares).
+    architectures = [
+        "amd64",
+        "arm64",
+    ],
     components = [
         "main",
         "contrib",
@@ -132,7 +150,10 @@ apt.install(
         # as direct packages because the apt extension only generates a
         # package dir (with a :data target) for directly-listed packages; a
         # package present only transitively yields a bare filemap repo with
-        # no :data to point a deb_file at.
+        # no :data to point a deb_file at. Only the amd64 variant is ever
+        # used (the strip genrule runs it as a tool, so it is built for the
+        # *exec* platform, and qemu-x86_64 needs an amd64 ELF strip); the
+        # arm64 variant exists in @trixie but is deliberately not wired.
         "libbinutils",
         "libsframe1",
         "zlib1g",
@@ -144,37 +165,228 @@ apt.install(
 )
 use_repo(apt, "trixie")
 
+# --- Vendored C layer (Phase 3a: ARM controller C infrastructure) ----------
+# The ARM64 assembly controller drives a vendored C layer for protocol work:
+# protobuf-c (protobuf wire format), generated containerd codecs, and
+# libwebsockets (HTTP/1.1 + WebSocket server). All four sources are pinned
+# http_archive downloads (sha256-verified), matching the repo's existing
+# artifact-pinning conventions (golangci-lint, mediamtx, ffmpeg). The codegen
+# dev debs (libprotobuf-dev / libprotoc-dev / protobuf-compiler) are extracted
+# from the SAME snapshot.debian.org timestamp the @trixie apt extension above
+# uses, via the deb_extract repo rule below.
+#
+# Everything here is arm64-target-only: the assembly controller is ARM-only,
+# so the vendored C targets carry target_compatible_with = aarch64. amd64
+# wildcard builds skip them (kept buildable; the existing amd64 Go controller
+# never links the C layer), and arm64 builds genuinely compile them. See
+# third_party/*/BUILD.bazel.
+
+# protobuf-c v1.5.2 (BSD-2), patched twice:
+#   1. protobuf_c_protobuf34_compat.patch — upstream commit d39f001b
+#      ("Fix compilation against protobuf v34"): replaces the 8
+#      FieldDescriptor::label() call sites (removed in libprotobuf >= 34)
+#      with a FieldLabel() helper. Mandatory when building protoc-gen-c
+#      against libprotobuf >= 34; harmless (and still applied) for the
+#      3.21.12 libprotobuf the trixie snapshot ships.
+#   2. protobuf_c_proto3_optional_feature.patch — declares
+#      FEATURE_PROTO3_OPTIONAL in GetSupportedFeatures() so protoc permits
+#      containerd protos using the proto3 `optional` keyword (images.proto,
+#      fieldpath.proto). protobuf-c encodes those fields with LABEL_NONE
+#      semantics, which is wire-compatible with proto3 optional presence.
+http_archive(
+    name = "protobuf_c",
+    build_file = "//third_party/protobuf-c:BUILD.protobuf-c",
+    patch_strip = 1,
+    patches = [
+        "//tools/bazel/patches:protobuf_c_protobuf34_compat.patch",
+        "//tools/bazel/patches:protobuf_c_proto3_optional_feature.patch",
+    ],
+    sha256 = "e2c86271873a79c92b58fef7ebf8de1aa0df4738347a8bd5d4e65a80a16d0d24",
+    strip_prefix = "protobuf-c-1.5.2",
+    url = "https://github.com/protobuf-c/protobuf-c/releases/download/v1.5.2/protobuf-c-1.5.2.tar.gz",
+)
+
+# protoc v36.2 binaries, one per exec-arch. Codegen runs on the exec
+# platform (the host), so a host's protoc must match its architecture; both
+# zips are pinned and the codegen genrule selects by exec platform.
+# (protoc 36.2 is the pinned codegen protoc; the @trixie protobuf-compiler
+# deb is used separately to generate the plugin's own protobuf-c.pb.cc at the
+# 3.21.12 libprotobuf version the plugin links.)
+http_archive(
+    name = "protoc_linux_aarch64",
+    build_file = "//third_party/protobuf-c:BUILD.protoc",
+    sha256 = "8b8f18bd2b30346efbc698dd5a73dd7c805f3ef8380f6dfc95c768f3f1852f6a",
+    url = "https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-aarch_64.zip",
+)
+
+http_archive(
+    name = "protoc_linux_x86_64",
+    build_file = "//third_party/protobuf-c:BUILD.protoc",
+    sha256 = "121f6c7afe1d4d0e3ea6aab9432038599250134cbf4474cb1167d2c7decd4278",
+    url = "https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-x86_64.zip",
+)
+
+# containerd API protos v1.12.0 (Apache-2.0), the api/ subtree of the
+# containerd repo (its own Go module github.com/containerd/containerd/api).
+# All protos are gogoproto-free and import only google/protobuf + types/*;
+# codegen uses this tree plus protoc's bundled well-known-type protos.
+http_archive(
+    name = "containerd_api",
+    build_file = "//third_party/containerd-api:BUILD.containerd-api",
+    sha256 = "6978892e8ab09b36f5c09311f856ae07411cd9efd76a5213d125a733f08753fa",
+    strip_prefix = "containerd-api-v1.12.0",
+    url = "https://github.com/containerd/containerd/archive/refs/tags/api/v1.12.0.tar.gz",
+)
+
+# libwebsockets v5.0.0 (MIT), static server-only build. Built by a genrule
+# (cmake) in third_party/libwebsockets/BUILD.bazel; the image ships glibc
+# (libc6 FROM scratch), so the static lib links -lm -ldl -lpthread. The
+# upstream archive ships 12 self-referential `libwebsockets` symlinks under
+# minimal-examples/embedded/ that loop back to the repo root; the
+# tarball_strip_symlinks repo rule deletes them at fetch time (Bazel's
+# patches mechanism cannot delete symlinks).
+tarball_strip_symlinks = use_repo_rule(
+    "//tools/bazel:tarball_strip_symlinks.bzl",
+    "tarball_strip_symlinks",
+)
+
+tarball_strip_symlinks(
+    name = "libwebsockets",
+    build_file_content = """
+load("@rules_cc//cc:defs.bzl", "cc_library")
+filegroup(
+    name = "srcs",
+    srcs = glob(
+        ["**/*"],
+        exclude = [".github/**", ".gitignore", ".gitmodules", ".clangd", ".gitattributes"],
+    ),
+    visibility = ["//visibility:public"],
+)
+filegroup(
+    name = "root_anchor",
+    srcs = ["CMakeLists.txt"],
+    visibility = ["//visibility:public"],
+)
+# The vendored public headers (libwebsockets.h + libwebsockets/*.h). Compile
+# consumers with -I<this repo>/include so `#include <libwebsockets.h>` works.
+cc_library(
+    name = "include",
+    hdrs = glob(["include/**/*.h"]),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "f853c6582101cfcee3a5a9e28ae92ab19d9735c5f31f0bb2e9794b5106123962",
+    strip_prefix = "libwebsockets-5.0.0",
+    url = "https://github.com/warmcat/libwebsockets/archive/refs/tags/v5.0.0.tar.gz",
+)
+
+# Build-time dev debs for the protoc-gen-c plugin, pinned to the same
+# snapshot.debian.org timestamp as the @trixie apt extension above. Extracted
+# by tools/bazel/deb_extract.bzl (ar + tar) into static libs + headers that
+# the plugin's cc_binary links. arm64 debs only: the plugin is a codegen tool
+# that runs on the exec platform, and this host is aarch64; an amd64 exec
+# host would add the matching amd64 pins.
+deb_extract = use_repo_rule("//tools/bazel:deb_extract.bzl", "deb_extract")
+
+deb_extract(
+    name = "libprotobuf_dev_arm64",
+    build_file_content = """
+load("@rules_cc//cc:defs.bzl", "cc_library")
+cc_library(
+    name = "libprotobuf",
+    srcs = ["usr/lib/aarch64-linux-gnu/libprotobuf.a"],
+    hdrs = glob(["usr/include/google/protobuf/**"]),
+    includes = ["usr/include"],
+    linkopts = ["-lz"],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "26e311a867ef831d2378a33e772b1f21924261eedcefe08f7ce852c6176c2836",
+    url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/p/protobuf/libprotobuf-dev_3.21.12-11+deb13u1_arm64.deb",
+)
+
+deb_extract(
+    name = "libprotoc_dev_arm64",
+    build_file_content = """
+load("@rules_cc//cc:defs.bzl", "cc_library")
+cc_library(
+    name = "libprotoc",
+    srcs = ["usr/lib/aarch64-linux-gnu/libprotoc.a"],
+    hdrs = glob(["usr/include/google/protobuf/**"]),
+    includes = ["usr/include"],
+    visibility = ["//visibility:public"],
+    deps = ["@libprotobuf_dev_arm64//:libprotobuf"],
+)
+""",
+    sha256 = "405ec6e7b5dd99b73a84f4671af03b0b0d94b4a372c36a49c0f94457f40b36a9",
+    url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/p/protobuf/libprotoc-dev_3.21.12-11+deb13u1_arm64.deb",
+)
+
+deb_extract(
+    name = "protobuf_compiler_arm64",
+    build_file_content = """
+exports_files(["usr/bin/protoc"])
+""",
+    sha256 = "a873f75cbdf8054a23687e7c9b39ca1a93545edd22a581f4caa560756678f658",
+    url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/p/protobuf/protobuf-compiler_3.21.12-11+deb13u1_arm64.deb",
+)
+
 # --- iperf3 image (rules_oci, keeping the alpine base) ----------------------
 # Bazel assembles the image from the digest-pinned alpine base plus two tar
 # layers (see tools/bandwidth-test/BUILD.bazel). fish is dropped: the
 # entrypoint only runs `iperf3 -s`, and fish's closure would add 5 packages.
+# The pinned digest is the multi-arch index; rules_oci resolves the per-arch
+# child (amd64 59855d3dceb3... / arm64 1529d13528ed...) from the same index.
+# NOTE: the index's arm64 entry carries variant "v8", so the platform string
+# must be linux/arm64/v8 (rules_oci matches os+arch+variant exactly); the
+# generated repo is @alpine_linux_arm64_v8.
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
 oci.pull(
     name = "alpine",
     digest = "sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659",
     image = "docker.io/library/alpine",
-    platforms = ["linux/amd64"],
+    platforms = [
+        "linux/amd64",
+        "linux/arm64/v8",
+    ],
 )
-use_repo(oci, "alpine", "alpine_linux_amd64")
+use_repo(oci, "alpine", "alpine_linux_amd64", "alpine_linux_arm64_v8")
 
-# The iperf3 package (3.19.1-r1) as a single .apk. Its only runtime deps
-# (musl, libcrypto.so.3) are already in the alpine base, so one apk + the base
-# is the whole closure; the genrule in tools/bandwidth-test/BUILD.bazel
-# extracts the apk's data.tar.gz payload into the image's first layer.
+# The iperf3 package (3.19.1-r1) as a single .apk, pinned per architecture
+# (the x86_64 apk and the aarch64 apk are different files). Each apk's only
+# runtime deps (musl, libcrypto.so.3) are already in the matching alpine
+# base, so one apk + the base is the whole closure; the genrule in
+# tools/bandwidth-test/BUILD.bazel extracts the selected apk's data.tar.gz
+# payload into the image's first layer.
 http_file(
     name = "iperf3_apk",
     sha256 = "c8fa78ac30761d2dc47d5db7b9056a3b5cfdd565af173a4be1e4449a6b7fd664",
     urls = ["https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/iperf3-3.19.1-r1.apk"],
 )
 
+http_file(
+    name = "iperf3_apk_arm64",
+    sha256 = "da2a7b7eaaa0fc1427897999578cef7deb9b283fe220ac0ae38f80e1fc584199",
+    urls = ["https://dl-cdn.alpinelinux.org/alpine/v3.23/main/aarch64/iperf3-3.19.1-r1.apk"],
+)
+
 # --- MediaMTX ----------------------------------------------------------
 # Fetched via http_archive so the binary download is checksummed (a bare
-# `wget` would not verify it).
+# `wget` would not verify it). One dist per architecture; the strip genrule
+# in core/BUILD.bazel selects the matching one as its src.
 http_archive(
     name = "mediamtx_dist",
     build_file_content = "exports_files([\"mediamtx\"])",
     sha256 = "e02e34c3337a35f20ac9e5aa31524566108964e6e37dbc46cf8292169f6c792b",
     url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.0/mediamtx_v1.21.0_linux_amd64.tar.gz",
+)
+
+http_archive(
+    name = "mediamtx_dist_arm64",
+    build_file_content = "exports_files([\"mediamtx\"])",
+    sha256 = "a8113b5928ba1a934b81557b61b8a07954b76921a4b567d54c7f086f8b39d9a2",
+    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.0/mediamtx_v1.21.0_linux_arm64.tar.gz",
 )
 
 # --- FFmpeg -------------------------------------------------------------
@@ -185,6 +397,13 @@ http_archive(
 # integrity pin. The S3 bucket and region come from the STRIMSERVER_S3_BUCKET
 # / STRIMSERVER_S3_REGION env vars (no committed defaults); when they are
 # unset, the GitHub Release mirror below is used.
+#
+# TODO(arm64): @ffmpeg_dist is the amd64 build (linux-x86_64, sm_75 CUDA
+# arch). An arm64 ffmpeg (linux-sbsa, sm_75) must be built by the out-of-band
+# tools/ffmpeg-dist pipeline; when it is produced, add an ffmpeg_dist_arm64
+# pin here and make core/BUILD.bazel's ffmpeg_image srcs/architecture select
+# it per target architecture (the lib paths are already selectable via the
+# @trixie deb_file wiring).
 s3_http_archive(
     name = "ffmpeg_dist",
     build_file_content = 'exports_files(["ffmpeg", "BUILD-INFO.txt"])',
@@ -229,6 +448,13 @@ s3_http_file(
 # exports_files pattern while being a bare-file download. exports_files gives
 # the RPM the @openssh_dist//:openssh-experimental.rpm label, and the
 # now-redundant tools/openssh/BUILD.bazel filegroup wrapper is gone.
+#
+# TODO(arm64): @openssh_dist is the amd64 build. An arm64 openssh requires an
+# aarch64 amazonlinux chroot rebuild (out-of-band by tools/openssh/build.sh);
+# when the pipeline produces it, add an openssh_dist_arm64 pin here and make
+# the //:bundle_openssh_rpm member select() per target architecture. The RPM
+# ships in the deployment bundle as a host-side artifact, so until then there
+# is nothing to select -- the amd64 RPM is the only artifact.
 s3_http_file(
     name = "openssh_dist",
     build_file_content = 'exports_files(["openssh-experimental.rpm"])',

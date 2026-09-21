@@ -5,12 +5,24 @@ load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
 # --- iperf3 image (Bazel-native rules_oci, KEEPING the alpine base) ----------
 # The image is assembled from the digest-pinned alpine base
-# (@alpine_linux_amd64 in MODULE.bazel) plus two tar layers:
+# (@alpine_linux_amd64 / @alpine_linux_arm64_v8 in MODULE.bazel) plus two tar
+# layers:
 #   1. iperf3_apk_layer.tar -- the iperf3 .apk payload (usr/bin/iperf3 +
-#      usr/lib/libiperf.so.0*), extracted from the pinned @iperf3_apk, and
+#      usr/lib/libiperf.so.0*), extracted from the pinned @iperf3_apk /
+#      @iperf3_apk_arm64, and
 #   2. iperf3_env_tar -- the entrypoint + env files at /opt/.
 # fish is dropped entirely: nothing at runtime uses it (entrypoint.sh only
 # runs `iperf3 -s`), and its closure would add 5 packages (~13MB).
+
+# Each architecture has its own .apk (x86_64 and aarch64 are different files);
+# the filegroup picks the one matching the target platform.
+filegroup(
+    name = "iperf3_apk_file",
+    srcs = select({
+        "//tools/bazel:is_amd64_target": ["@iperf3_apk//file"],
+        "//tools/bazel:is_arm64_target": ["@iperf3_apk_arm64//file"],
+    }),
+)
 
 # The .apk (Alpine v3.23 format) is a gzipped tar carrying .PKGINFO, a .SIGN*
 # signature, and the payload under usr/. Exclude the metadata members and
@@ -19,10 +31,10 @@ load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 # root ownership and --sort=name gives deterministic member order.
 genrule(
     name = "iperf3_apk_layer",
-    srcs = ["@iperf3_apk//file"],
+    srcs = [":iperf3_apk_file"],
     outs = ["iperf3_apk_layer.tar"],
     cmd = """
-      apk="$(location @iperf3_apk//file)"
+      apk="$(location :iperf3_apk_file)"
       tmp="$$(mktemp -d)"
       tar -xzf "$$apk" --exclude='.PKGINFO' --exclude='.SIGN*' -C "$$tmp" 2>/dev/null
       test -f "$$tmp/usr/bin/iperf3" || { echo "error: iperf3 apk extraction produced no usr/bin/iperf3" >&2; exit 1; }
@@ -55,11 +67,14 @@ pkg_tar(
 )
 
 # os/architecture come from the alpine base and cannot be overridden when
-# `base` is set (rules_oci fails on the attempt); the base is amd64, matching
-# .bazelrc's --platforms=//tools/bazel:linux_amd64.
+# `base` is set (rules_oci fails on the attempt); the base select matches
+# .bazelrc's --platforms=//tools/bazel:linux_amd64 / linux_arm64.
 oci_image(
     name = "iperf3_image",
-    base = "@alpine_linux_amd64",
+    base = select({
+        "//tools/bazel:is_amd64_target": "@alpine_linux_amd64",
+        "//tools/bazel:is_arm64_target": "@alpine_linux_arm64_v8",
+    }),
     tars = [
         ":iperf3_apk_layer",
         ":iperf3_env_tar",
