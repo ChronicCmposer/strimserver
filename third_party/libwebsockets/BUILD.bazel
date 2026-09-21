@@ -1,0 +1,115 @@
+# Vendored libwebsockets v5.0.0 (MIT), static server-only build.
+#
+# The cmake genrule produces libwebsockets.a with the control-plane config:
+# static only, no SSL, no HTTP/2, no zlib, no client, H1 + WS roles. The
+# controller image ships glibc (libc6 FROM scratch), so the static lib links
+# -lm -ldl -lpthread. cmake + a C compiler are the only host tools required
+# (the repo's other genrules similarly rely on host tools, e.g. strip).
+#
+# Arm64-only, like the rest of the vendored C layer: amd64 wildcard builds
+# skip these targets, arm64 builds genuinely compile them.
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_import", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+CMAKE_FLAGS = [
+    "-DLWS_WITH_STATIC=ON",
+    "-DLWS_WITH_SHARED=OFF",
+    "-DLWS_WITH_SSL=0",
+    "-DLWS_WITH_HTTP2=0",
+    "-DLWS_WITH_ZLIB=0",
+    "-DLWS_WITHOUT_CLIENT=ON",
+    "-DLWS_ROLE_H1=ON",
+    "-DLWS_ROLE_WS=ON",
+    "-DLWS_WITH_MINIMAL_EXAMPLES=0",
+    "-DLWS_WITHOUT_TESTAPPS=ON",
+    "-DLWS_WITHOUT_TEST_SERVER=ON",
+    "-DLWS_WITHOUT_TEST_PING=ON",
+    "-DLWS_WITHOUT_TEST_CLIENT=ON",
+    "-DCMAKE_BUILD_TYPE=Release",
+]
+
+genrule(
+    name = "libwebsockets_static",
+    srcs = [
+        "@libwebsockets//:srcs",
+        "@libwebsockets//:root_anchor",
+    ],
+    outs = ["libwebsockets.a"],
+    cmd = "set -eu; " +
+          "SRC=$$(dirname $(location @libwebsockets//:root_anchor)); " +
+          "BUILD=$$(mktemp -d); " +
+          "cmake -S $$SRC -B $$BUILD " + " ".join(CMAKE_FLAGS) + " >/dev/null; " +
+          "cmake --build $$BUILD --target websockets -j $$(nproc) >/dev/null; " +
+          "cp $$BUILD/lib/libwebsockets.a $@; " +
+          "rm -rf $$BUILD",
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+)
+
+# The vendored headers #include "lws_config.h", which cmake generates into
+# the build tree. The @libwebsockets//:include cc_library provides
+# -I<repo>/include so <libwebsockets.h> resolves; this genrule emits the
+# generated config header into lwsgen/ and the cc_library below adds
+# lwsgen/ to consumers' include path, so the quoted `#include "lws_config.h"`
+# inside libwebsockets.h finds it via the -I search path.
+genrule(
+    name = "lws_config_h",
+    srcs = [
+        "@libwebsockets//:srcs",
+        "@libwebsockets//:root_anchor",
+    ],
+    outs = ["lwsgen/lws_config.h"],
+    cmd = "set -eu; " +
+          "SRC=$$(dirname $(location @libwebsockets//:root_anchor)); " +
+          "BUILD=$$(mktemp -d); " +
+          "cmake -S $$SRC -B $$BUILD " + " ".join(CMAKE_FLAGS) + " >/dev/null; " +
+          "cp $$BUILD/lws_config.h $@; " +
+          "rm -rf $$BUILD",
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+)
+
+# Wrap the genrule's static lib + the vendored include tree + generated
+# config header into a cc_import/cc_library so cc_test/cc_binary can link.
+cc_library(
+    name = "libwebsockets",
+    hdrs = ["lwsgen/lws_config.h"],
+    includes = ["lwsgen"],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = [
+        ":libwebsockets_static_import",
+        "@libwebsockets//:include",
+    ],
+)
+
+cc_import(
+    name = "libwebsockets_static_import",
+    static_library = ":libwebsockets_static",
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+)
+
+cc_test(
+    name = "lws_smoke_test",
+    srcs = ["lws_smoke_test.c"],
+    linkopts = [
+        "-lm",
+        "-ldl",
+        "-lpthread",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = [":libwebsockets"],
+)
+
+# The HTTP/ws server binary used by the smoke test (also useful standalone).
+cc_binary(
+    name = "lws_server",
+    srcs = ["lws_smoke_test.c"],
+    defines = ["STANDALONE_SERVER"],
+    linkopts = [
+        "-lm",
+        "-ldl",
+        "-lpthread",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = [":libwebsockets"],
+)

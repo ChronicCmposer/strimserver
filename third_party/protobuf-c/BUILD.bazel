@@ -1,0 +1,113 @@
+# Vendored protobuf-c (v1.5.2, patched in MODULE.bazel).
+#
+# Two targets live here:
+#   - :runtime          — the pure-C protobuf-c runtime (protobuf-c.c),
+#                         no protoc, no libprotobuf; what the ARM controller
+#                         links for protobuf wire format.
+#   - :protoc_gen_c     — the protoc plugin that generates .pb-c codecs.
+#                         Build-time tooling only: it links the trixie
+#                         snapshot's static libprotobuf.a/libprotoc.a (see
+#                         @libprotobuf_dev_arm64/@libprotoc_dev_arm64 in
+#                         MODULE.bazel) and its own protobuf-c.pb.cc generated
+#                         by the matching 3.21.12 protoc (so the generated C++
+#                         matches the linked libprotobuf headers).
+#
+# The codegen genrule that consumes :protoc_gen_c lives in
+# //third_party/containerd-api (it owns the generated codecs). This package
+# is arm64-only: the vendored C layer exists to serve the ARM64 assembly
+# controller, so amd64 wildcard builds skip these targets while arm64 builds
+# genuinely compile them (verified: `bazel build //third_party/...` with
+# --platforms=linux_arm64 builds them, amd64 skips them).
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# ---------------------------------------------------------------------------
+# protobuf-c runtime (pure C, hermetic)
+# ---------------------------------------------------------------------------
+cc_library(
+    name = "runtime",
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = ["@protobuf_c//:runtime"],
+)
+
+# ---------------------------------------------------------------------------
+# protoc-gen-c plugin (codegen tooling; links trixie-snapshot libprotobuf)
+# ---------------------------------------------------------------------------
+genrule(
+    name = "protobuf_c_pb_gen",
+    srcs = [
+        "@protobuf_c//:protobuf-c/protobuf-c.proto",
+        "@protoc_linux_aarch64//:include/google/protobuf/descriptor.proto",
+        "@protobuf_compiler_arm64//:usr/bin/protoc",
+    ],
+    outs = ["protobuf-c/protobuf-c.pb.cc", "protobuf-c/protobuf-c.pb.h"],
+    cmd = "set -eu; " +
+          "SRC_ROOT=$$(dirname $$(dirname $(location @protobuf_c//:protobuf-c/protobuf-c.proto))); " +
+          "INC_ROOT=$$(dirname $$(dirname $$(dirname $(location @protoc_linux_aarch64//:include/google/protobuf/descriptor.proto)))); " +
+          "$(location @protobuf_compiler_arm64//:usr/bin/protoc) " +
+          "-I $$SRC_ROOT -I $$INC_ROOT " +
+          "--cpp_out=$(RULEDIR) " +
+          "$(location @protobuf_c//:protobuf-c/protobuf-c.proto)",
+)
+
+cc_binary(
+    name = "protoc_gen_c",
+    srcs = [
+        ":version_config.h",
+        ":protobuf-c/protobuf-c.pb.cc",
+        ":protobuf-c/protobuf-c.pb.h",
+        "@protobuf_c//:plugin_srcs",
+        "@protobuf_c//:plugin_hdrs",
+    ],
+    copts = ["-include", "third_party/protobuf-c/version_config.h"],
+    includes = ["."],
+    linkopts = [
+        "-lz",
+        "-lpthread",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = [
+        "@libprotobuf_dev_arm64//:libprotobuf",
+        "@libprotoc_dev_arm64//:libprotoc",
+        # Provides the protobuf-c/ include path (includes = ["protobuf-c"])
+        # needed by the plugin sources' `#include "protobuf-c.h"`.
+        "@protobuf_c//:runtime",
+    ],
+)
+
+# The codegen tool binary used by the containerd-api genrule; a thin alias so
+# the consuming genrule references a stable label.
+filegroup(
+    name = "protoc_gen_c_tool",
+    srcs = [":protoc_gen_c"],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+)
+
+filegroup(
+    name = "protoc_tool",
+    srcs = select({
+        "//tools/bazel:is_x86_64_exec": ["@protoc_linux_x86_64//:bin/protoc"],
+        "//conditions:default": ["@protoc_linux_aarch64//:bin/protoc"],
+    }),
+)
+
+filegroup(
+    name = "protoc_include",
+    srcs = select({
+        "//tools/bazel:is_x86_64_exec": ["@protoc_linux_x86_64//:include"],
+        "//conditions:default": ["@protoc_linux_aarch64//:include"],
+    }),
+)
+
+# A single well-known proto from the selected protoc's include dir, so
+# genrules can compute the include root with dirname chains instead of
+# $(location) on the multi-file filegroup.
+filegroup(
+    name = "protoc_descriptor_proto",
+    srcs = select({
+        "//tools/bazel:is_x86_64_exec": ["@protoc_linux_x86_64//:include/google/protobuf/descriptor.proto"],
+        "//conditions:default": ["@protoc_linux_aarch64//:include/google/protobuf/descriptor.proto"],
+    }),
+)

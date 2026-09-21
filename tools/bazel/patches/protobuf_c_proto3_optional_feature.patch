@@ -1,0 +1,20 @@
+--- a/protoc-gen-c/c_generator.h
++++ b/protoc-gen-c/c_generator.h
+@@ -93,8 +93,16 @@
+                 google::protobuf::compiler::OutputDirectory* output_directory,
+                 std::string* error) const;
+ 
++  // Declare FEATURE_PROTO3_OPTIONAL unconditionally (the base-class virtual
++  // exists in every supported protobuf version) so protoc permits files that
++  // use the proto3 `optional` keyword (e.g. containerd's images.proto and
++  // fieldpath.proto). protobuf-c encodes such fields with LABEL_NONE
++  // semantics, which is wire-compatible with proto3 optional presence.
++  uint64_t GetSupportedFeatures() const {
++    return google::protobuf::compiler::CodeGenerator::FEATURE_PROTO3_OPTIONAL;
++  }
++
+ #if GOOGLE_PROTOBUF_VERSION >= 5026000
+-  uint64_t GetSupportedFeatures() const { return 0; }
+   google::protobuf::Edition GetMinimumEdition() const { return google::protobuf::Edition::EDITION_PROTO2; }
+   google::protobuf::Edition GetMaximumEdition() const { return google::protobuf::Edition::EDITION_PROTO3; }
+ #endif

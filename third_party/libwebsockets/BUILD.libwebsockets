@@ -1,0 +1,50 @@
+# BUILD file for the @libwebsockets external repo (v5.0.0 source tree).
+# The whole tree is consumed by the cmake genrule in
+# //third_party/libwebsockets:BUILD.bazel; this file just exposes it.
+
+# The upstream archive ships a self-referential symlink under
+# minimal-examples/ that loops back to the repo root, so a whole-tree glob is
+# impossible. The cmake build only needs the core library tree, so glob
+# precisely: everything except minimal-examples/, test-apps/, and contrib/
+# (which contains the looping esp32 example).
+# The upstream archive ships self-referential `libwebsockets` symlinks under
+# minimal-examples/embedded/ that loop back to the repo root, so a whole-tree
+# glob is impossible at analysis time. The genrule strips them from a copied
+# tree before cmake runs; here we glob only the directories the build needs
+# and exclude top-level directories entirely (the genrule copies files with
+# `cp -r`, so directory entries would drag the looping examples along).
+filegroup(
+    name = "srcs",
+    srcs = glob(
+        [
+            "cmake/**",
+            "include/**",
+            "lib/**",
+            "lwsws/**",
+            "assets/**",
+            "doc-assets/**",
+            "contrib/**",
+            "*.txt",
+            "*.md",
+            "Kconfig",
+            "Makefile.projbuild",
+            "component.mk",
+            "libwebsockets.dox",
+            "lgtm.yml",
+            "bug_report.md",
+            "AGENTS.md",
+            "changelog",
+            "LICENSE",
+        ],
+        allow_empty = False,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# A single known file so genrules can compute the source root with a dirname
+# chain instead of $(location) on the multi-file filegroup.
+filegroup(
+    name = "root_anchor",
+    srcs = ["CMakeLists.txt"],
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,14 @@
+# BUILD file for the @containerd_api external repo (containerd api v1.12.0
+# source tree). Exposes the api/ subtree protos that the codegen consumes.
+# The well-known-type protos come from protoc's own include dir (via
+# @protoc_linux_aarch64//:include / @protoc_linux_x86_64//:include).
+
+filegroup(
+    name = "api_protos",
+    srcs = glob(["api/**/*.proto"]),
+    visibility = ["//visibility:public"],
+)
+
+# A single known proto, so genrules can compute the api/ subtree root with a
+# dirname chain instead of $(location) on the multi-file filegroup.
+exports_files(["api/services/tasks/v1/tasks.proto"])

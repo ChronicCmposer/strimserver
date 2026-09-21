@@ -1,0 +1,127 @@
+# Generated containerd API codecs (protobuf-c), Phase 3a of the ARM
+# controller rewrite.
+#
+# Codegen: //third_party/containerd-api:codegen runs the pinned protoc 36.2 +
+# the vendored protoc-gen-c plugin over the pinned containerd api v1.12.0
+# protos, emitting .pb-c.{c,h} into bazel-bin. The generated files are
+# COMMITTED here as source (they are arch-independent C, and the ARM
+# controller links them directly): regenerate via
+#   bazel run //third_party/containerd-api:write_codecs
+# which writes the bazel-bin outputs into this package. A future maintainer
+# regenerates after bumping the containerd-api / protobuf-c pins; the genrule
+# is deterministic (pinned protoc + plugin + protos), so committed ==
+# regenerated.
+#
+# Scope: google/protobuf well-known types used by containerd, the seven
+# service protos (tasks, containers, images, snapshots, events, content,
+# version), the types/ protos (descriptor, event, fieldpath, metrics, mount,
+# platform, task/task, runc/options), and the events/ protos (task, container,
+# image). The api tree's remaining protos (introspection, sandbox, transfer,
+# diff, leases, mounts, namespaces, streaming, ttrpc, runtime/*) are out of
+# scope for the controller rewrite.
+
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# ---------------------------------------------------------------------------
+# Codegen: pinned protoc 36.2 + protoc-gen-c over the pinned containerd api
+# ---------------------------------------------------------------------------
+# The proto list below matches the spec's command shape exactly (all paths
+# relative to the api/ subtree root). protoc emits one .pb-c.c/.pb-c.h pair
+# per listed file into the --c_out dir, preserving the -I-relative paths.
+PROTOS = [
+    "google/protobuf/descriptor.proto",
+    "google/protobuf/any.proto",
+    "google/protobuf/empty.proto",
+    "google/protobuf/timestamp.proto",
+    "google/protobuf/field_mask.proto",
+    "services/tasks/v1/tasks.proto",
+    "services/containers/v1/containers.proto",
+    "services/images/v1/images.proto",
+    "services/snapshots/v1/snapshots.proto",
+    "services/events/v1/events.proto",
+    "services/content/v1/content.proto",
+    "services/version/v1/version.proto",
+    "types/descriptor.proto",
+    "types/event.proto",
+    "types/fieldpath.proto",
+    "types/metrics.proto",
+    "types/mount.proto",
+    "types/platform.proto",
+    "types/task/task.proto",
+    "types/runc/options/oci.proto",
+    "events/task.proto",
+    "events/container.proto",
+    "events/image.proto",
+]
+
+# protoc writes outputs next to the file paths given on the command line
+# (which are -I-relative), so the output names mirror the proto paths with the
+# .proto suffix swapped for .pb-c.c / .pb-c.h.
+CODEC_PAIRS = [
+    (p[:-len(".proto")] + ".pb-c.c", p[:-len(".proto")] + ".pb-c.h")
+    for p in PROTOS
+]
+
+genrule(
+    name = "codegen",
+    srcs = [
+        "@containerd_api//:api_protos",
+        "@containerd_api//:api/services/tasks/v1/tasks.proto",
+        "//third_party/protobuf-c:protoc_descriptor_proto",
+    ],
+    outs = ["codecgen/" + f for pair in CODEC_PAIRS for f in pair],
+    cmd = "set -eu; " +
+          # OUT: the codecgen dir = dirname(dirname(dirname(codecgen/google/protobuf/descriptor.pb-c.c)))
+          "OUT=$$(dirname $$(dirname $$(dirname $(location :codecgen/google/protobuf/descriptor.pb-c.c)))) ; " +
+          # api root: @containerd_api//:api/services/tasks/v1/tasks.proto
+          # -> dirname x4 = the api/ subtree root
+          "API_ROOT=$$(dirname $$(dirname $$(dirname $$(dirname $(location @containerd_api//:api/services/tasks/v1/tasks.proto))))) ; " +
+          # protoc include root: descriptor.proto sits at include/google/protobuf/
+          # -> dirname x3 = the include dir
+          "INC_ROOT=$$(dirname $$(dirname $$(dirname $(location //third_party/protobuf-c:protoc_descriptor_proto)))) ; " +
+          "mkdir -p $$OUT; " +
+          "$(location //third_party/protobuf-c:protoc_tool) " +
+          "-I $$INC_ROOT " +
+          "-I $$API_ROOT " +
+          "--plugin=protoc-gen-c=$(location //third_party/protobuf-c:protoc_gen_c_tool) " +
+          "--c_out=$$OUT " +
+          " ".join(PROTOS),
+    tools = [
+        "//third_party/protobuf-c:protoc_gen_c_tool",
+        "//third_party/protobuf-c:protoc_tool",
+    ],
+)
+
+write_source_files(
+    name = "write_codecs",
+    diff_test = False,
+    files = {
+        "codecgen/%s" % f: "//third_party/containerd-api:codecgen/%s" % f
+        for pair in CODEC_PAIRS
+        for f in pair
+    },
+    tags = ["manual"],
+)
+
+# ---------------------------------------------------------------------------
+# Committed codecs -> cc_library
+# ---------------------------------------------------------------------------
+cc_library(
+    name = "codecs",
+    srcs = ["codecgen/%s" % f for pair in CODEC_PAIRS for f in pair],
+    hdrs = ["codecgen/%s" % f for pair in CODEC_PAIRS for f in pair],
+    includes = ["codecgen"],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = ["//third_party/protobuf-c:runtime"],
+)
+
+# Round-trip test: encode a types/task Process, decode it, compare fields.
+cc_test(
+    name = "codecs_roundtrip_test",
+    srcs = ["roundtrip_test.c"],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = [":codecs"],
+)

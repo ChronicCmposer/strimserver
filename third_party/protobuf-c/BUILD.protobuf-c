@@ -1,0 +1,37 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# BUILD file for the @protobuf_c external repo (protobuf-c v1.5.2 source,
+# patched in MODULE.bazel). Exposes the pure-C runtime and the protoc-gen-c
+# plugin sources; the runtime compiles directly from protobuf-c.c (no protoc
+# needed), while the plugin is assembled in //third_party/protobuf-c where it
+# links the @trixie-snapshot libprotobuf/libprotoc dev libs.
+
+cc_library(
+    name = "runtime",
+    srcs = ["protobuf-c/protobuf-c.c"],
+    hdrs = ["protobuf-c/protobuf-c.h"],
+    includes = [
+        "protobuf-c",
+        ".",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Everything the plugin's cc_binary needs from this repo: the generator .cc
+# sources, the protobuf-c.h header it includes, and the .proto describing the
+# plugin's own options (protobuf-c.pb.cc is generated from it in
+# //third_party/protobuf-c by the 3.21 protoc so it matches the linked
+# libprotobuf).
+filegroup(
+    name = "plugin_srcs",
+    srcs = glob(["protoc-gen-c/*.cc"]) + ["protobuf-c/protobuf-c.proto"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "plugin_hdrs",
+    srcs = glob(["protoc-gen-c/*.h"]) + ["protobuf-c/protobuf-c.h"],
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["protobuf-c/protobuf-c.proto"])

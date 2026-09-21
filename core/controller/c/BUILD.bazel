@@ -1,0 +1,105 @@
+# Phase 3b: hand-written h2c/gRPC client for containerd (the C protocol
+# layer the assembly controller drives).
+#
+# cc_grpc is a single .c/.h pair plus the Huffman table include, linked
+# against //third_party/containerd-api:codecs and nothing else — a pure
+# protocol layer (HTTP/2 prior-knowledge + gRPC over a unix socket, HPACK,
+# flow control). It is aarch64-only like the rest of the vendored C layer:
+# amd64 wildcard builds skip these targets, arm64 builds genuinely compile
+# them.
+#
+# Targets:
+#   //core/controller/c:cc_grpc         the client library
+#   //core/controller/c:cc_grpc_test    standalone test executable: HPACK /
+#                                       HTTP2 self-tests always; the live
+#                                       containerd block (Version, List,
+#                                       Subscribe) runs only when a daemon
+#                                       socket is reachable, else SKIPPED.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "cc_grpc",
+    srcs = [
+        "cc_grpc.c",
+        "cc_grpc_huff.inc",
+    ],
+    hdrs = ["cc_grpc.h"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = ["//third_party/containerd-api:codecs"],
+)
+
+cc_test(
+    name = "cc_grpc_test",
+    srcs = ["cc_grpc_test.c"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = [":cc_grpc"],
+)
+
+# ---------------------------------------------------------------------------
+# Phase 4.4a: cc_ctr — the containerd operation layer (protocol/encoding half
+# of the cc_ctr module; the cc_ctr.S assembly orchestration calls these).
+# ---------------------------------------------------------------------------
+cc_library(
+    name = "cc_ctr",
+    srcs = ["cc_ctr.c"],
+    hdrs = ["cc_ctr.h"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = [
+        ":cc_grpc",
+        "//third_party/containerd-api:codecs",
+    ],
+)
+
+cc_test(
+    name = "cc_ctr_test",
+    srcs = ["cc_ctr_test.c"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = [":cc_ctr"],
+)
+
+# ---------------------------------------------------------------------------
+# Phase 4.6: cc_http — the HTTP/1.1 + websocket serving layer (thin C wrapper
+# over the vendored libwebsockets v5.0.0 server-only static lib; the asm
+# module core/controller/asm/cc_http.S owns the wire logic and is linked into
+# the cc_binary at 4.8). The static lib requires -lm -ldl -lpthread.
+# ---------------------------------------------------------------------------
+cc_library(
+    name = "cc_http",
+    srcs = ["cc_http.c"],
+    hdrs = ["cc_http.h"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    linkopts = [
+        "-lm",
+        "-ldl",
+        "-lpthread",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = ["//third_party/libwebsockets:libwebsockets"],
+)

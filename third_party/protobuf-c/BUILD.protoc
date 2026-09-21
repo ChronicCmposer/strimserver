@@ -1,0 +1,17 @@
+# BUILD file for the @protoc_linux_aarch64 / @protoc_linux_x86_64 external
+# repos: the pinned protoc v36.2 binary + its bundled well-known-type .proto
+# includes. Both arch zips share this file; the codegen genrule selects the
+# matching one by exec platform.
+
+exports_files(["bin/protoc"])
+
+filegroup(
+    name = "include",
+    srcs = glob(["include/**/*.proto"]),
+    visibility = ["//visibility:public"],
+)
+
+# A single known file inside the include dir, so genrules can compute the
+# include root with dirname chains instead of $(location) on the multi-file
+# filegroup.
+exports_files(["include/google/protobuf/descriptor.proto"])

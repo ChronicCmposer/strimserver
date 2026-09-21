@@ -1,0 +1,48 @@
+# Phase 3a: vendored C infrastructure for the ARM controller rewrite.
+#
+# The assembly controller (core/controller/asm/) drives this C layer for
+# protocol work. Everything here is arm64-only (the controller rewrite is
+# ARM-only; the existing amd64 Go controller never links the C layer), so:
+#   - `bazel build //third_party/...` with --platforms=linux_arm64 genuinely
+#     builds every vendored C target;
+#   - the default amd64 platform (repo .bazelrc) skips them as incompatible,
+#     keeping the existing production build green.
+#
+# Targets:
+#   //third_party/protobuf-c:runtime          pure-C protobuf-c runtime
+#   //third_party/protobuf-c:protoc_gen_c     protoc plugin (codegen tooling)
+#   //third_party/containerd-api:codecs       generated containerd codecs
+#   //third_party/containerd-api:codegen      regeneration genrule (run
+#                                             //third_party/containerd-api:write_codecs)
+#   //third_party/libwebsockets:libwebsockets_static
+#                                             server-only static libwebsockets.a
+#   //third_party/libwebsockets:lws_smoke_test
+#                                             /healthz + WS echo test
+#
+# The "phase 3a gate" is the union of the vendored buildable artifacts:
+#   bazel build //third_party:phase3a_gate --platforms=//tools/bazel:linux_arm64
+# plus the tests:
+#   bazel test //third_party:phase3a_tests --platforms=//tools/bazel:linux_arm64
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "phase3a_gate",
+    srcs = [
+        "//third_party/containerd-api:codecs",
+        "//third_party/libwebsockets:libwebsockets_static",
+        "//third_party/libwebsockets:lws_server",
+        "//third_party/protobuf-c:runtime",
+        "//third_party/protobuf-c:protoc_gen_c",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+)
+
+test_suite(
+    name = "phase3a_tests",
+    tests = [
+        "//third_party/containerd-api:codecs_roundtrip_test",
+        "//third_party/libwebsockets:lws_smoke_test",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+)
