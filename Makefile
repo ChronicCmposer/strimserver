@@ -8,7 +8,7 @@ S3_BUCKET ?=s3://<bucket-name>
 
 .DEFAULT_GOAL := package
 
-.PHONY: prepare generate check-generated controller test-controller package release \
+.PHONY: prepare generate check-generated controller test-controller package package-arm64 release \
 	bump-version check-no-twitch-key check-deps check-deps-json \
 	check-ffmpeg-dist-deps check-openssh-dist-deps \
 	publish-all publish-strimserver publish-iperf3 publish-streamdeck publish-ffmpeg-dist publish-openssh-dist
@@ -46,8 +46,17 @@ check-deps-json:
 package:
 	bazel build //:package
 
+# The arm64 bundle alone (the same tar graph rebuilt under
+# //tools/bazel:linux_arm64 via a platform transition).
+package-arm64:
+	bazel build //:package_arm64
+
 # Attach the bundle + checksum to an existing tag's GitHub Release.
 # Requires the GitHub CLI (`gh auth login`).
+# NOTE: the release/publish targets wrap the Bazel targets, which now produce
+# BOTH the amd64 bundle (strimserver-deployment.tar) and the arm64 bundle
+# (strimserver-deployment-arm64.tar) in one invocation -- no Makefile logic
+# change was needed.
 GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null)
 release:
 	GIT_TAG=$(GIT_TAG) bazel run --action_env=GIT_TAG //:release
@@ -61,10 +70,12 @@ bump-version:
 	fi
 	bazel run //:bump_version -- "$(LEVEL)"
 
-# Publish everything to S3 in one bazel run: the strimserver deployment tar,
-# the Stream Deck plugin bundle (.zip + .tar.gz), and the iperf3 bundle.
-# Requires AWS credentials and S3_BUCKET. Runs a single bazel target rather
-# than the individual publish-* targets (one server/analysis pass).
+# Publish everything to S3 in one bazel run: BOTH strimserver deployment tars
+# (amd64 strimserver-deployment.tar + arm64 strimserver-deployment-arm64.tar,
+# each with its .sha256), the Stream Deck plugin bundle (.zip + .tar.gz), and
+# the iperf3 bundle. Requires AWS credentials and S3_BUCKET. Runs a single
+# bazel target rather than the individual publish-* targets (one
+# server/analysis pass).
 publish-all:
 	GIT_TAG=$(GIT_TAG) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG //:publish_all
 

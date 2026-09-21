@@ -501,47 +501,54 @@ red. The Tier 2 fallback compares a semantic fingerprint instead
 `-encoders` / `-filters` lists): weaker, but it still catches a
 pin drift that silently drops `libfdk_aac`.
 
-Build the deployment bundle. There are three ways to produce
-and publish `strimserver-deployment.tar`, depending on how
-you want consumers to fetch it (each shown as the `make`
-facade and the underlying `bazel` command it runs):
+Build the deployment bundle. The build produces **two** bundles, one per
+architecture, from a single Bazel invocation: amd64 keeps the unsuffixed
+`strimserver-deployment.tar` (byte-identical to the pre-dual-arch assets) and
+arm64 ships `strimserver-deployment-arm64.tar` (the same tar graph rebuilt
+under `//tools/bazel:linux_arm64` via a platform transition). There are three
+ways to produce and publish them, depending on how you want consumers to fetch
+them (each shown as the `make` facade and the underlying `bazel` command it
+runs):
 
 ```bash
-# A) Build a redistributable bundle + SHA-256 locally (no upload).
-#    Output: bazel-bin/strimserver-deployment.tar(.sha256)
+# A) Build both redistributable bundles + SHA-256s locally (no upload).
+#    Output: bazel-bin/strimserver-deployment.tar(.sha256)         amd64
+#            bazel-bin/strimserver-deployment-arm64.tar(.sha256)   arm64
 make package
 bazel build //:package
+# arm64 alone: bazel build //:package_arm64
 
-# B) Build, then attach the bundle + checksum to an existing GitHub
+# B) Build, then attach both bundles + checksums to an existing GitHub
 #    release. Requires the GitHub CLI (`gh auth login`) and a pushed tag.
 make release GIT_TAG=v1.0.0
 bazel run //:release   # reads GIT_TAG from the environment
 
-# C) Build and upload a single-tenant bundle to S3 (the default goal).
+# C) Build and upload both single-tenant bundles + checksums to S3 (the
+#    default goal).
 export S3_BUCKET="s3://your-bucket-name"
 make publish-strimserver
 bazel run //:publish_strimserver   # reads S3_BUCKET from the environment
 ```
 
 The Stream Deck plugin ships as its own distributable,
-published **alongside** `strimserver-deployment.tar` — never
-inside it:
+published **alongside** the deployment tars — never inside them:
 
-- `make release` / `bazel run //:release` also attach
-  `com.chroniccmposer.strimserver.sdPlugin.zip`, its
-  `com.chroniccmposer.strimserver.sdPlugin.tar.gz` variant, and
-  both `.sha256` files to the GitHub release (in addition to the
-  deployment tar + checksum).
+- `make release` / `bazel run //:release` attach both deployment tars
+  (`strimserver-deployment.tar` and `strimserver-deployment-arm64.tar`), both
+  `.sha256` files, and the Stream Deck plugin bundles
+  (`com.chroniccmposer.strimserver.sdPlugin.zip` + `.tar.gz`) to the GitHub
+  release.
 - `make publish-strimserver` / `bazel run
   //:publish_strimserver` also upload the plugin bundles to
   `$S3_BUCKET/strimserver-streamdeck-plugin.zip` and
-  `$S3_BUCKET/strimserver-streamdeck-plugin.tar.gz` (the tar's
-  sha256 is not uploaded to S3, and neither is the plugin's —
-  parity with the existing convention).
+  `$S3_BUCKET/strimserver-streamdeck-plugin.tar.gz`, alongside the four
+  deployment keys (`strimserver-deployment.tar`,
+  `strimserver-deployment-arm64.tar`, and both `.sha256`).
 - `make publish-all` / `bazel run //:publish_all` publishes
   **everything** to S3 in a single bazel run (one
-  server/analysis pass): the strimserver deployment tar
-  (`strimserver-deployment.tar`), the Stream Deck plugin bundles
+  server/analysis pass): both strimserver deployment tars
+  (`strimserver-deployment.tar` and `strimserver-deployment-arm64.tar`),
+  both `.sha256` checksums, the Stream Deck plugin bundles
   (both `strimserver-streamdeck-plugin.zip` and
   `.tar.gz`), and the iperf3 bundle
   (`iperf3-deployment.tar`). Requires AWS credentials and
@@ -552,27 +559,27 @@ inside it:
   `strimserver-streamdeck-plugin.zip` / `.tar.gz` keys. This
   mirrors `make publish-iperf3`.
 - `make package` / `bazel build //:package` builds only the
-  deployment tar (+ checksum); the plugin bundles are a separate
+  deployment tars (+ checksums); the plugin bundles are a separate
   artifact produced by `bazel build
   //tools/streamdeck-plugin:streamdeck_plugin_bundle` and
   `//tools/streamdeck-plugin:streamdeck_plugin_tar_gz`.
 
-All three deployment paths build the same three OCI images —
+All three deployment paths build the same three OCI images per architecture —
 `strimserver-controller:latest`, `ffmpeg:latest`, and
 `mediamtx:latest` — all assembled natively by Bazel
 (`rules_oci`) from pinned inputs — then package those images
 together with
 the configuration, scripts, systemd service, and the offline
-segment into `strimserver-deployment.tar`.
-`make package` and `make release` also produce a `.sha256`
-checksum for the tar (consumers verify it via
+segment into the deployment tars.
+`make package` and `make release` also produce `.sha256`
+checksums for both tars (consumers verify them via
 `DEPLOYMENT_SHA256`; see *AWS EC2 deployment target*) and
 require `TWITCH_STREAM_KEY` to be empty in
 `core/strimserver.env`; `make publish-strimserver` does not,
 and bakes whatever key is present. The experimental OpenSSH
 RPM is always included: it is fetched from the pinned
-`@openssh_dist` artifact (built out-of-band by
-`tools/openssh/publish.sh`).
+`@openssh_dist` (amd64) / `@openssh_dist_arm64` (aarch64)
+artifacts (built out-of-band by `tools/openssh/publish.sh`).
 
 Thanks to the `FROM scratch` images (no base OS, no bundled
 NVIDIA driver — the driver is injected at runtime via CDI)
@@ -634,7 +641,7 @@ git tag v1.0.0 && git push origin v1.0.0
 ```
 
 Then `make release GIT_TAG=v1.0.0` (or `bazel run //:release`)
-attaches the deployment bundle + checksum (and the Stream Deck
+attaches both deployment bundles + checksums (and the Stream Deck
 plugin bundles) to the GitHub release.
 
 On non-x86_64 hosts, `make test-controller` additionally
@@ -821,9 +828,14 @@ deploy/aws/launch --type g6.xlarge --wait
 bundle from: an `https://` URL (e.g. a GitHub release asset
 — no AWS credentials needed), an `s3://` URI (the instance
 role needs S3 read), or a local path (uploaded over scp).
-Set `DEPLOYMENT_SHA256` to verify the download against the
-checksum produced by `make package` / `make release`. Your
-Twitch stream key is supplied here via `TWITCH_STREAM_KEY`
+Point it at the asset for the instance's architecture — amd64
+`strimserver-deployment.tar`, arm64
+`strimserver-deployment-arm64.tar` (`launch` defaults the
+unset arm64 vars to the arm64 asset, so an arm64 launch never
+silently fetches the amd64 tar). Set `DEPLOYMENT_SHA256` to
+verify the download against the checksum produced by
+`make package` / `make release` (both arches publish one).
+Your Twitch stream key is supplied here via `TWITCH_STREAM_KEY`
 (or `TWITCH_STREAM_KEY_FILE`) and transferred to the
 instance as a `0600` file at deploy time — it is never baked
 into the bundle.

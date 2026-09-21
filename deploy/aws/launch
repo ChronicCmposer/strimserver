@@ -33,6 +33,18 @@ Env vars (typically sourced from deploy/aws/.env):
   DLAMI_SSM_PARAM       optional override: resolve the AL2023 GPU DLAMI via this
                         SSM path instead of the architecture default (amd64: the
                         pinned DEFAULT_AMI_ID; arm64: the arm64 DLAMI SSM float)
+  DEPLOYMENT_SRC        optional; passed through to setup_strimserver. On arm64
+                        launches, when unset (and no S3_BUCKET legacy path), it
+                        defaults to the arm64 GitHub release asset
+                        (strimserver-deployment-arm64.tar); amd64 is untouched
+                        (setup_strimserver's own defaults stay in effect)
+  DEPLOYMENT            optional; the bundle basename setup_strimserver extracts
+                        and (legacy) fetches. arm64 defaults to
+                        strimserver-deployment-arm64.tar when unset; amd64 is
+                        untouched
+  DEPLOYMENT_SHA256     optional; passed through to setup_strimserver's integrity
+                        check. On the arm64 default (GitHub) path, when unset it
+                        is fetched from the published arm64 .sha256 release asset
   AWS_REGION            optional; otherwise your CLI's configured region is used
   SSH_HOST              hostname --wait offers to map in /etc/hosts (default:
                         PROJECT_NAME; ignored when it is already an IP address)
@@ -45,6 +57,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass
 
 # Pinned x86_64 Amazon Linux 2023 GPU DLAMI ("Deep Learning Base OSS Nvidia
@@ -80,6 +93,64 @@ DEFAULT_DLAMI_SSM_PARAM_ARM64 = (
     "/aws/service/deeplearning/ami/arm64/"
     "base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
 )
+
+# Deployment bundle naming: the amd64 tar keeps the original unsuffixed
+# basename (byte-identical to the pre-dual-arch assets) and the arm64 tar gains
+# the -arm64 suffix, so the two bundles never collide on a GitHub release or
+# S3. //:release and //:publish_all upload both; setup_strimserver resolves the
+# source from DEPLOYMENT_SRC / DEPLOYMENT (defaulting DEPLOYMENT to the arm64
+# basename here so an arm64 launch never silently fetches the amd64 tar).
+DEPLOYMENT_TAR_ARM64 = "strimserver-deployment-arm64.tar"
+RELEASE_DOWNLOAD_URL = (
+    "https://github.com/ChronicCmposer/strimserver/releases/latest/download/{asset}"
+)
+
+
+def fetch_release_sha256(asset):
+    """The '<hex>  <name>' first line of a GitHub release .sha256 asset, or
+    None when the asset has not been published. setup_strimserver verifies the
+    download against DEPLOYMENT_SHA256 when set."""
+    url = RELEASE_DOWNLOAD_URL.format(asset=asset + ".sha256")
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            first = resp.read(256).decode("utf-8", "replace").splitlines()[0]
+    except Exception:
+        return None
+    return first.split()[0] if first else None
+
+
+def default_deployment_env(cfg):
+    """arm64 deployment defaults; amd64 is left untouched so its behavior is
+    byte-identical to the pre-dual-arch launches.
+
+    A .env written for the amd64 cutover predates the arm64 bundle, so an arm64
+    launch must not silently fetch the amd64 tar. When the operator left the
+    deployment source unset and no legacy S3_BUCKET path is configured, point
+    DEPLOYMENT_SRC at the arm64 GitHub release asset, default DEPLOYMENT to the
+    arm64 basename (which also selects the arm64 key on the legacy
+    $S3_BUCKET/$DEPLOYMENT path), and default DEPLOYMENT_SHA256 from the
+    published arm64 .sha256 asset. Explicit operator values always win
+    (setdefault). The defaults propagate to setup_strimserver through the execve
+    handoff's copied environment.
+    """
+    if cfg.arch != "arm64":
+        return
+    os.environ.setdefault("DEPLOYMENT", DEPLOYMENT_TAR_ARM64)
+    src = os.environ.get("DEPLOYMENT_SRC", "").strip()
+    bucket = os.environ.get("S3_BUCKET", "").strip()
+    if not src and not bucket:
+        os.environ["DEPLOYMENT_SRC"] = RELEASE_DOWNLOAD_URL.format(asset=DEPLOYMENT_TAR_ARM64)
+        sha = fetch_release_sha256(DEPLOYMENT_TAR_ARM64)
+        if sha:
+            os.environ.setdefault("DEPLOYMENT_SHA256", sha)
+        else:
+            print(f"warning: could not fetch the arm64 .sha256 release asset; "
+                  f"DEPLOYMENT_SHA256 left unset (set it manually to verify the "
+                  f"download, or publish the arm64 release first)")
+    print(f"arm64 deployment defaults: DEPLOYMENT={os.environ['DEPLOYMENT']}"
+          + (f" DEPLOYMENT_SRC={os.environ['DEPLOYMENT_SRC']}" if os.environ.get("DEPLOYMENT_SRC") else "")
+          + (f" DEPLOYMENT_SHA256={os.environ['DEPLOYMENT_SHA256']}"
+             if os.environ.get("DEPLOYMENT_SHA256") else ""))
 
 
 def resolve_arch(instance_type, arch_override=""):
@@ -712,6 +783,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cfg = Config.from_env(instance_type=args.type)
+    default_deployment_env(cfg)
     try:
         launch_instance(cfg, use_spot=not args.no_spot, wait=args.wait)
     except subprocess.CalledProcessError as e:

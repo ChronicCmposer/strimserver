@@ -23,27 +23,33 @@ amd64 ships the Go binary, arm64 ships the assembly controller (all seven
 `cc_*.S` modules plus the vendored C protocol layer, linked static so it needs
 no loader/libs on a scratch image). Both land at `/strimserver-controller`.
 
-The deployment bundle (`strimserver-deployment.tar`) is per-architecture:
-`--platforms` selects the controller binary, the image architectures, and the
-multiarch lib paths (`lib/x86_64-linux-gnu` vs `lib/aarch64-linux-gnu`).
-**Suffix release assets with the architecture** (e.g.
-`strimserver-deployment-amd64.tar` and `strimserver-deployment-arm64.tar`) so the
-two bundles never collide on one GitHub release.
+The deployment bundle is per-architecture: `--platforms` (or the arm64
+platform transition) selects the controller binary, the image architectures,
+and the multiarch lib paths (`lib/x86_64-linux-gnu` vs
+`lib/aarch64-linux-gnu`). **amd64 keeps the unsuffixed
+`strimserver-deployment.tar` (byte-identical to the pre-dual-arch assets);
+arm64 ships `strimserver-deployment-arm64.tar`** — the distinct basename
+avoids runfiles collisions and keeps the two bundles separate on one GitHub
+release / S3.
 
 ## 2. Building the bundle
 
 ```sh
-bazel build //:package --platforms=//tools/bazel:linux_amd64
-bazel build //:package --platforms=//tools/bazel:linux_arm64
+# Builds BOTH bundles (+ checksums) in ONE invocation:
+bazel build //:package //:package_arm64
+#   bazel-bin/strimserver-deployment.tar(.sha256)        amd64
+#   bazel-bin/strimserver-deployment-arm64.tar(.sha256)  arm64
 ```
 
-Each produces `bazel-bin/strimserver-deployment.tar` plus
-`strimserver-deployment.tar.sha256`. Bundle builds refuse to run while
+Or build each alone: `bazel build //:package` (amd64) /
+`bazel build //:package_arm64` (arm64); the arm64 path runs the same unchecked
+tar under `//tools/bazel:linux_arm64` via a platform transition
+(`tools/bazel/platform_transition.bzl`). Bundle builds refuse to run while
 `TWITCH_STREAM_KEY` is set in `core/strimserver.env` — the key is injected at
 deploy time, never baked into the bundle.
 
-Publish to GitHub (requires `gh auth login` and a pushed tag); rename the tar to
-the per-arch asset first:
+Publish to GitHub (requires `gh auth login` and a pushed tag); `//:release`
+uploads both tars and both `.sha256` assets:
 
 ```sh
 GIT_TAG=v1.0.0 bazel run //:release
@@ -152,6 +158,15 @@ architecture default. The arm64 default resolves the SSM float
 (`resolve:ssm:<arm64 param>`), so no pin goes stale. `--wait` prints the public
 IP, offers `/etc/hosts` upsert + stale host-key scrub, polls SSH, and hands off
 to `setup_strimserver` (execve).
+
+`launch` also defaults the **unset** deployment vars on arm64 (amd64 is
+untouched): `DEPLOYMENT=strimserver-deployment-arm64.tar`, `DEPLOYMENT_SRC` to
+the latest arm64 GitHub release asset
+(`.../releases/latest/download/strimserver-deployment-arm64.tar`), and
+`DEPLOYMENT_SHA256` from the arm64 `.sha256` asset. Explicit operator values in
+`.env` always win. The legacy `$S3_BUCKET/$DEPLOYMENT` path still applies when
+`DEPLOYMENT_SRC` is unset and `S3_BUCKET` is configured — with `DEPLOYMENT`
+defaulting to the arm64 basename.
 
 ### 4.4 On-box setup (`setup_strimserver` → `deploy.sh`)
 
