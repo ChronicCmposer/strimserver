@@ -6,7 +6,8 @@
 # Single source of truth for the pinned OpenSSH artifact build.
 # Runs inside the chroot that tools/openssh/publish.sh provisions from the
 # Docker Hub registry API (no docker): the guest executes
-# /build.sh via chroot (+ qemu-x86_64 when the host is not amd64).
+# /build.sh via chroot (+ qemu-x86_64 when the amd64 guest is emulated on a
+# non-x86_64 host; arm64 builds run natively on aarch64 hosts).
 #
 # $1 is the rootfs path -- "/" inside the chroot (publish.sh passes it, so the
 # script is also usable pointed at an already-extracted rootfs for testing).
@@ -18,7 +19,9 @@
 #   OPENSSH_REPO    https://github.com/openssh/openssh-portable.git
 #   NPROC           (host nproc)
 #
-# Output: /out/openssh-experimental.rpm (publish.sh copies it out of the rootfs).
+# Output: /out/openssh-experimental.rpm (publish.sh copies it out of the rootfs
+# and renames it per arch: openssh-experimental.rpm for amd64,
+# openssh-experimental-aarch64.rpm for arm64).
 # =============================================================================
 set -euo pipefail
 

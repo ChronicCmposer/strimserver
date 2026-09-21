@@ -11,44 +11,63 @@
 # guest when the host is not x86_64. The build itself is the shared build.sh,
 # the single source of truth for the pinned artifact.
 #
+# Architecture (OPENSSH_ARCH): the guest runs natively whenever the host arch
+# matches the target arch (amd64 on x86_64, arm64 on aarch64); otherwise the
+# amd64 guest runs under the patched qemu-x86_64. Only amd64 guests can be
+# emulated (the pipeline has no qemu-aarch64); building the arm64 artifact on
+# an x86_64 host is rejected up front. The arm64 rootfs is the arm64 variant
+# of the same pinned amazonlinux:2023 image, and the artifact name gains an
+# -aarch64 discriminator (openssh-experimental-aarch64.rpm) so it never
+# collides with the amd64 name.
+#
 # The resulting /out/openssh-experimental.rpm is copied into the current
-# directory as openssh-experimental.rpm, uploaded to $S3_BUCKET/openssh/ with
-# no ACL modification (objects get the bucket's default private ACL; the
-# IP-scoped HTTPS-only bucket policy from scripts/bucket-cidr-policy.sh is the only
-# access gate), then the s3_http_file block (with build_file_content =
+# directory as openssh-experimental.rpm (amd64) or
+# openssh-experimental-aarch64.rpm (arm64), uploaded to $S3_BUCKET/openssh/
+# with no ACL modification (objects get the bucket's default private ACL; the
+# IP-scoped HTTPS-only bucket policy from scripts/bucket-cidr-policy.sh is the
+# only access gate), then the s3_http_file block (with build_file_content =
 # exports_files for the root-addressable @openssh_dist//:openssh-experimental.rpm
-# label) is printed for MODULE.bazel (name = "openssh_dist") along with the
-# `gh release upload` command for the GitHub Release mirror (tag openssh-dist).
+# label, or @openssh_dist_arm64//:openssh-experimental-aarch64.rpm for arm64)
+# is printed for MODULE.bazel along with the `gh release upload` command for
+# the GitHub Release mirror (tag openssh-dist).
 #
 # Env vars (defaults mirror the build.sh pins):
 #   OPENSSH_TAG        default V_10_5_P1
 #   OPENSSH_VERSION    default 10.5p1
+#   OPENSSH_ARCH       default amd64; amd64|arm64 selects the guest/rootfs
+#                      arch, the -aarch64 artifact-name discriminator, and the
+#                      MODULE.bazel stanza name (openssh_dist /
+#                      openssh_dist_arm64). Default amd64 is byte-identical
+#                      to the pre-parameterization behavior.
 #   AMAZONLINUX_TAG    default 2023.12.20260817.0 (pinned date-stamped Docker Hub tag pulled for the rootfs; resolves the floating-2023 hygiene note)
 #   QEMU_VERSION       default 9.2.4 (this consumer's qemu pin; fixes the
 #                      linux-user open_self_maps SIGSEGV that crashed
 #                      amazonlinux:2023 grep/awk/m4). Passed to
 #                      tools/qemu/build-qemu.sh on self-heal; the
 #                      version-stamped cache keeps it separate from
-#                      ffmpeg-dist's 8.2.2 pin.
+#                      ffmpeg-dist's 8.2.2 pin. Only used when the guest arch
+#                      differs from the host arch.
 #   QEMU_BIN           default: unset. Explicit override for the patched qemu
 #                      used on non-x86_64 hosts; must be a
 #                      buildkit-direct-execve patched qemu (verified via the
 #                      'safe_execve' marker), otherwise it is ignored with a
 #                      warning. Resolution order: QEMU_BIN (validated) >
 #                      cached patched qemu (re-validated) > self-heal source
-#                      build via tools/qemu/build-qemu.sh. amd64 hosts
-#                      run the guest natively with no qemu at all.
+#                      build via tools/qemu/build-qemu.sh. Native builds
+#                      (host arch == OPENSSH_ARCH) run the guest natively
+#                      with no qemu at all.
 #   OPENSSH_DIST_ROOTFS default unset; when set to an already-extracted rootfs
 #                      the Docker Hub registry pull is skipped entirely.
 #   OPENSSH_DIST_CACHE  default ${XDG_CACHE_HOME:-$HOME/.cache}/openssh-dist; the
 #                      persistent version-stamped rootfs cache. The rootfs is
 #                      keyed by AMAZONLINUX_TAG + OPENSSH_TAG + QEMU_VERSION
-#                      (every build-determining pin) and stamped with a
-#                      .provisioned sentinel (provisioned into $rootfs.new then
-#                      atomically mv'd into place), so an aborted build resumes
-#                      from the cached rootfs on the next run. Determinism
-#                      guardrail: the cache is never reused across a pin change
-#                      (a different pin resolves to a different rootfs-<key>
+#                      (+ -arm64 for the arm64 build, so the two arch rootfs
+#                      caches never collide) and stamped with a .provisioned
+#                      sentinel (provisioned into $rootfs.new then atomically
+#                      mv'd into place), so an aborted build resumes from the
+#                      cached rootfs on the next run. Determinism guardrail:
+#                      the cache is never reused across a pin change (a
+#                      different pin resolves to a different rootfs-<key>
 #                      path).
 #   S3_BUCKET          required for upload (e.g. s3://<bucket-name>; SKIP_UPLOAD=1 works without it)
 #   AWS_REGION         required for upload (no default; SKIP_UPLOAD=1 works without it)
@@ -65,6 +84,7 @@ set -euo pipefail
 # --- inputs (defaults mirror the build.sh pins) ---
 OPENSSH_TAG="${OPENSSH_TAG:-V_10_5_P1}"
 OPENSSH_VERSION="${OPENSSH_VERSION:-10.5p1}"
+OPENSSH_ARCH="${OPENSSH_ARCH:-amd64}"
 AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023.12.20260817.0}"
 S3_BUCKET="${S3_BUCKET:-s3://<bucket-name>}"
 AWS_REGION="${AWS_REGION:-}"
@@ -85,6 +105,21 @@ if [[ -z "$OPENSSH_VERSION" ]]; then
   exit 1
 fi
 
+# --- derive the per-arch values from OPENSSH_ARCH (single source of truth) ---
+# ROOTFS_ARCH selects the amazonlinux image platform; ARTIFACT_ARCH_SUFFIX
+# keeps the arm64 RPM name distinct from the amd64 one (the RPM convention is
+# openssh-experimental-aarch64.rpm); stanza_name follows the same dual-arch
+# MODULE.bazel repository convention as @ffmpeg_dist / @ffmpeg_dist_arm64.
+case "$OPENSSH_ARCH" in
+  amd64) ROOTFS_ARCH="amd64"; ARTIFACT_ARCH_SUFFIX=""; stanza_name="openssh_dist" ;;
+  arm64) ROOTFS_ARCH="arm64"; ARTIFACT_ARCH_SUFFIX="-aarch64"; stanza_name="openssh_dist_arm64" ;;
+  *)
+    echo "error: unsupported OPENSSH_ARCH '$OPENSSH_ARCH' (expected 'amd64' or 'arm64')" >&2
+    exit 1
+    ;;
+esac
+artifact="openssh-experimental${ARTIFACT_ARCH_SUFFIX}.rpm"
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="$(mktemp -d)"
 # The rootfs inside $work is populated by the privileged chroot harness, so an
@@ -93,10 +128,30 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work" 2>/dev/null || true' EXIT
 
 host_arch="$(uname -m)"
+case "$host_arch" in
+  x86_64) host_arch="amd64" ;;
+  aarch64) host_arch="arm64" ;;
+esac
 # Each consumer pins its own qemu (openssh-dist: 9.2.4, ffmpeg-dist: 8.2.2)
 # and uses a version-stamped cache (tools/qemu/build-qemu.sh), so the two
 # artifact pipelines never share a qemu binary.
 qemu_cache_path="${XDG_CACHE_HOME:-$HOME/.cache}/qemu/qemu-x86_64-patched-${QEMU_VERSION}"
+
+# qemu is only needed when the guest arch differs from the host arch (the
+# amd64 guest emulated on a non-x86_64 host). Native builds (host arch ==
+# OPENSSH_ARCH) run the guest directly with no qemu at all. Only amd64 guests
+# can be emulated: the pipeline has no qemu-aarch64, so building the arm64
+# artifact on an x86_64 host is rejected up front (fail fast) rather than
+# attempted under an emulator that would change the artifact.
+need_qemu=0
+if [[ "$OPENSSH_ARCH" != "$host_arch" ]]; then
+  if [[ "$OPENSSH_ARCH" == "arm64" ]]; then
+    echo "error: cannot build the arm64 artifact on a $host_arch host: this pipeline has no qemu-aarch64 emulator." >&2
+    echo "       Only amd64 guests are emulated (with the patched qemu-x86_64); build arm64 natively on an aarch64 host." >&2
+    exit 1
+  fi
+  need_qemu=1
+fi
 
 # --- resolve the qemu emulator (only needed on non-x86_64 hosts) ---
 # qemu_is_patched <path> -- true iff <path> is a usable buildkit-direct-execve
@@ -170,12 +225,12 @@ resolve_qemu() {
   exit 1
 }
 
-if [[ "$host_arch" != "x86_64" ]]; then
+if [[ "$need_qemu" == 1 ]]; then
   qemu=""
   if ! resolve_qemu || ! "$qemu" --version >/dev/null 2>&1; then
-    echo "error: host arch is '$host_arch' (not x86_64) and no usable qemu-x86_64 was found." >&2
-    echo "       publish.sh runs natively on amd64 hosts with no qemu at all." >&2
-    echo "       arm64 hosts need the tonistiigi buildkit-direct-execve patched qemu" >&2
+    echo "error: host arch is '$host_arch' and the amd64 guest needs qemu-x86_64, but no usable patched qemu-x86_64 was found." >&2
+    echo "       Native builds (host arch == OPENSSH_ARCH) run the guest with no qemu at all." >&2
+    echo "       Cross builds need the tonistiigi buildkit-direct-execve patched qemu" >&2
     echo "       (upstream qemu cannot intercept the guest's execve)." >&2
     echo "       publish.sh self-heals by building it from source (build-qemu.sh);" >&2
     echo "       that needs host deps: apt-get install -y meson ninja-build" >&2
@@ -189,11 +244,11 @@ fi
 
 # --- rootfs provisioning: pull the pinned base image via the registry API ---
 # provision_rootfs <rootfs> <repo> <tag> -- pulls the <tag> manifest list from
-# the Docker Hub registry (plain curl+jq), selects the linux/amd64 image, and
+# the Docker Hub registry (plain curl+jq), selects the $ROOTFS_ARCH image, and
 # extracts its layers into <rootfs>. Returns non-zero on any failure; the
 # caller prints the loud error with the OPENSSH_DIST_ROOTFS fallback hint.
 provision_rootfs() {
-  local rootfs="$1" repo="$2" tag="$3" token manifest_list amd64_digest manifest layer_digests layer_digest
+  local rootfs="$1" repo="$2" tag="$3" token manifest_list arch_digest manifest layer_digests layer_digest
   token="$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" | jq -r '.token')" \
     || return 1
   manifest_list="$(curl -fsSL \
@@ -202,13 +257,13 @@ provision_rootfs() {
       "https://registry-1.docker.io/v2/${repo}/manifests/$tag" \
     | jq -c .)" \
     || return 1
-  amd64_digest="$(printf '%s' "$manifest_list" | jq -r '.manifests[] | select(.platform.os=="linux" and .platform.architecture=="amd64") | .digest')" \
+  arch_digest="$(printf '%s' "$manifest_list" | jq -r --arg a "$ROOTFS_ARCH" '.manifests[] | select(.platform.os=="linux" and .platform.architecture==$a) | .digest')" \
     || return 1
-  [[ -n "$amd64_digest" ]] || return 1
+  [[ -n "$arch_digest" ]] || return 1
   manifest="$(curl -fsSL \
       -H "Authorization: Bearer $token" \
       -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
-      "https://registry-1.docker.io/v2/${repo}/manifests/$amd64_digest" \
+      "https://registry-1.docker.io/v2/${repo}/manifests/$arch_digest" \
     | jq -c .)" \
     || return 1
   layer_digests="$(printf '%s' "$manifest" | jq -r '.layers[].digest')" \
@@ -234,10 +289,14 @@ provision_rootfs() {
   return 0
 }
 
-rootfs="${OPENSSH_DIST_ROOTFS:-$OPENSSH_DIST_CACHE/rootfs-${AMAZONLINUX_TAG}-${OPENSSH_TAG}-${QEMU_VERSION}}"
+rootfs_arch_tag=""
+if [[ "$OPENSSH_ARCH" == "arm64" ]]; then
+  rootfs_arch_tag="-arm64"
+fi
+rootfs="${OPENSSH_DIST_ROOTFS:-$OPENSSH_DIST_CACHE/rootfs-${AMAZONLINUX_TAG}-${OPENSSH_TAG}-${QEMU_VERSION}${rootfs_arch_tag}}"
 if [[ -z "$OPENSSH_DIST_ROOTFS" ]]; then
   if [[ ! -f "$rootfs/.provisioned" ]]; then
-    echo "==> provisioning rootfs amazonlinux:${AMAZONLINUX_TAG} (linux/amd64) via the Docker Hub registry API"
+    echo "==> provisioning rootfs amazonlinux:${AMAZONLINUX_TAG} (linux/${ROOTFS_ARCH}) via the Docker Hub registry API"
     rm -rf "$rootfs" "$rootfs.new"
     mkdir -p "$rootfs.new"
     if ! provision_rootfs "$rootfs.new" "library/amazonlinux" "$AMAZONLINUX_TAG"; then
@@ -269,12 +328,12 @@ cp "$repo_root/tools/openssh/sshd_config" "$rootfs/sshd_config"
 # The guest /out mount point (build.sh's artifact lands there) and the qemu
 # install dir are not guaranteed to exist in a fresh rootfs.
 mkdir -p "$rootfs/out"
-if [[ "$host_arch" != "x86_64" ]]; then
+if [[ "$need_qemu" == 1 ]]; then
   mkdir -p "$rootfs/usr/local/bin"
   cp -f "$QEMU_BIN" "$rootfs/usr/local/bin/qemu-x86_64"
 fi
 
-# --- inner harness: mounts + chroot (+ qemu when the host is not amd64) ---
+# --- inner harness: mounts + chroot (+ qemu when the guest arch is emulated) ---
 {
   printf '#!/usr/bin/env bash\n'
   printf 'set -euo pipefail\n'
@@ -286,10 +345,10 @@ fi
   printf 'done\n'
   printf 'mount --bind "$rootfs/etc/resolv.conf" "$rootfs/etc/resolv.conf"\n'
   # The RPM is copied out of the rootfs after the chroot (no /out bind-mount).
-  for pin in OPENSSH_TAG OPENSSH_VERSION; do
+  for pin in OPENSSH_TAG OPENSSH_VERSION OPENSSH_ARCH; do
     printf 'export %s=%s\n' "$pin" "$(printf %q "${!pin}")"
   done
-  if [[ "$host_arch" != "x86_64" ]]; then
+  if [[ "$need_qemu" == 1 ]]; then
     printf 'chroot "$rootfs" /usr/local/bin/qemu-x86_64 /bin/bash -eux -o pipefail /build.sh\n'
     printf 'chroot "$rootfs" /usr/local/bin/qemu-x86_64 /bin/bash -eux -o pipefail -c '\''test -s /out/openssh-experimental.rpm && rpm -qip /out/openssh-experimental.rpm'\''\n'
   else
@@ -299,10 +358,14 @@ fi
 } > "$work/inner.sh"
 chmod +x "$work/inner.sh"
 
-# The artifact is always linux/amd64 (matches .bazelrc's
-# --platforms=//tools/bazel:linux_amd64), so on arm64 hosts this is a
-# cross-arch build through QEMU -- expected, and slow.
-echo "==> building openssh-experimental.rpm (linux/amd64) via chroot+qemu (no docker)"
+# The artifact is built for OPENSSH_ARCH (matching the .bazelrc
+# --platforms=//tools/bazel:linux_<arch> selection); when the host arch
+# differs, the amd64 guest runs under the patched qemu -- expected, and slow.
+if [[ "$need_qemu" == 1 ]]; then
+  echo "==> building $artifact (linux/${OPENSSH_ARCH}) via chroot+qemu (no docker)"
+else
+  echo "==> building $artifact (linux/${OPENSSH_ARCH}) via chroot natively (no docker)"
+fi
 
 # --- privilege wrapper: root, passwordless sudo, or a fresh user namespace ---
 if [[ $EUID -eq 0 ]]; then
@@ -326,7 +389,9 @@ rpm_type="$(file -b "$rootfs/out/openssh-experimental.rpm")"
 echo "==> rpm: $rpm_type"
 
 # --- checksum -----------------------------------------------------------------
-artifact="openssh-experimental.rpm"
+# build.sh always writes /out/openssh-experimental.rpm; the per-arch artifact
+# name (openssh-experimental.rpm / openssh-experimental-aarch64.rpm) is
+# applied here when copying it out, so the S3 keys can never collide.
 cp -f "$rootfs/out/openssh-experimental.rpm" "$artifact"
 sha256="$(sha256sum "$artifact" | awk '{print $1}')"
 echo "==> artifact: $artifact"
@@ -345,28 +410,28 @@ elif ! aws --region "$AWS_REGION" sts get-caller-identity >/dev/null 2>&1; then
   echo "!! AWS credentials not found (aws sts get-caller-identity failed)." >&2
   echo "!! Skipping upload; $artifact remains local." >&2
   echo "!! Re-run with valid credentials to publish, or upload manually:" >&2
-  echo "!!   aws --region $AWS_REGION s3 cp $artifact $S3_BUCKET/openssh/openssh-experimental.rpm" >&2
+  echo "!!   aws --region $AWS_REGION s3 cp $artifact $S3_BUCKET/openssh/$artifact" >&2
   upload_ok=0
 else
   if [[ -z "$S3_BUCKET" || "$S3_BUCKET" == "s3://<bucket-name>" ]]; then
     echo "error: S3_BUCKET is required for upload; set S3_BUCKET to your real bucket (e.g. S3_BUCKET=s3://your-bucket-name)." >&2
     exit 1
   fi
-  aws --region "$AWS_REGION" s3 cp "$artifact" "$S3_BUCKET/openssh/openssh-experimental.rpm"
+  aws --region "$AWS_REGION" s3 cp "$artifact" "$S3_BUCKET/openssh/$artifact"
   upload_ok=1
 fi
 
 # --- MODULE.bazel stanza ---
 # The S3 URL is derived from STRIMSERVER_S3_BUCKET / STRIMSERVER_S3_REGION at
 # fetch time (not printed); mirror_urls is mandatory, so always emit it.
-mirror_url="https://github.com/${GITHUB_REPOSITORY:-ChronicCmposer/strimserver}/releases/download/openssh-dist/openssh-experimental.rpm"
+mirror_url="https://github.com/${GITHUB_REPOSITORY:-ChronicCmposer/strimserver}/releases/download/openssh-dist/${artifact}"
 
 printf '\n# --- MODULE.bazel: paste this s3_http_file block into MODULE.bazel ---\n'
 printf 's3_http_file(\n'
-printf '    name = "openssh_dist",\n'
-printf '    downloaded_file_name = "openssh-experimental.rpm",\n'
-printf '    build_file_content = "exports_files([\\"openssh-experimental.rpm\\"])",\n'
-printf '    s3_key = "openssh/openssh-experimental.rpm",\n'
+printf '    name = "%s",\n' "$stanza_name"
+printf '    downloaded_file_name = "%s",\n' "$artifact"
+printf '    build_file_content = "exports_files([\\"%s\\"])",\n' "$artifact"
+printf '    s3_key = "openssh/%s",\n' "$artifact"
 printf '    sha256 = "%s",\n' "$sha256"
 printf '    mirror_urls = ["%s"],\n' "$mirror_url"
 printf ')\n'

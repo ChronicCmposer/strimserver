@@ -402,10 +402,11 @@ http_archive(
 # env vars (no committed defaults); when they are unset, the GitHub Release
 # mirrors below are used.
 #
-# NOTE: the arm64 artifact below was built locally (SKIP_UPLOAD=1); it must be
-# uploaded out-of-band to S3 (ffmpeg/ffmpeg-8.1-...-arm64.tar.gz) and as a
-# GitHub Release asset before arm64 builds can fetch it. The sha256 is real
-# (computed from the local build), not a placeholder.
+# NOTE: the arm64 artifact below was built locally (SKIP_UPLOAD=1); it is now
+# uploaded as a GitHub Release asset (mirror_urls below), so arm64 builds can
+# fetch it. The S3 upload (ffmpeg/ffmpeg-8.1-...-arm64.tar.gz) is still an
+# operator action (IAM s3:PutObject denied for the strimserver user). The
+# sha256 is real (computed from the local build), not a placeholder.
 s3_http_archive(
     name = "ffmpeg_dist",
     build_file_content = 'exports_files(["ffmpeg", "BUILD-INFO.txt"])',
@@ -459,12 +460,14 @@ s3_http_file(
 # the RPM the @openssh_dist//:openssh-experimental.rpm label, and the
 # now-redundant tools/openssh/BUILD.bazel filegroup wrapper is gone.
 #
-# TODO(arm64): @openssh_dist is the amd64 build. An arm64 openssh requires an
-# aarch64 amazonlinux chroot rebuild (out-of-band by tools/openssh/build.sh);
-# when the pipeline produces it, add an openssh_dist_arm64 pin here and make
-# the //:bundle_openssh_rpm member select() per target architecture. The RPM
-# ships in the deployment bundle as a host-side artifact, so until then there
-# is nothing to select -- the amd64 RPM is the only artifact.
+# @openssh_dist is the amd64 build; @openssh_dist_arm64 is the aarch64 build
+# (OPENSSH_ARCH=arm64 in tools/openssh/publish.sh: an aarch64 amazonlinux:2023
+# chroot, run natively on aarch64 hosts; the arm64 artifact name gains the
+# -aarch64 discriminator so it never collides with the amd64 name). Both are
+# built out-of-band by tools/openssh/publish.sh and pinned here. The
+# //:bundle_openssh_rpm member select()s per target architecture but keeps the
+# tar member named openssh-experimental.rpm on BOTH arches (deploy.sh checks
+# /mnt/nvme/openssh-experimental.rpm).
 s3_http_file(
     name = "openssh_dist",
     build_file_content = 'exports_files(["openssh-experimental.rpm"])',
@@ -472,6 +475,15 @@ s3_http_file(
     mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental.rpm"],
     s3_key = "openssh/openssh-experimental.rpm",
     sha256 = "698ccebf9a35c730c4fd402bdfb7f3473613e06a4edf2d2971460b82e65d2bab",
+)
+
+s3_http_file(
+    name = "openssh_dist_arm64",
+    build_file_content = 'exports_files(["openssh-experimental-aarch64.rpm"])',
+    downloaded_file_name = "openssh-experimental-aarch64.rpm",
+    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental-aarch64.rpm"],
+    s3_key = "openssh/openssh-experimental-aarch64.rpm",
+    sha256 = "c2aef77841c6edcfb49f4aa54fef617e79590d09f26158a30dbb0ae512ba9423",
 )
 
 # --- Stream Deck plugin (rollup) ------------------------------------------
