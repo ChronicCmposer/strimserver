@@ -1,6 +1,7 @@
 # gazelle:prefix strimserver-controller
 
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
@@ -104,8 +105,19 @@ test_suite(
 
 # --- Lint --------------------------------------------------------------
 # golangci-lint pinned as a downloaded, checksummed Bazel tool (see
-# @golangci_lint_linux_amd64 in MODULE.bazel) instead of `go install`ed over
-# the network on every lint-enabled build.
+# @golangci_lint_linux_amd64 / @golangci_lint_linux_arm64 in MODULE.bazel)
+# instead of `go install`ed over the network on every lint-enabled build.
+# The filegroup selects the tool matching the target platform; the lint test
+# runs on the target platform via --use_target_platform_for_tests, so it gets
+# the native tool on each architecture.
+
+filegroup(
+    name = "golangci_lint_tool",
+    srcs = select({
+        "//tools/bazel:is_amd64_target": ["@golangci_lint_linux_amd64//:golangci-lint"],
+        "//tools/bazel:is_arm64_target": ["@golangci_lint_linux_arm64//:golangci-lint"],
+    }),
+)
 
 go_bin(name = "go_bin")
 
@@ -113,12 +125,12 @@ sh_test(
     name = "lint",
     srcs = ["lint.sh"],
     args = [
-        "$(location @golangci_lint_linux_amd64//:golangci-lint)",
+        "$(location :golangci_lint_tool)",
         "$(location :go_bin)",
         "$(location :.golangci.yml)",
     ],
     data = [
-        "@golangci_lint_linux_amd64//:golangci-lint",
+        ":golangci_lint_tool",
         ":go_bin",
         ".golangci.yml",
         "container_factory.go",
@@ -140,21 +152,23 @@ sh_test(
 
 deb_file(
     name = "dash_as_sh",
-    data = "@trixie//dash/amd64:data",
+    data = "@trixie//dash:data",
     path = "usr/bin/dash",
     out = "sh",
 )
 
 deb_file(
     name = "controller_ld_linux",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
 )
 
 deb_file(
     name = "controller_libc_so",
-    data = "@trixie//libc6/amd64:data",
+    data = "@trixie//libc6:data",
     path = "usr/lib/x86_64-linux-gnu/libc.so.6",
+    path_arm64 = "usr/lib/aarch64-linux-gnu/libc.so.6",
 )
 
 pkg_files(
@@ -175,15 +189,33 @@ pkg_files(
     name = "controller_libs",
     srcs = [":controller_libc_so"],
     attributes = pkg_attributes(mode = "0755"),
-    prefix = "/lib/x86_64-linux-gnu",
+    prefix = select({
+        "//tools/bazel:is_amd64_target": "/lib/x86_64-linux-gnu",
+        "//tools/bazel:is_arm64_target": "/lib/aarch64-linux-gnu",
+    }),
+)
+
+# The image controller is platform-selected (same pattern as
+# //core:mediamtx_dist_bin): amd64 ships the Go controller (the oracle; the
+# image bytes stay identical to the pre-Phase-5 image), arm64 ships the
+# statically-linked assembly controller (//core/controller:controller_asm,
+# Phase 4.8). Both land at the same image path /strimserver-controller.
+# controller_asm is arm64-only, so amd64 builds never analyze it (the
+# unselected select branch is skipped).
+filegroup(
+    name = "controller_bin_src",
+    srcs = select({
+        "//tools/bazel:is_amd64_target": [":strimserver-controller"],
+        "//tools/bazel:is_arm64_target": [":controller_asm"],
+    }),
 )
 
 pkg_files(
     name = "controller_bin",
-    srcs = [":strimserver-controller"],
+    srcs = [":controller_bin_src"],
     attributes = pkg_attributes(mode = "0755"),
     prefix = "/",
-    renames = {":strimserver-controller": "strimserver-controller"},
+    renames = {":controller_bin_src": "strimserver-controller"},
 )
 
 pkg_files(
@@ -206,7 +238,10 @@ pkg_tar(
 
 oci_image(
     name = "controller_image",
-    architecture = "amd64",
+    architecture = select({
+        "//tools/bazel:is_amd64_target": "amd64",
+        "//tools/bazel:is_arm64_target": "arm64",
+    }),
     entrypoint = ["/entrypoint.sh"],
     os = "linux",
     tars = [":controller_files_tar"],
@@ -233,4 +268,92 @@ filegroup(
     srcs = [":controller_image_tarball"],
     output_group = "tarball",
     visibility = ["//visibility:public"],
+)
+
+# =============================================================================
+# Phase 4.8: controller_asm — the AArch64 assembly controller binary.
+#
+# All seven asm modules (cc_util/cc_env/cc_json/cc_ctr/cc_state/cc_http/
+# cc_main .S) plus the vendored C protocol layer (cc_grpc/cc_ctr/cc_http)
+# link into one binary. cc_main.S exports `main` as a one-instruction tail
+# call to cc_main_entry, so the standard crt0 entry works unchanged.
+# Cross-language linkage is plain extern symbols; no registration is needed.
+#
+# -Werror policy: the C files are proven clean under -Wall -Wextra -Werror,
+# so the cc_binary keeps it. The .S files are compiled by the toolchain's
+# assembler-with-cpp and assembler warnings are toolchain-sensitive (a
+# different host gcc could emit one), so -Werror stays OFF the asm
+# cc_library; -Wall -Wextra still surfaces anything, and the real asm gates
+# are check-isa.sh / check-clobbers.sh.
+# =============================================================================
+
+cc_library(
+    name = "controller_asm_lib",
+    srcs = [
+        "//core/controller/asm:cc_util.S",
+        "//core/controller/asm:cc_env.S",
+        "//core/controller/asm:cc_json.S",
+        "//core/controller/asm:cc_ctr.S",
+        "//core/controller/asm:cc_state.S",
+        "//core/controller/asm:cc_http.S",
+        "//core/controller/asm:cc_main.S",
+    ],
+    hdrs = [
+        "//core/controller/asm:cc_platform.h",
+        "//core/controller/asm:cc_layout.inc",
+        "//core/controller/asm:cc_env.h",
+        "//core/controller/asm:cc_json.h",
+        "//core/controller/asm:cc_ctr.h",
+        "//core/controller/asm:cc_state.h",
+        "//core/controller/asm:cc_http.h",
+        "//core/controller/asm:cc_main.h",
+    ],
+    copts = [
+        "-Wall",
+        "-Wextra",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+)
+
+cc_binary(
+    name = "controller_asm",
+    # core/controller/c is its own Bazel package, so its sources are
+    # referenced by label. cc_binary has no hdrs attribute; the C headers
+    # and the Huffman include are declared in srcs as non-compiled inputs
+    # (same-dir quote includes resolve regardless, this just makes the
+    # dependency explicit).
+    srcs = [
+        "//core/controller/c:cc_grpc.c",
+        "//core/controller/c:cc_ctr.c",
+        "//core/controller/c:cc_http.c",
+        "//core/controller/c:cc_grpc.h",
+        "//core/controller/c:cc_ctr.h",
+        "//core/controller/c:cc_http.h",
+        "//core/controller/c:cc_grpc_huff.inc",
+    ],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+    # Static link: the controller image is FROM scratch and ships a
+    # statically-linked Go controller, so the asm controller must also need
+    # no loader/libs at runtime (avoids the known arm64 loader-basename gap).
+    # The host toolchain has libc.a/libm.a/libpthread.a/libdl.a (glibc static
+    # archives), so -static links clean; ldd reports "not a dynamic
+    # executable".
+    linkopts = [
+        "-lm",
+        "-ldl",
+        "-lpthread",
+        "-static",
+    ],
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+    deps = [
+        ":controller_asm_lib",
+        "//third_party/protobuf-c:runtime",
+        "//third_party/containerd-api:codecs",
+        "//third_party/libwebsockets:libwebsockets",
+    ],
 )

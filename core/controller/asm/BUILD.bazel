@@ -1,0 +1,68 @@
+# Phase 5: the assembly playbook checkers (check-isa.sh / check-clobbers.sh)
+# wired as Bazel sh_test targets so the AGENTS.md gates ("both checkers
+# green" at Gate 1 and Gate 3) are CI-able. They run natively on arm64
+# targets (this repo's aarch64 dev host); amd64 wildcard builds skip them as
+# incompatible, exactly like the controller_asm cc_binary they guard.
+#
+# The scripts themselves are committed untouched; a thin wrapper
+# (asm_checker_test.sh) derives the -I include dir from the first module's
+# runfiles path because Bazel's args expansion cannot compute dirname.
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# The seven asm modules plus every header the preprocessing/assembly passes
+# include (cc_platform.h/cc_layout.inc + the six module headers). Each file
+# is a DIRECT data prerequisite so $(rootpath ...) can expand it in args
+# (Bazel does not expand location expressions through a filegroup).
+ASM_MODULES = [
+    "cc_util.S",
+    "cc_env.S",
+    "cc_json.S",
+    "cc_ctr.S",
+    "cc_state.S",
+    "cc_http.S",
+    "cc_main.S",
+]
+
+ASM_HEADERS = [
+    "cc_platform.h",
+    "cc_layout.inc",
+    "cc_env.h",
+    "cc_json.h",
+    "cc_ctr.h",
+    "cc_state.h",
+    "cc_http.h",
+    "cc_main.h",
+]
+
+# The controller package's Phase 4.8 cc_library (//core/controller:
+# controller_asm_lib) compiles these sources cross-package, so they must be
+# exported from this package (Bazel forbids raw-file references across
+# packages without exports_files).
+exports_files(ASM_MODULES + ASM_HEADERS)
+
+# args shape: [<checker>, <modules...>]; the wrapper prepends -I <asm dir>
+# derived from the first module's runfiles path.
+sh_test(
+    name = "check_isa_test",
+    srcs = ["asm_checker_test.sh"],
+    args = ["$(rootpath check-isa.sh)"] + ["$(rootpath :%s)" % m for m in ASM_MODULES],
+    data = ["check-isa.sh"] + ASM_MODULES + ASM_HEADERS,
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+)
+
+sh_test(
+    name = "check_clobbers_test",
+    srcs = ["asm_checker_test.sh"],
+    args = ["$(rootpath check-clobbers.sh)"] + ["$(rootpath :%s)" % m for m in ASM_MODULES],
+    data = ["check-clobbers.sh"] + ASM_MODULES + ASM_HEADERS,
+    target_compatible_with = ["@platforms//cpu:aarch64"],
+)
+
+test_suite(
+    name = "phase5_checkers",
+    tests = [
+        ":check_isa_test",
+        ":check_clobbers_test",
+    ],
+)
