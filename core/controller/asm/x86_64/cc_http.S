@@ -430,6 +430,7 @@ http_listener_core:
     inc %rax
     mov %rax, %rcx                  // length = end - buf
     sub %r13, %rcx
+    mov %rcx, %rdx                  // length (3rd SysV arg; %rdx clobbered by cc_json_status)
     mov %r12, %rdi                  // cc_http_ws_send_text(client, buf, length)
     mov %r13, %rsi
     call cc_http_ws_send_text

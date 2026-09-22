@@ -497,7 +497,7 @@ ctr_fill_mounts:
     mov (%r9), %r11                     // destination
     mov %r11, CC_OCI_M_DESTINATION(%r10)
     mov 16(%r9), %r11d                  // layout offset (u32)
-    mov (%rax,%r11,8), %r11             // source = Layout[off]
+    mov (%rax,%r11), %r11               // source = Layout[off] (byte offset)
     mov %r11, CC_OCI_M_SOURCE(%r10)
     lea ctr_s_mount_type(%rip), %r11
     mov %r11, CC_OCI_M_TYPE(%r10)
@@ -897,11 +897,15 @@ ctr_args_single:
     .quad ctr_s_stage_single
 
 // ---- mount descriptor tables (CC_OCI_MOUNT_DESC_SIZE entries) ----
+// NOTE: on x86 GNU as `.word` is 16-bit, but the AArch64 original's `.word`
+// is 32-bit (u32 fields at +16/+20, read by the 32-bit loads in
+// ctr_fill_mounts).  `.long` is the portable 32-bit directive and keeps the
+// x86 table byte-identical to the AArch64 contract (cc_ctr.h:97-99).
     .macro CTR_MOUNT_DESC dest, layout_off, opts_ptr, n_opts
     .quad \dest
     .quad \opts_ptr
-    .word \layout_off
-    .word \n_opts
+    .long \layout_off
+    .long \n_opts
     .endm
 ctr_mounts_mediamtx:
     CTR_MOUNT_DESC ctr_s_ctr_env, CC_LAY_ENV, ctr_mount_opts_ro, 2
