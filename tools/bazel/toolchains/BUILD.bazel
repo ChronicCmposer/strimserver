@@ -1,0 +1,58 @@
+"""C++ cross toolchain registration for linux/amd64 targets.
+
+Workstream A2: a clang-based toolchain that executes on the aarch64 dev host
+(exec = aarch64) and targets linux/amd64, selected only when the *target*
+platform is x86_64. The clang/lld/llvm-ar binaries are the host's own
+(absolute tool_paths in cc_toolchain_config.bzl, same pattern as the
+generated @local_config_cc); @amd64_sysroot (workstream A1) provides the
+target's headers and static libs.
+
+Registered from MODULE.bazel via register_toolchains(...). Do NOT add an
+execution platform here: the .bazelrc linux_x86_64_exec comment explains why
+that breaks amd64 Go SDK / launcher_maker toolchain resolution on this repo.
+"""
+
+load("@rules_cc//cc:defs.bzl", "cc_toolchain")
+load(":cc_toolchain_config.bzl", "cc_toolchain_config")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_toolchain_config(name = "x86_64_linux_config")
+
+# The only filegroup inputs this toolchain declares are the sysroot files.
+# clang/lld/llvm-ar are referenced through absolute tool_paths (they live on
+# the exec host, not in this repo), mirroring how @local_config_cc declares
+# /usr/bin/gcc on this host.
+filegroup(
+    name = "all_files",
+    srcs = ["@amd64_sysroot//:sysroot"],
+)
+
+cc_toolchain(
+    name = "x86_64_linux_cc",
+    toolchain_identifier = "clang-x86_64-linux-cross",
+    toolchain_config = ":x86_64_linux_config",
+    all_files = ":all_files",
+    compiler_files = ":all_files",
+    dwp_files = ":all_files",
+    linker_files = ":all_files",
+    objcopy_files = ":all_files",
+    strip_files = ":all_files",
+    supports_param_files = 1,
+)
+
+# exec=aarch64 (the dev host), target=linux/amd64. Deliberately does NOT match
+# arm64 targets or @bazel_tools launcher_maker (both keep native local_config_cc).
+toolchain(
+    name = "cc_toolchain_for_linux_amd64",
+    toolchain = ":x86_64_linux_cc",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)

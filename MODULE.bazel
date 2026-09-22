@@ -238,10 +238,12 @@ http_archive(
     url = "https://github.com/containerd/containerd/archive/refs/tags/api/v1.12.0.tar.gz",
 )
 
-# libwebsockets v5.0.0 (MIT), static server-only build. Built by a genrule
-# (cmake) in third_party/libwebsockets/BUILD.bazel; the image ships glibc
-# (libc6 FROM scratch), so the static lib links -lm -ldl -lpthread. The
-# upstream archive ships 12 self-referential `libwebsockets` symlinks under
+# libwebsockets v5.0.0 (MIT), static server-only build. The vendored C
+# sources are compiled by Bazel's C++ toolchain for the TARGET platform
+# (aarch64 native on arm64, the clang cross-toolchain on amd64) — see
+# third_party/libwebsockets/BUILD.bazel; the image ships glibc (libc6 FROM
+# scratch), so the static lib links -lm -ldl -lpthread. The upstream archive
+# ships 12 self-referential `libwebsockets` symlinks under
 # minimal-examples/embedded/ that loop back to the repo root; the
 # tarball_strip_symlinks repo rule deletes them at fetch time (Bazel's
 # patches mechanism cannot delete symlinks).
@@ -273,6 +275,128 @@ cc_library(
     name = "include",
     hdrs = glob(["include/**/*.h"]),
     includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+# The exact core-library .c sources the control-plane build compiles (the
+# same set the old cmake genrule built: static only, no SSL/HTTP2/zlib/
+# client, H1+WS roles). Listed explicitly rather than globbed because the
+# whole-tree glob would pull feature-gated sources the config disables
+# (ssl, client, mqtt, h2/h3, secure-streams, ...). Compiled by the
+# target-platform C++ toolchain via //third_party/libwebsockets.
+filegroup(
+    name = "libwebsockets_sources",
+    srcs = [
+        "lib/core/adapt.c",
+        "lib/core/alloc.c",
+        "lib/core/buflist.c",
+        "lib/core/context.c",
+        "lib/core/libwebsockets.c",
+        "lib/core/logs.c",
+        "lib/core/lws_dll2.c",
+        "lib/core/lws_map.c",
+        "lib/core-net/adopt.c",
+        "lib/core-net/close.c",
+        "lib/core-net/dummy-callback.c",
+        "lib/core-net/network.c",
+        "lib/core-net/output.c",
+        "lib/core-net/pollfd.c",
+        "lib/core-net/route.c",
+        "lib/core-net/service.c",
+        "lib/core-net/sorted-usec-list.c",
+        "lib/core-net/state.c",
+        "lib/core-net/txpacer.c",
+        "lib/core-net/vhost.c",
+        "lib/core-net/wol.c",
+        "lib/core-net/wsi.c",
+        "lib/core-net/wsi-timeout.c",
+        "lib/core/vfs.c",
+        "lib/event-libs/poll/poll.c",
+        "lib/misc/base64-decode.c",
+        "lib/misc/cache-ttl/file.c",
+        "lib/misc/cache-ttl/heap.c",
+        "lib/misc/cache-ttl/lws-cache-ttl.c",
+        "lib/misc/dir.c",
+        "lib/misc/dir-notify/dir-notify.c",
+        "lib/misc/dlo/dlo.c",
+        "lib/misc/dlo/dlo-font-mcufont.c",
+        "lib/misc/dlo/dlo-jpeg.c",
+        "lib/misc/dlo/dlo-png.c",
+        "lib/misc/dlo/dlo-rect.c",
+        "lib/misc/dlo/dlo-text.c",
+        "lib/misc/jpeg.c",
+        "lib/misc/jrpc/jrpc.c",
+        "lib/misc/lejp.c",
+        "lib/misc/lwsac/cached-file.c",
+        "lib/misc/lwsac/lwsac.c",
+        "lib/misc/lws-crc32.c",
+        "lib/misc/lws-ring.c",
+        "lib/misc/prng.c",
+        "lib/misc/sha-1.c",
+        "lib/misc/upng.c",
+        "lib/misc/upng-gzip.c",
+        "lib/plat/unix/unix-caps.c",
+        "lib/plat/unix/unix-fds.c",
+        "lib/plat/unix/unix-file.c",
+        "lib/plat/unix/unix-init.c",
+        "lib/plat/unix/unix-misc.c",
+        "lib/plat/unix/unix-pipe.c",
+        "lib/plat/unix/unix-resolv.c",
+        "lib/plat/unix/unix-service.c",
+        "lib/plat/unix/unix-sockets.c",
+        "lib/plat/unix/unix-spawn.c",
+        "lib/roles/h1/ops-h1.c",
+        "lib/roles/http/date.c",
+        "lib/roles/http/header.c",
+        "lib/roles/http/parsers.c",
+        "lib/roles/http/server/lejp-conf.c",
+        "lib/roles/http/server/lws-spa.c",
+        "lib/roles/http/server/server.c",
+        "lib/roles/listen/ops-listen.c",
+        "lib/roles/netlink/ops-netlink.c",
+        "lib/roles/pipe/ops-pipe.c",
+        "lib/roles/raw-file/ops-raw-file.c",
+        "lib/roles/raw-skt/ops-raw-skt.c",
+        "lib/roles/ws/ops-ws.c",
+        "lib/roles/ws/server-ws.c",
+        "lib/system/async-dns/async-dns.c",
+        "lib/system/async-dns/async-dns-parse.c",
+        "lib/system/policy.c",
+        "lib/system/smd/smd.c",
+        "lib/system/stdin.c",
+        "lib/system/system.c",
+    ],
+    visibility = ["//visibility:public"],
+)
+# The vendored internal headers (lib/**/*.h) with the -I dirs the sources
+# quote/include (mirrors the cmake C_INCLUDES list). Exposed as a cc_library
+# so the target-platform compile in //third_party/libwebsockets can resolve
+# `#include "private-lib-core.h"` etc. without staging the sources.
+cc_library(
+    name = "libwebsockets_internal_headers",
+    hdrs = glob(["lib/**/*.h"]),
+    includes = [
+        "lib",
+        "lib/core",
+        "lib/core-net",
+        "lib/event-libs",
+        "lib/event-libs/poll",
+        "lib/media",
+        "lib/misc",
+        "lib/plat/unix",
+        "lib/roles",
+        "lib/roles/h1",
+        "lib/roles/http",
+        "lib/roles/http/compression",
+        "lib/roles/listen",
+        "lib/roles/raw-file",
+        "lib/roles/raw-skt",
+        "lib/roles/ws",
+        "lib/secure-streams/serialized/client",
+        "lib/system",
+        "lib/system/async-dns",
+        "lib/system/metrics",
+        "lib/system/smd",
+    ],
     visibility = ["//visibility:public"],
 )
 """,
@@ -330,6 +454,24 @@ exports_files(["usr/bin/protoc"])
 """,
     sha256 = "a873f75cbdf8054a23687e7c9b39ca1a93545edd22a581f4caa560756678f658",
     url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/p/protobuf/protobuf-compiler_3.21.12-11+deb13u1_arm64.deb",
+)
+
+# Hermetic amd64 glibc static sysroot for the clang cross-toolchain that
+# links the linux/amd64 binaries on this aarch64 host. Pinned to the same
+# snapshot.debian.org timestamp as the @trixie apt extension and the dev debs
+# above; the three Architecture: all amd64-cross dev debs are merged by
+# tools/bazel/amd64_sysroot.bzl into a sysroot/ tree (include/, lib/,
+# lib/gcc/) consumed as @amd64_sysroot//:sysroot.
+amd64_sysroot = use_repo_rule("//tools/bazel:amd64_sysroot.bzl", "amd64_sysroot")
+
+amd64_sysroot(
+    name = "amd64_sysroot",
+    libc6_sha256 = "54ef8425cbc7c45888981e6ef23529df4d056688a6c71a415fcc95a404522b9f",
+    libc6_url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/c/cross-toolchain-base/libc6-dev-amd64-cross_2.41-11cross1_all.deb",
+    libgcc_sha256 = "c6642e5d83ad232573c2a45efb5b407b06eb61af2220eb1c922d0380dd446286",
+    libgcc_url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/g/gcc-14-cross/libgcc-14-dev-amd64-cross_14.2.0-19cross1_all.deb",
+    linux_libc_sha256 = "da463ddd3ee96b37c33f16da99c47b03b4e514888d3d853e73253ee73bd0d7d8",
+    linux_libc_url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/c/cross-toolchain-base/linux-libc-dev-amd64-cross_6.12.38-1cross1_all.deb",
 )
 
 # --- iperf3 image (rules_oci, keeping the alpine base) ----------------------
@@ -508,3 +650,12 @@ npm.npm_translate_lock(
     pnpm_lock = "//tools/streamdeck-plugin:pnpm-lock.yaml",
 )
 use_repo(npm, "npm")
+
+# --- Cross C++ toolchain (workstream A2) -----------------------------------
+# clang-based C++ toolchain for linux/amd64 targets on the aarch64 dev host
+# (//tools/bazel/toolchains:cc_toolchain_for_linux_amd64). Its constraints are
+# exec=aarch64 + target=linux/amd64, so it resolves ONLY for amd64 targets;
+# arm64 targets and @bazel_tools launcher_maker keep using the native
+# local_config_cc toolchain. No execution platform is registered here (see the
+# linux_x86_64_exec comment in .bazelrc).
+register_toolchains("//tools/bazel/toolchains:cc_toolchain_for_linux_amd64")

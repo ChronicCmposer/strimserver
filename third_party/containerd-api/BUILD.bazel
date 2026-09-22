@@ -3,14 +3,17 @@
 #
 # Codegen: //third_party/containerd-api:codegen runs the pinned protoc 36.2 +
 # the vendored protoc-gen-c plugin over the pinned containerd api v1.12.0
-# protos, emitting .pb-c.{c,h} into bazel-bin. The generated files are
-# COMMITTED here as source (they are arch-independent C, and the ARM
-# controller links them directly): regenerate via
+# protos, emitting .pb-c.{c,h} into bazel-bin under generated/codecgen/ (NOT
+# codecgen/ — the outs must not shadow the committed files below, or the
+# aarch64-only genrule would make the dual-arch :codecs library unanalyzable
+# on amd64). The generated files are COMMITTED here as source under codecgen/
+# (they are arch-independent C, and BOTH controllers link them directly):
+# regenerate via
 #   bazel run //third_party/containerd-api:write_codecs
-# which writes the bazel-bin outputs into this package. A future maintainer
-# regenerates after bumping the containerd-api / protobuf-c pins; the genrule
-# is deterministic (pinned protoc + plugin + protos), so committed ==
-# regenerated.
+# which writes the generated/codecgen bazel-bin outputs into this package's
+# codecgen/. A future maintainer regenerates after bumping the containerd-api
+# / protobuf-c pins; the genrule is deterministic (pinned protoc + plugin +
+# protos), so committed == regenerated.
 #
 # amd64 (linux_amd64) builds NEVER run this codegen: the amd64 controller
 # compiles the committed .pb-c.{c,h} directly (they are arch-independent C,
@@ -81,10 +84,10 @@ genrule(
         "@containerd_api//:api/services/tasks/v1/tasks.proto",
         "//third_party/protobuf-c:protoc_descriptor_proto",
     ],
-    outs = ["codecgen/" + f for pair in CODEC_PAIRS for f in pair],
+    outs = ["generated/codecgen/" + f for pair in CODEC_PAIRS for f in pair],
     cmd = "set -eu; " +
-          # OUT: the codecgen dir = dirname(dirname(dirname(codecgen/google/protobuf/descriptor.pb-c.c)))
-          "OUT=$$(dirname $$(dirname $$(dirname $(location :codecgen/google/protobuf/descriptor.pb-c.c)))) ; " +
+          # OUT: the codecgen dir = dirname(dirname(dirname(generated/codecgen/google/protobuf/descriptor.pb-c.c)))
+          "OUT=$$(dirname $$(dirname $$(dirname $(location :generated/codecgen/google/protobuf/descriptor.pb-c.c)))) ; " +
           # api root: @containerd_api//:api/services/tasks/v1/tasks.proto
           # -> dirname x4 = the api/ subtree root
           "API_ROOT=$$(dirname $$(dirname $$(dirname $$(dirname $(location @containerd_api//:api/services/tasks/v1/tasks.proto))))) ; " +
@@ -99,7 +102,10 @@ genrule(
           "--c_out=$$OUT " +
           " ".join(PROTOS),
     # arm64-only: amd64 builds compile the committed codecgen/ files directly
-    # and never regenerate them (see the package header comment).
+    # and never regenerate them (see the package header comment). The outs
+    # live under generated/codecgen/ (NOT codecgen/), so they never shadow or
+    # collide with the committed codecgen/ sources that :codecs compiles on
+    # both architectures.
     target_compatible_with = ["@platforms//cpu:aarch64"],
     tools = [
         "//third_party/protobuf-c:protoc_gen_c_tool",
@@ -111,7 +117,7 @@ write_source_files(
     name = "write_codecs",
     diff_test = False,
     files = {
-        "codecgen/%s" % f: "//third_party/containerd-api:codecgen/%s" % f
+        "codecgen/%s" % f: "//third_party/containerd-api:generated/codecgen/%s" % f
         for pair in CODEC_PAIRS
         for f in pair
     },
@@ -121,11 +127,22 @@ write_source_files(
 # ---------------------------------------------------------------------------
 # Committed codecs -> cc_library
 # ---------------------------------------------------------------------------
+# srcs/hdrs resolve to the COMMITTED codecgen/ files for both arches: the
+# :codegen genrule's outs live under generated/codecgen/, so no generated
+# label shadows these committed paths. amd64 compiles the committed sources
+# directly (never runs codegen); arm64 does the same, and the committed
+# sources are byte-identical to what the deterministic codegen would emit.
 cc_library(
     name = "codecs",
     srcs = ["codecgen/%s" % f for pair in CODEC_PAIRS for f in pair],
     hdrs = ["codecgen/%s" % f for pair in CODEC_PAIRS for f in pair],
     includes = ["codecgen"],
+    # Static-only (same pattern as //third_party/libwebsockets): disable the
+    # .so so the amd64 clang toolchain doesn't try to link a shared object
+    # against the static-only @amd64_sysroot (it has no libgcc_s.so.1) and
+    # consumers never pick a hidden-visibility .so. The controller links this
+    # statically (-static), so only libcodecs.a is ever consumed.
+    features = ["-supports_dynamic_linker"],
     target_compatible_with = select({
         "//tools/bazel:is_amd64_target": [],
         "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
@@ -138,6 +155,17 @@ cc_library(
 cc_test(
     name = "codecs_roundtrip_test",
     srcs = ["roundtrip_test.c"],
+    # Static-only (same pattern as //third_party/libwebsockets:lws_smoke_test):
+    # the amd64 clang toolchain links against the static-only @amd64_sysroot,
+    # which has no dynamic libgcc_s.so.1, so the test links its deps'
+    # static archives instead of preferring .so outputs.
+    linkstatic = True,
+    linkopts = [
+        "-lm",
+        "-ldl",
+        "-lpthread",
+        "-static",
+    ],
     target_compatible_with = select({
         "//tools/bazel:is_amd64_target": [],
         "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
