@@ -64,7 +64,7 @@ fi
 # CDI itself from /etc/cdi/nvidia.yaml). Runs BEFORE the containerd block below
 # so the single restart picks up any GPU wiring together with the root/state
 # config prepend.
-./setup-gpu.sh
+bash ./setup-gpu.sh
 rm -f /mnt/nvme/setup-gpu.sh
 
 # containerd

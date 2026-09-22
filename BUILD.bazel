@@ -1,6 +1,6 @@
 # strimserver root package.
 
-load("@rules_pkg//pkg:mappings.bzl", "pkg_files", "strip_prefix")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files", "strip_prefix")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("//tools/bazel:platform_transition.bzl", "platform_transition")
@@ -41,20 +41,39 @@ touch $@
 # surfaced bug #4 -- the broken publish-iperf3 deps -- years ago) instead of
 # silently shipping an incomplete bundle.
 
+# The bundle scripts fall into two mode classes:
+#   * executable scripts - invoked directly on the host (./deploy.sh,
+#     ./setup-gpu.sh, transcode.sh, notify.sh). rules_pkg 1.3.0 does NOT
+#     preserve the source exec bit for plain source files: pkg_files only
+#     assigns 0755 when the src is an executable RULE (it has a runfiles
+#     manifest); plain files get default_mode "" which the tar writer maps to
+#     0644. setup-gpu.sh shipped 0644 and broke `./setup-gpu.sh` on the host
+#     ("Permission denied"). Pin modes explicitly with pkg_attributes.
+#   * data/config files - sourced (fish-deploy.sh, imdslib.sh), a systemd unit,
+#     a fish prompt, and core config templates. 0644.
 pkg_files(
-    name = "bundle_scripts",
+    name = "bundle_exec_scripts",
     srcs = [
         "//deploy/aws:deploy.sh",
-        "//deploy/aws:fish-deploy.sh",
-        "//deploy/aws:imdslib.sh",
-        "//deploy/aws:prompt_login.fish",
         "//deploy/aws:setup-gpu.sh",
-        "//deploy/aws:strimserver.service",
-        "//core:strimserver.env",
-        "//core:mediamtx.yaml.template",
         "//core:transcode.sh",
         "//core:notify.sh",
     ],
+    attributes = pkg_attributes(mode = "0755"),
+    strip_prefix = strip_prefix.files_only(),
+)
+
+pkg_files(
+    name = "bundle_scripts",
+    srcs = [
+        "//deploy/aws:fish-deploy.sh",
+        "//deploy/aws:imdslib.sh",
+        "//deploy/aws:prompt_login.fish",
+        "//deploy/aws:strimserver.service",
+        "//core:strimserver.env",
+        "//core:mediamtx.yaml.template",
+    ],
+    attributes = pkg_attributes(mode = "0644"),
     strip_prefix = strip_prefix.files_only(),
 )
 
@@ -115,6 +134,7 @@ pkg_tar(
         ":bundle_images",
         ":bundle_offline_segment",
         ":bundle_openssh_rpm",
+        ":bundle_exec_scripts",
         ":bundle_scripts",
     ],
     out = "strimserver-deployment.unchecked.tar",

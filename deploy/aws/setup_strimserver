@@ -192,6 +192,7 @@ if __name__ == "__main__":
         f"cd /mnt/nvme && tar -xvf {DEPLOYMENT}",
         f"cd /mnt/nvme && rm -f {DEPLOYMENT}",
         "cd /mnt/nvme && chmod +x deploy.sh",
+        "cd /mnt/nvme && chmod +x setup-gpu.sh",
         "cd /mnt/nvme && ./deploy.sh",
     ])
 
