@@ -13,11 +13,14 @@
 #                         matches the linked libprotobuf headers).
 #
 # The codegen genrule that consumes :protoc_gen_c lives in
-# //third_party/containerd-api (it owns the generated codecs). This package
-# is arm64-only: the vendored C layer exists to serve the ARM64 assembly
-# controller, so amd64 wildcard builds skip these targets while arm64 builds
-# genuinely compile them (verified: `bazel build //third_party/...` with
-# --platforms=linux_arm64 builds them, amd64 skips them).
+# //third_party/containerd-api (it owns the generated codecs). The :runtime
+# library is genuinely portable C and builds for both linux_amd64 and
+# linux_arm64 (the select below names both arches; any third platform stays
+# arm64-only). The :protoc_gen_c plugin + its :protoc_gen_c_tool alias remain
+# arm64-only: they link the trixie snapshot's aarch64 libprotobuf.a/libprotoc.a
+# (see @libprotobuf_dev_arm64/@libprotoc_dev_arm64 in MODULE.bazel), and the
+# amd64 build compiles the COMMITTED containerd codecs directly instead of
+# regenerating them (see //third_party/containerd-api).
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 
@@ -28,7 +31,11 @@ package(default_visibility = ["//visibility:public"])
 # ---------------------------------------------------------------------------
 cc_library(
     name = "runtime",
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = ["@protobuf_c//:runtime"],
 )
 
@@ -43,6 +50,9 @@ genrule(
         "@protobuf_compiler_arm64//:usr/bin/protoc",
     ],
     outs = ["protobuf-c/protobuf-c.pb.cc", "protobuf-c/protobuf-c.pb.h"],
+    # arm64-only with :protoc_gen_c (the only consumer): generates the plugin's
+    # own C++ from the arm64 3.21.12 protoc; amd64 never runs codegen.
+    target_compatible_with = ["@platforms//cpu:aarch64"],
     cmd = "set -eu; " +
           "SRC_ROOT=$$(dirname $$(dirname $(location @protobuf_c//:protobuf-c/protobuf-c.proto))); " +
           "INC_ROOT=$$(dirname $$(dirname $$(dirname $(location @protoc_linux_aarch64//:include/google/protobuf/descriptor.proto)))); " +
@@ -67,6 +77,9 @@ cc_binary(
         "-lz",
         "-lpthread",
     ],
+    # arm64-only by design: links the trixie snapshot's aarch64 static
+    # libprotobuf/libprotoc (no amd64 deb pins exist; the amd64 controller
+    # build compiles the committed codecs directly and never runs this).
     target_compatible_with = ["@platforms//cpu:aarch64"],
     deps = [
         "@libprotobuf_dev_arm64//:libprotobuf",
@@ -78,7 +91,7 @@ cc_binary(
 )
 
 # The codegen tool binary used by the containerd-api genrule; a thin alias so
-# the consuming genrule references a stable label.
+# the consuming genrule references a stable label. arm64-only with :protoc_gen_c.
 filegroup(
     name = "protoc_gen_c_tool",
     srcs = [":protoc_gen_c"],

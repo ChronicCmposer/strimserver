@@ -4,9 +4,11 @@
 # cc_grpc is a single .c/.h pair plus the Huffman table include, linked
 # against //third_party/containerd-api:codecs and nothing else — a pure
 # protocol layer (HTTP/2 prior-knowledge + gRPC over a unix socket, HPACK,
-# flow control). It is aarch64-only like the rest of the vendored C layer:
-# amd64 wildcard builds skip these targets, arm64 builds genuinely compile
-# them.
+# flow control). The whole C layer here is genuinely portable C (byte-shift
+# wire encoding, no intrinsics, no inline asm), so it builds for both
+# linux_amd64 and linux_arm64: the target_compatible_with select names both
+# arches explicitly (amd64: no constraint; arm64: aarch64) and keeps any
+# third platform arm64-only, matching the pre-amd64-port behavior.
 #
 # Targets:
 #   //core/controller/c:cc_grpc         the client library
@@ -32,7 +34,11 @@ cc_library(
         "-Wall",
         "-Wextra",
     ],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = ["//third_party/containerd-api:codecs"],
 )
 
@@ -44,7 +50,11 @@ cc_test(
         "-Wall",
         "-Wextra",
     ],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = [":cc_grpc"],
 )
 
@@ -61,7 +71,11 @@ cc_library(
         "-Wall",
         "-Wextra",
     ],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = [
         ":cc_grpc",
         "//third_party/containerd-api:codecs",
@@ -76,7 +90,11 @@ cc_test(
         "-Wall",
         "-Wextra",
     ],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = [":cc_ctr"],
 )
 
@@ -100,6 +118,10 @@ cc_library(
         "-ldl",
         "-lpthread",
     ],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = ["//third_party/libwebsockets:libwebsockets"],
 )

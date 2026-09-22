@@ -8,6 +8,7 @@
 # (asm_checker_test.sh) derives the -I include dir from the first module's
 # runfiles path because Bazel's args expansion cannot compute dirname.
 
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 # The seven asm modules plus every header the preprocessing/assembly passes
@@ -64,5 +65,220 @@ test_suite(
     tests = [
         ":check_isa_test",
         ":check_clobbers_test",
+    ],
+)
+
+# =============================================================================
+# Phase 5.2: the x86-64-v4 port (parallel tree under x86_64/).
+#
+# The AArch64 modules above are translated to GNU as AT&T syntax for the
+# x86-64-v4 port (AVX2 cap — no zmm/k/AMX, no AVX-512 — SysV ABI, target
+# g4dn.xlarge).  The x86 modules live in the x86_64/ subdirectory so the
+# AArch64 checkers' `find -name 'cc_*.S'` glob never picks them up, and the
+# AArch64 exports_files above are untouched.
+#
+# All seven modules have landed; the per-module cc_library targets below are
+# live (no tags = ["manual"]) and the aggregate controller_asm_lib_x86_64 is
+# wired.  The per-module checker sh_tests (one per module per checker) are
+# generated from X86_64_LANDED_MODULES.
+# =============================================================================
+
+# The seven x86-64 modules.
+X86_64_ASM_MODULES = [
+    "x86_64/cc_util.S",
+    "x86_64/cc_env.S",
+    "x86_64/cc_json.S",
+    "x86_64/cc_ctr.S",
+    "x86_64/cc_state.S",
+    "x86_64/cc_http.S",
+    "x86_64/cc_main.S",
+]
+
+# cc_platform_x86_64.h (x86-specific) plus the shared headers the x86 modules
+# include unchanged: cc_layout.inc (byte-identical on x86-64 — struct
+# layouts and pointer widths match) and the six arch-neutral module-header
+# CPP constants.  Note: cc_env.h still carries the AArch64 movz/movk
+# MOV_DUR_MIN/MOV_DUR_HOUR macros; those now live in cc_platform_x86_64.h,
+# so the cc_env.S translation must not redefine them.
+X86_64_ASM_HEADERS = [
+    "x86_64/cc_platform_x86_64.h",
+    "cc_layout.inc",
+    "cc_env.h",
+    "cc_json.h",
+    "cc_ctr.h",
+    "cc_state.h",
+    "cc_http.h",
+    "cc_main.h",
+]
+
+exports_files(X86_64_ASM_MODULES + X86_64_ASM_HEADERS)
+
+# ---------------------------------------------------------------------------
+# Per-module compile targets — the Phase-3 parallelization enabler.  Each
+# module is compiled independently (`bazel build //core/controller/asm:cc_X_x86_64`)
+# so one agent's module never waits on (or breaks) another's.  The aggregate
+# controller_asm_lib_x86_64 below is the all-seven link unit; per-module
+# checker sh_tests join phase5_checkers_x86_64 when the x86 checker scripts
+# land.
+# ---------------------------------------------------------------------------
+X86_64_ASM_COPTS = [
+    "-Wall",
+    "-Wextra",
+]
+
+cc_library(
+    name = "cc_util_x86_64",
+    srcs = ["x86_64/cc_util.S"],
+    hdrs = X86_64_ASM_HEADERS,
+    copts = X86_64_ASM_COPTS,
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cc_env_x86_64",
+    srcs = ["x86_64/cc_env.S"],
+    hdrs = X86_64_ASM_HEADERS,
+    copts = X86_64_ASM_COPTS,
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cc_json_x86_64",
+    srcs = ["x86_64/cc_json.S"],
+    hdrs = X86_64_ASM_HEADERS,
+    copts = X86_64_ASM_COPTS,
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cc_ctr_x86_64",
+    srcs = ["x86_64/cc_ctr.S"],
+    hdrs = X86_64_ASM_HEADERS,
+    copts = X86_64_ASM_COPTS,
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cc_state_x86_64",
+    srcs = ["x86_64/cc_state.S"],
+    hdrs = X86_64_ASM_HEADERS,
+    copts = X86_64_ASM_COPTS,
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cc_http_x86_64",
+    srcs = ["x86_64/cc_http.S"],
+    hdrs = X86_64_ASM_HEADERS,
+    copts = X86_64_ASM_COPTS,
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cc_main_x86_64",
+    srcs = ["x86_64/cc_main.S"],
+    hdrs = X86_64_ASM_HEADERS,
+    copts = X86_64_ASM_COPTS,
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    visibility = ["//visibility:public"],
+)
+
+# Aggregate asm-side library: all seven modules, mirroring the AArch64
+# controller_asm_lib shape.
+cc_library(
+    name = "controller_asm_lib_x86_64",
+    srcs = X86_64_ASM_MODULES,
+    hdrs = X86_64_ASM_HEADERS,
+    copts = X86_64_ASM_COPTS,
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+)
+
+# The x86_64 checker suite.  check-clobbers-x86_64.sh and check-isa-x86_64.sh
+# have both landed; each module gets its own per-module sh_test so a module
+# is checked independently in parallel (the Phase-3 enabler).
+#
+# NOTE: check-isa-x86_64.sh assembles the module under -march=x86-64-v4 with
+# the host `cc`, so it needs an x86_64 toolchain — it passes natively in CI
+# (amd64) and on amd64 dev hosts, and is skipped on arm64 platforms via
+# target_compatible_with.  On an aarch64 dev host it reports the host cc's
+# "unknown value for -march" (an environment limitation, not a module
+# finding); the clobber test runs anywhere.
+X86_64_LANDED_MODULES = [
+    "x86_64/cc_util.S",
+    "x86_64/cc_env.S",
+    "x86_64/cc_json.S",
+    "x86_64/cc_ctr.S",
+    "x86_64/cc_state.S",
+    "x86_64/cc_http.S",
+    "x86_64/cc_main.S",
+]
+
+[
+    sh_test(
+        name = "check_isa_%s_x86_64_test" % name,
+        srcs = ["asm_checker_test.sh"],
+        args = [
+            "$(rootpath check-isa-x86_64.sh)",
+            "$(rootpath :%s)" % path,
+        ],
+        data = ["check-isa-x86_64.sh", path] + X86_64_ASM_HEADERS,
+        target_compatible_with = ["@platforms//cpu:x86_64"],
+    )
+    for name, path in [
+        ("cc_util", "x86_64/cc_util.S"),
+        ("cc_env", "x86_64/cc_env.S"),
+        ("cc_json", "x86_64/cc_json.S"),
+        ("cc_ctr", "x86_64/cc_ctr.S"),
+        ("cc_state", "x86_64/cc_state.S"),
+        ("cc_http", "x86_64/cc_http.S"),
+        ("cc_main", "x86_64/cc_main.S"),
+    ]
+    if path in X86_64_LANDED_MODULES
+]
+
+[
+    sh_test(
+        name = "check_clobbers_%s_x86_64_test" % name,
+        srcs = ["asm_checker_test.sh"],
+        args = [
+            "$(rootpath check-clobbers-x86_64.sh)",
+            "$(rootpath :%s)" % path,
+        ],
+        data = ["check-clobbers-x86_64.sh", path] + X86_64_ASM_HEADERS,
+        target_compatible_with = ["@platforms//cpu:x86_64"],
+    )
+    for name, path in [
+        ("cc_util", "x86_64/cc_util.S"),
+        ("cc_env", "x86_64/cc_env.S"),
+        ("cc_json", "x86_64/cc_json.S"),
+        ("cc_ctr", "x86_64/cc_ctr.S"),
+        ("cc_state", "x86_64/cc_state.S"),
+        ("cc_http", "x86_64/cc_http.S"),
+        ("cc_main", "x86_64/cc_main.S"),
+    ]
+    if path in X86_64_LANDED_MODULES
+]
+
+test_suite(
+    name = "phase5_checkers_x86_64",
+    tests = [
+        "check_%s_%s_x86_64_test" % (checker, name)
+        for checker in ("isa", "clobbers")
+        for name, path in [
+            ("cc_util", "x86_64/cc_util.S"),
+            ("cc_env", "x86_64/cc_env.S"),
+            ("cc_json", "x86_64/cc_json.S"),
+            ("cc_ctr", "x86_64/cc_ctr.S"),
+            ("cc_state", "x86_64/cc_state.S"),
+            ("cc_http", "x86_64/cc_http.S"),
+            ("cc_main", "x86_64/cc_main.S"),
+        ]
+        if path in X86_64_LANDED_MODULES
     ],
 )

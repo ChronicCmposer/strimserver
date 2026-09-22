@@ -12,6 +12,15 @@
 # is deterministic (pinned protoc + plugin + protos), so committed ==
 # regenerated.
 #
+# amd64 (linux_amd64) builds NEVER run this codegen: the amd64 controller
+# compiles the committed .pb-c.{c,h} directly (they are arch-independent C,
+# byte-shift encoders with no architecture-specific code), so
+# //third_party/protobuf-c:protoc_gen_c and the :codegen genrule below are
+# deliberately arm64-only and no amd64 libprotobuf/libprotoc deb pins exist.
+# If regeneration is ever needed for amd64, add libprotobuf-dev and
+# libprotoc-dev 3.21.12-11+deb13u1_amd64 from the same snapshot.debian.org
+# timestamp (20260824T082821Z) and widen the codegen targets.
+#
 # Scope: google/protobuf well-known types used by containerd, the seven
 # service protos (tasks, containers, images, snapshots, events, content,
 # version), the types/ protos (descriptor, event, fieldpath, metrics, mount,
@@ -89,6 +98,9 @@ genrule(
           "--plugin=protoc-gen-c=$(location //third_party/protobuf-c:protoc_gen_c_tool) " +
           "--c_out=$$OUT " +
           " ".join(PROTOS),
+    # arm64-only: amd64 builds compile the committed codecgen/ files directly
+    # and never regenerate them (see the package header comment).
+    target_compatible_with = ["@platforms//cpu:aarch64"],
     tools = [
         "//third_party/protobuf-c:protoc_gen_c_tool",
         "//third_party/protobuf-c:protoc_tool",
@@ -114,7 +126,11 @@ cc_library(
     srcs = ["codecgen/%s" % f for pair in CODEC_PAIRS for f in pair],
     hdrs = ["codecgen/%s" % f for pair in CODEC_PAIRS for f in pair],
     includes = ["codecgen"],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = ["//third_party/protobuf-c:runtime"],
 )
 
@@ -122,6 +138,10 @@ cc_library(
 cc_test(
     name = "codecs_roundtrip_test",
     srcs = ["roundtrip_test.c"],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = [":codecs"],
 )

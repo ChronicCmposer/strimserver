@@ -6,8 +6,12 @@
 # -lm -ldl -lpthread. cmake + a C compiler are the only host tools required
 # (the repo's other genrules similarly rely on host tools, e.g. strip).
 #
-# Arm64-only, like the rest of the vendored C layer: amd64 wildcard builds
-# skip these targets, arm64 builds genuinely compile them.
+# Dual-arch: the cmake genrules below are arch-independent (they compile the
+# vendored C sources on the exec platform with no architecture-specific code,
+# config, or flags), so every target builds for both linux_amd64 and
+# linux_arm64. The target_compatible_with select names both arches explicitly
+# (amd64: no constraint; arm64: aarch64) and keeps any third platform
+# arm64-only, matching the pre-amd64-port behavior.
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_import", "cc_library", "cc_test")
 
@@ -44,7 +48,11 @@ genrule(
           "cmake --build $$BUILD --target websockets -j $$(nproc) >/dev/null; " +
           "cp $$BUILD/lib/libwebsockets.a $@; " +
           "rm -rf $$BUILD",
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
 )
 
 # The vendored headers #include "lws_config.h", which cmake generates into
@@ -66,7 +74,11 @@ genrule(
           "cmake -S $$SRC -B $$BUILD " + " ".join(CMAKE_FLAGS) + " >/dev/null; " +
           "cp $$BUILD/lws_config.h $@; " +
           "rm -rf $$BUILD",
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
 )
 
 # Wrap the genrule's static lib + the vendored include tree + generated
@@ -75,7 +87,11 @@ cc_library(
     name = "libwebsockets",
     hdrs = ["lwsgen/lws_config.h"],
     includes = ["lwsgen"],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = [
         ":libwebsockets_static_import",
         "@libwebsockets//:include",
@@ -85,7 +101,11 @@ cc_library(
 cc_import(
     name = "libwebsockets_static_import",
     static_library = ":libwebsockets_static",
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
 )
 
 cc_test(
@@ -96,7 +116,11 @@ cc_test(
         "-ldl",
         "-lpthread",
     ],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = [":libwebsockets"],
 )
 
@@ -110,6 +134,10 @@ cc_binary(
         "-ldl",
         "-lpthread",
     ],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
     deps = [":libwebsockets"],
 )
