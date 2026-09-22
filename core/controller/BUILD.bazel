@@ -375,10 +375,19 @@ cc_binary(
 # (assembler warnings are toolchain-sensitive; the real asm gates are
 # check-isa-x86_64.sh / check-clobbers-x86_64.sh).
 #
-# All seven x86_64 modules have landed (Gate 1-4 complete); these targets
-# are live.  The controller image select() above keeps shipping the Go
-# oracle for amd64 until the asm controller passes Gate 5 (the differential
-# harness + end-to-end smoke).
+# All seven x86_64 modules have landed and the run-path differential is GREEN
+# byte-for-byte vs the AArch64 reference on every function it exercises
+# (env_fail_invalid/env_fail_missing, main_build_layout, http_is_null,
+# http_badjson_lit, http_str_value; http_badjson_msg runs to completion with
+# two documented out-of-contract classifier divergences that intentionally
+# match the AArch64 original — see the http_badjson_msg header in
+# core/controller/asm/x86_64/cc_http.S). Gate 3 is satisfied for the
+# run-path modules, so hard rule 9 no longer gates the binary or its
+# aggregate library: both are live (no tags = ["manual"]). The per-module
+# checker tests in //core/controller/asm:phase5_checkers_x86_64 remain fully
+# active.  The controller image select() above keeps shipping the Go oracle
+# for amd64 until the asm controller passes Gate 5 (the differential harness
+# + end-to-end smoke).
 # =============================================================================
 
 cc_library(
@@ -405,6 +414,17 @@ cc_library(
     copts = [
         "-Wall",
         "-Wextra",
+        # ISA floor x86-64-v4 with the AVX-512 feature set the floor implies
+        # explicitly disabled (the cap is AVX2 — no zmm/k/AMX). This library
+        # compiles the seven .S modules directly, so the floor/cap must gate
+        # the asm compilation here (x86 gas accepts everything by default) —
+        # mirroring X86_64_ASM_COPTS in //core/controller/asm.
+        "-march=x86-64-v4",
+        "-mno-avx512f",
+        "-mno-avx512vl",
+        "-mno-avx512bw",
+        "-mno-avx512dq",
+        "-mno-avx512cd",
     ],
     target_compatible_with = ["@platforms//cpu:x86_64"],
 )
@@ -420,19 +440,14 @@ cc_binary(
         "//core/controller/c:cc_http.h",
         "//core/controller/c:cc_grpc_huff.inc",
     ],
+    # C-only copts: srcs are just the C protocol layer (arch-neutral). The ISA
+    # floor/cap (-march=x86-64-v4 -mno-avx512*) lives on the asm compilation
+    # itself — controller_asm_lib_x86_64 above, which compiles the .S modules.
     copts = [
         "-std=gnu11",
         "-Wall",
         "-Wextra",
         "-Werror",
-        # ISA floor x86-64-v4 with the AVX-512 feature set the floor implies
-        # explicitly disabled (the cap is AVX2 — no zmm/k/AMX).
-        "-march=x86-64-v4",
-        "-mno-avx512f",
-        "-mno-avx512vl",
-        "-mno-avx512bw",
-        "-mno-avx512dq",
-        "-mno-avx512cd",
     ],
     # Static link: same rationale as controller_asm — the controller image
     # is FROM scratch, so the binary needs no loader/libs at runtime.

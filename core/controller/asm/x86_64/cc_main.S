@@ -709,6 +709,7 @@ main_build_layout:
     mov %r14, %rdi
     mov %r13, %rsi
     call cc_cat_cstr
+    mov %rax, %rdi                  // %rax = NUL position (the next cursor)
     LEA rsi, main_s_cfg_env
     call cc_cat_cstr
     mov %r14, CC_LAY_ENV(%rbx)
@@ -717,6 +718,7 @@ main_build_layout:
     mov %r14, %rdi
     mov %r13, %rsi
     call cc_cat_cstr
+    mov %rax, %rdi                  // %rax = NUL position (the next cursor)
     LEA rsi, main_s_bin_transcode
     call cc_cat_cstr
     mov %r14, CC_LAY_TRANSCODE(%rbx)
@@ -725,6 +727,7 @@ main_build_layout:
     mov %r14, %rdi
     mov %r13, %rsi
     call cc_cat_cstr
+    mov %rax, %rdi                  // %rax = NUL position (the next cursor)
     LEA rsi, main_s_bin_notify
     call cc_cat_cstr
     mov %r14, CC_LAY_NOTIFY(%rbx)
@@ -733,6 +736,7 @@ main_build_layout:
     mov %r14, %rdi
     mov %r13, %rsi
     call cc_cat_cstr
+    mov %rax, %rdi                  // %rax = NUL position (the next cursor)
     LEA rsi, main_s_cfg_tmpl
     call cc_cat_cstr
     mov %r14, CC_LAY_MEDIAMTX_TMPL(%rbx)
@@ -741,6 +745,7 @@ main_build_layout:
     mov %r14, %rdi
     mov %r13, %rsi
     call cc_cat_cstr
+    mov %rax, %rdi                  // %rax = NUL position (the next cursor)
     LEA rsi, main_s_root_srt
     call cc_cat_cstr
     mov %r14, CC_LAY_SRT_PASS(%rbx)
@@ -749,6 +754,7 @@ main_build_layout:
     mov %r14, %rdi
     mov %r13, %rsi
     call cc_cat_cstr
+    mov %rax, %rdi                  // %rax = NUL position (the next cursor)
     LEA rsi, main_s_root_video
     call cc_cat_cstr
     mov %r14, CC_LAY_VIDEO_DIR(%rbx)

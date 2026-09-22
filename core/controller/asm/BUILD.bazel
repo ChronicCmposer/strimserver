@@ -77,10 +77,18 @@ test_suite(
 # AArch64 checkers' `find -name 'cc_*.S'` glob never picks them up, and the
 # AArch64 exports_files above are untouched.
 #
-# All seven modules have landed; the per-module cc_library targets below are
-# live (no tags = ["manual"]) and the aggregate controller_asm_lib_x86_64 is
-# wired.  The per-module checker sh_tests (one per module per checker) are
-# generated from X86_64_LANDED_MODULES.
+# All seven modules have landed. The run-path differential is GREEN
+# byte-for-byte vs the AArch64 reference on every function it exercises
+# (env_fail_invalid/env_fail_missing, main_build_layout, http_is_null,
+# http_badjson_lit, http_str_value; http_badjson_msg runs to completion with
+# two documented out-of-contract classifier divergences — see the
+# http_badjson_msg header in x86_64/cc_http.S — that intentionally match the
+# AArch64 original to preserve x86<->AArch64 byte parity). All per-module
+# cc_library targets AND the aggregate controller_asm_lib_x86_64 are live
+# (hard rule 9 satisfied: every run-path module now passes Gate 3). The
+# per-module checker sh_tests (one per module per checker) are generated from
+# X86_64_LANDED_MODULES and stay fully active — gating the BUILD of a module
+# must NOT disable its checker tests.
 # =============================================================================
 
 # The seven x86-64 modules.
@@ -124,6 +132,18 @@ exports_files(X86_64_ASM_MODULES + X86_64_ASM_HEADERS)
 X86_64_ASM_COPTS = [
     "-Wall",
     "-Wextra",
+    # ISA floor x86-64-v4 with the AVX-512 feature set the floor implies
+    # explicitly disabled (the cap is AVX2 — no zmm/k/AMX, target
+    # g4dn.xlarge). These MUST live on the asm compilation itself: x86 gas
+    # accepts everything by default, so a floor/cap only on the C-only
+    # cc_binary would leave the .S modules ungated. Shared by every
+    # per-module cc_library and the aggregate so the gate cannot be missed.
+    "-march=x86-64-v4",
+    "-mno-avx512f",
+    "-mno-avx512vl",
+    "-mno-avx512bw",
+    "-mno-avx512dq",
+    "-mno-avx512cd",
 ]
 
 cc_library(

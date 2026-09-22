@@ -1007,10 +1007,12 @@ env_dur_unit_scan:
 //   < 2^63, so the signed conversion equals the AArch64 unsigned ucvtf
 //   bit-for-bit), divsd, mulsd, cvttsd2si (truncate toward zero, matching
 //   fcvtzu).  Split out of env_dur_component so the exact float sequence is
-//   one self-contained helper.  Leaf; %xmm0-%xmm2 are caller-saved per SysV,
-//   but the clobber checker tracks every xmm write as callee-saved, so they
-//   are parked in this leaf's red zone (legal: no calls here) and restored
-//   before the return.
+//   one self-contained helper.  Leaf; %xmm0-%xmm2 are caller-saved per SysV
+//   (the clobber checker tracks only the callee-saved %xmm8-%xmm15, never
+//   xmm0-7), so neither the ABI nor the checker requires preserving them;
+//   they are still parked in this leaf's red zone (legal: no calls here) and
+//   restored before the return so the helper is inert against the caller's
+//   entire xmm state, not just the callee-saved set.
 // ----------------------------------------------------------------------------
     .p2align 4
 env_dur_frac_add:
@@ -1247,10 +1249,13 @@ env_fail_invalid:
     mov %rsp, %rdi
     LEA rsi, env_msg_invalid_value_for
     call cc_cat_cstr                // %rax = NUL position
+    mov %rax, %rdi                  // re-thread the cursor (SysV: ret != arg0)
     mov %rbx, %rsi
     call cc_cat_cstr
+    mov %rax, %rdi                  // re-thread the cursor
     LEA rsi, env_msg_sep
     call cc_cat_cstr
+    mov %rax, %rdi                  // re-thread the cursor
     mov %r12, %rsi
     call cc_cat_cstr
     mov %rsp, %rdi
@@ -1267,6 +1272,7 @@ env_fail_missing:
     mov %rsp, %rdi
     LEA rsi, env_msg_missing_required
     call cc_cat_cstr
+    mov %rax, %rdi                  // re-thread the cursor (SysV: ret != arg0)
     mov %rbx, %rsi
     call cc_cat_cstr
     mov %rsp, %rdi
