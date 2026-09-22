@@ -196,16 +196,17 @@ pkg_files(
 )
 
 # The image controller is platform-selected (same pattern as
-# //core:mediamtx_dist_bin): amd64 ships the Go controller (the oracle; the
-# image bytes stay identical to the pre-Phase-5 image), arm64 ships the
-# statically-linked assembly controller (//core/controller:controller_asm,
-# Phase 4.8). Both land at the same image path /strimserver-controller.
-# controller_asm is arm64-only, so amd64 builds never analyze it (the
-# unselected select branch is skipped).
+# //core:mediamtx_dist_bin): amd64 ships the statically-linked x86-64-v4
+# assembly controller (//core/controller:controller_asm_x86_64, Phase 5.2;
+# Gate 5 satisfied — the differential harness and image smoke both pass),
+# arm64 ships the statically-linked assembly controller
+# (//core/controller:controller_asm, Phase 4.8). Both land at the same
+# image path /strimserver-controller. Each controller_asm target is
+# single-arch, so the unselected select branch is never analyzed.
 filegroup(
     name = "controller_bin_src",
     srcs = select({
-        "//tools/bazel:is_amd64_target": [":strimserver-controller"],
+        "//tools/bazel:is_amd64_target": [":controller_asm_x86_64"],
         "//tools/bazel:is_arm64_target": [":controller_asm"],
     }),
 )
@@ -385,9 +386,9 @@ cc_binary(
 # run-path modules, so hard rule 9 no longer gates the binary or its
 # aggregate library: both are live (no tags = ["manual"]). The per-module
 # checker tests in //core/controller/asm:phase5_checkers_x86_64 remain fully
-# active.  The controller image select() above keeps shipping the Go oracle
-# for amd64 until the asm controller passes Gate 5 (the differential harness
-# + end-to-end smoke).
+# active.  The controller image select() above now ships the x86-64 asm
+# controller for amd64 (Gate 5: differential harness + image smoke both
+# GREEN) and the AArch64 asm controller for arm64.
 # =============================================================================
 
 cc_library(
