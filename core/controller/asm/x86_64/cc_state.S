@@ -611,9 +611,9 @@ cc_state_remove_listener:
     .global cc_state_status
     FUNC_TYPE(cc_state_status)
 cc_state_status:
-    LEA rdi, state_status
+    LEA rax, state_status
     LEA rsi, state_paths
-    mov %rsi, CC_CS_PATHS(%rdi)
+    mov %rsi, CC_CS_PATHS(%rax)
     LEA rsi, state_status_stages
     mov $CC_STAGE_COUNT, %edx
     mov %rdx, (%rsi)                // wire count
@@ -637,7 +637,7 @@ cc_state_status:
     jmp .Lss_loop
 .Lss_done:
     LEA rsi, state_status_stages
-    mov %rsi, CC_CS_STAGES(%rdi)
+    mov %rsi, CC_CS_STAGES(%rax)
     ret
 
 // ============================================================================
