@@ -77,10 +77,29 @@
 #             modified (B1 owns the fix; the injection is a driver build
 #             flag).  This stays a valid demonstration even after B1's fix
 #             makes the default run GREEN.
+#   --real-resolver  ALSO build and run the REAL C-layer chainID resolver
+#             differential: a standalone driver (diffcontainerd/
+#             resolver_driver.c) links the REAL shipped core/controller/c/
+#             cc_ctr.c (cc_ctr_resolve_chainid + its self-contained SHA-256,
+#             JSON path extractor, and Images/Get + Content/Read request
+#             framing — the ~750 lines the v1.0.23 review flagged as never
+#             executed) plus the vendored containerd-api codecs + protobuf-c
+#             runtime, and drives it through a test-only cc_grpc_unary
+#             transport stub that serves CANNED byte-exact manifest/config
+#             responses built from the REAL stages.conf *_ROOTFS diff_ids.
+#             The driver's resolver_parent per stage must byte-match the Go
+#             oracle identity.ChainID (oracle.go --resolver).  Two malformed
+#             config blobs must be rejected loudly with a CC_CTR_ERR_* code
+#             (never a wrong/garbage parent, never a crash).  This is the
+#             GREEN proof that the shipped C chainID resolver executes and
+#             matches Go.
+#   --pbc PATH   the protobuf-c external source root (default: resolved via
+#             bazel like the sysroot; needed only for --real-resolver).
 #
 # EXIT
 #   0 = DIFFERENTIAL GREEN (asm == Go byte-for-byte on ALL stages, BOTH the
-#       mount/spec-fill records and the snapshot/parent-chain records)
+#       mount/spec-fill records and the snapshot/parent-chain records; with
+#       --real-resolver, ALSO the real-C resolver == Go identity.ChainID)
 #   1 = RED (a diff, a build failure, or a fill/start error)
 #   2 = usage error
 #
@@ -90,11 +109,13 @@ ARCH="amd64"
 QEMU=0
 BIN=""
 SYSROOT=""
+PBC=""
 INJECT_SCALE8=0
 INJECT_EMPTY_PARENT=0
+REAL_RESOLVER=0
 
 usage() {
-  sed -n '2,115p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,105p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -104,8 +125,10 @@ while [ $# -gt 0 ]; do
     --qemu) QEMU=1 ;;
     --bin) [ $# -ge 2 ] || usage; BIN="$2"; shift ;;
     --sysroot) [ $# -ge 2 ] || usage; SYSROOT="$2"; shift ;;
+    --pbc) [ $# -ge 2 ] || usage; PBC="$2"; shift ;;
     --inject-scale8) INJECT_SCALE8=1 ;;
     --inject-empty-parent) INJECT_EMPTY_PARENT=1 ;;
+    --real-resolver) REAL_RESOLVER=1 ;;
     -h|--help) usage ;;
     -*) usage ;;
     *) usage ;;
@@ -237,6 +260,91 @@ else
     EMPTY_PARENT_DRIVER="$OUT/driver-empty-parent"
   fi
   DRIVER="$OUT/driver"
+
+  # --- 2b. --real-resolver: build the REAL C-layer chainID resolver driver.
+  # Links the REAL shipped core/controller/c/cc_ctr.c (the resolver + its
+  # static helpers are retained via --gc-sections) + the vendored containerd
+  # API codecs (third_party/containerd-api/codecgen) + the vendored
+  # protobuf-c runtime, driven by diffcontainerd/resolver_driver.c whose
+  # cc_grpc_unary stub serves canned Images/Get + Content/Read responses.
+  if [ "$REAL_RESOLVER" -eq 1 ]; then
+    # Locate the protobuf-c external source root (the hermetic vendored
+    # runtime @protobuf_c//:runtime).  Mirrors the sysroot search: bazel
+    # output_base first, then conventional cache paths.
+    if [ -z "$PBC" ]; then
+      OB="$(bazel info output_base 2>/dev/null || true)"
+      if [ -n "$OB" ] && [ -d "$OB/execroot/_main/external/+http_archive+protobuf_c" ]; then
+        PBC="$OB/execroot/_main/external/+http_archive+protobuf_c"
+      else
+        for cand in \
+          "$ROOT/bazel-bin/../../../../external/+http_archive+protobuf_c" \
+          "$HOME/.cache/bazel/_bazel_${USER:-$(id -un)}"/*/execroot/_main/external/+http_archive+protobuf_c \
+          /var/lib/opencode/.cache/bazel/_bazel_opencode/*/execroot/_main/external/+http_archive+protobuf_c \
+          /home/*/.cache/bazel/_bazel_*/*/execroot/_main/external/+http_archive+protobuf_c; do
+          [ -d "$cand/protobuf-c" ] && { PBC="$cand"; break; }
+        done
+      fi
+    fi
+    if [ -z "$PBC" ] || [ ! -f "$PBC/protobuf-c/protobuf-c.c" ]; then
+      echo "ERROR: cannot locate the vendored protobuf-c runtime; pass --pbc PATH (see third_party/protobuf-c/BUILD.bazel @protobuf_c)" >&2
+      exit 1
+    fi
+
+    CODECGEN="$ROOT/third_party/containerd-api/codecgen"
+    PBC_INC="-I $CODECGEN -I $PBC"
+
+    # The vendored codec sources the resolver's call graph needs (images +
+    # content services and their google/protobuf + types deps).  Compiled
+    # with -ffunction-sections so --gc-sections drops the unused messages.
+    build_codec() { # $1 = codecgen-relative .c path, $2 = out .o
+      $CLANG -c $CROSS $ISA -std=gnu11 -Wall -Wextra -Werror \
+          -ffunction-sections -fdata-sections $PBC_INC \
+          "$CODECGEN/$1" -o "$2"
+    }
+
+    build_codec "google/protobuf/empty.pb-c.c" "$OUT/codec-empty.o"
+    build_codec "google/protobuf/field_mask.pb-c.c" "$OUT/codec-fieldmask.o"
+    build_codec "google/protobuf/timestamp.pb-c.c" "$OUT/codec-timestamp.o"
+    build_codec "types/descriptor.pb-c.c" "$OUT/codec-descriptor.o"
+    build_codec "services/images/v1/images.pb-c.c" "$OUT/codec-images.o"
+    build_codec "services/content/v1/content.pb-c.c" "$OUT/codec-content.o"
+
+    # The vendored protobuf-c runtime (pure C, @protobuf_c//:runtime).
+    $CLANG -c $CROSS $ISA -std=gnu11 -Wall -Wextra -Werror \
+        -ffunction-sections -fdata-sections \
+        -I "$PBC" -I "$PBC/protobuf-c" \
+        "$PBC/protobuf-c/protobuf-c.c" -o "$OUT/protobuf-c.o"
+
+    # The REAL shipped C layer — compiled whole; --gc-sections keeps only
+    # cc_ctr_resolve_chainid + its static helpers (copy_str, json_*,
+    # cc_sha256_*, ctr_read_content), dropping the RPC helpers that would
+    # drag in the other service codecs.
+    $CLANG -c $CROSS $ISA -std=gnu11 -Wall -Wextra -Werror \
+        -ffunction-sections -fdata-sections \
+        -I "$ROOT/core/controller/c" $PBC_INC \
+        "$ROOT/core/controller/c/cc_ctr.c" -o "$OUT/cc_ctr_real.o"
+
+    # The resolver driver (test-only; MUST build -Wall -Wextra -Werror).
+    $CLANG -c $CROSS $ISA -std=gnu11 -Wall -Wextra -Werror \
+        -ffunction-sections -fdata-sections \
+        -I "$ROOT/core/controller/asm/diffcontainerd" \
+        -I "$ROOT/core/controller/c" $PBC_INC \
+        "$ROOT/core/controller/asm/diffcontainerd/resolver_driver.c" \
+        -o "$OUT/resolver_driver.o"
+
+    $CLANG $CROSS -fuse-ld=lld --ld-path="$LLD" -no-canonical-prefixes \
+        -L "$SYSROOT/lib" -L "$SYSROOT/lib/gcc/x86_64-linux-gnu/14" \
+        -Wl,--build-id=md5 --rtlib=libgcc -static -Wl,--gc-sections \
+        -o "$OUT/resolver-driver" \
+        "$OUT/resolver_driver.o" "$OUT/cc_ctr_real.o" \
+        "$OUT/codec-images.o" "$OUT/codec-content.o" \
+        "$OUT/codec-descriptor.o" "$OUT/codec-empty.o" \
+        "$OUT/codec-fieldmask.o" "$OUT/codec-timestamp.o" \
+        "$OUT/protobuf-c.o"
+    [ -x "$OUT/resolver-driver" ] || { echo "ERROR: resolver driver link produced no binary" >&2; exit 1; }
+    RESOLVER_DRIVER="$OUT/resolver-driver"
+    echo "note: --real-resolver: built the REAL C-layer chainID resolver driver (cc_ctr.c + codecs + protobuf-c)"
+  fi
 fi
 
 # --- 3. Run both sides and diff byte-for-byte ------------------------------
@@ -323,9 +431,73 @@ if [ "$INJECT_EMPTY_PARENT" -eq 1 ]; then
   fi
 fi
 
+# --- 6. --real-resolver: the REAL C-layer chainID resolver differential ----
+# The shipped cc_ctr.c chainID resolver (SHA-256, JSON path extractor,
+# Images/Get + Content/Read framing) executes end-to-end against canned
+# Images/Get + Content/Read responses built from the REAL stages.conf
+# *_ROOTFS diff_ids; its resolver_parent must byte-match the Go oracle's
+# identity.ChainID (oracle.go --resolver) for all 4 stages, and malformed
+# configs must be rejected loudly with a CC_CTR_ERR_* code.
+if [ "$REAL_RESOLVER" -eq 1 ]; then
+  echo ""
+  echo "--- real C-layer chainID resolver (cc_ctr.c + vendored codecs + protobuf-c) ---"
+  if [ -z "${RESOLVER_DRIVER:-}" ]; then
+    echo "note: --real-resolver with --bin: no resolver driver was built; skipping" >&2
+  else
+    if run_asm "$RESOLVER_DRIVER" > "$OUT/resolver.asm" 2> "$OUT/resolver.asm.err"; then
+      RESOLVER_RC=0
+    else
+      echo "FAIL: real-C resolver driver exited non-zero" >&2
+      cat "$OUT/resolver.asm.err" >&2 || true
+      rc=1
+      RESOLVER_RC=1
+    fi
+    if [ "$RESOLVER_RC" -eq 0 ]; then
+      "$ORACLE" --resolver "$STAGES" > "$OUT/resolver.go" \
+        || { echo "FAIL: oracle --resolver exited non-zero" >&2; rc=1; RESOLVER_RC=1; }
+    fi
+    if [ "$RESOLVER_RC" -eq 0 ]; then
+      # Byte-compare the resolver records (stage + parent) against the Go
+      # oracle identity.ChainID, ignoring the negative-case markers.
+      grep -E '^(resolver_stage|resolver_parent)=' "$OUT/resolver.asm" \
+        > "$OUT/resolver.asm.records"
+      if cmp -s "$OUT/resolver.go" "$OUT/resolver.asm.records"; then
+        echo "PASS: real-C resolver parent == Go oracle identity.ChainID (all 4 stages, byte-identical)"
+      else
+        echo "FAIL: real-C resolver parent diverges from the Go oracle chainID" >&2
+        diff -u "$OUT/resolver.go" "$OUT/resolver.asm.records" | sed -n '1,25p' >&2 || true
+        rc=1
+      fi
+    fi
+    if [ "$RESOLVER_RC" -eq 0 ]; then
+      # Negative cases: every resolver_negative= line must be a fail-loud
+      # CC_CTR_ERR_* code (a negative number), never WRONG-ANSWER.
+      if grep -q '^resolver_negative=.*WRONG-ANSWER' "$OUT/resolver.asm"; then
+        echo "FAIL: a malformed config produced a wrong/garbage parent instead of failing loudly" >&2
+        grep '^resolver_negative=' "$OUT/resolver.asm" >&2 || true
+        rc=1
+      else
+        NEG_COUNT="$(grep -c '^resolver_negative=' "$OUT/resolver.asm" || true)"
+        NEG_OK="$(grep -c '^resolver_negative=.*:-[0-9][0-9]*$' "$OUT/resolver.asm" || true)"
+        if [ "$NEG_COUNT" -ge 2 ] && [ "$NEG_OK" -eq "$NEG_COUNT" ]; then
+          echo "PASS: malformed configs rejected loudly (CC_CTR_ERR_*), no wrong parent, no crash ($NEG_COUNT cases)"
+          grep '^resolver_negative=' "$OUT/resolver.asm" >&2 || true
+        else
+          echo "FAIL: negative-case markers incomplete (expected >= 2 fail-loud, got $NEG_OK/$NEG_COUNT)" >&2
+          grep '^resolver_negative=' "$OUT/resolver.asm" >&2 || true
+          rc=1
+        fi
+      fi
+    fi
+  fi
+fi
+
 if [ "$rc" -ne 0 ]; then
   echo "DIFFERENTIAL: RED" >&2
 else
   echo "DIFFERENTIAL: GREEN (asm == Go byte-for-byte on the containerd mount/spec-fill AND snapshot/parent-chain paths)"
+  if [ "$REAL_RESOLVER" -eq 1 ]; then
+    echo "DIFFERENTIAL: GREEN (real C-layer chainID resolver == Go identity.ChainID, byte-identical)"
+  fi
 fi
 exit "$rc"

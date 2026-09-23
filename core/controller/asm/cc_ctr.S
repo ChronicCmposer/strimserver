@@ -25,11 +25,14 @@
 //  :95-109 `CreateFFmpegContainer`, :111-125 `CreateMediaMTXContainer`,
 //  :231-247 `CreateStageOps`):
 //    1. stop() first ................................ :213
-//    2. GetImage(imageName) ......................... :75
-//    3. Snapshots/Prepare(key=snapshotID, parent="") :77 WithNewSnapshot
-//       (containerd v2.3.5 client/container_opts.go:242-285; the
-//       DESIGN-NOTES chainID design-around replaces the Go content-derived
-//       parent with "" and the snapshot key IS the snapshotID)
+//    2. resolve the image rootfs chainID: Images/Get -> Content/Read
+//       (manifest) -> Content/Read (config) -> identity.ChainID(diff_ids)
+//       (the exact parent containerd's WithNewSnapshot computes,
+//       client/container_opts.go:242-285; cc_ctr_resolve_chainid)
+//    3. Snapshots/Prepare(key=snapshotID, parent=<image chainID>)
+//       (WithNewSnapshot — a NON-EMPTY parent chains the container's active
+//       snapshot onto the image's unpacked layers, so the rootfs carries
+//       /entrypoint.sh)
 //    4. (Go reads the image config via the Content service — the C layer
 //       does NOT; the assembly supplies the OCI fields itself, deviation 1)
 //    5. Containers/Create(id, image=imageName, runtime=runc-v2,
@@ -125,9 +128,12 @@
 //    2. Kill-then-Wait: cc_ctr_wait_task returns the stored exit status even
 //       for an already-exited task, so Kill() then Wait() is safe and the
 //       RPC set is identical to Go.
-//    3. chainID: Snapshots/Prepare(parent="") with key = the snapshotID
-//       (CC_ENV_*_SNAPSHOT_ID); the container's snapshot_key = the same key
-//       (the DESIGN-NOTES design-around; no Content-service calls).
+//    3. chainID: Snapshots/Prepare(parent=<image chainID>) with key = the
+//       snapshotID — the parent is computed by cc_ctr_resolve_chainid
+//       (Images/Get + Content/Read x2 + identity.ChainID), mirroring the Go
+//       oracle's containerd.WithNewSnapshot exactly (B1: the old design-
+//       around passed parent="" and produced a bare rootfs with no image
+//       layers — the exec /entrypoint.sh not-found bug).
 //    4. Return mapping: ops return the first failing RPC's result — >= 0 is
 //       a gRPC status (0 = OK), negative is a CC_CTR_ERR_*/CC_GRPC_ERR_*
 //       client error; the NotFound-continue cases mirror Go's
@@ -667,22 +673,28 @@ ctr_start:
     // 1. stop() first — cleanup before (re)create (Go :213)
     bl ctr_stop
     cbnz x0, .Lst_ret
-    // 2. GetImage(imageName) (Go :75)
+    // 2-3a. Resolve the image rootfs chainID: Images/Get + Content/Read
+    // (manifest + config blobs) + identity.ChainID(rootfs.diff_ids) — the
+    // exact parent containerd's WithNewSnapshot computes and passes to
+    // Snapshots/Prepare (client/container_opts.go:242-285 withNewSnapshot;
+    // i.RootFS walks the manifest/config through the Content service). The
+    // chainID lands in ctr_parent_buf ("" for a no-layer image).
     LEA x21, ctr_state
     ldr w21, [x21, #CTR_STATE_H]
     mov x0, x21
     ldr x1, [x19, #CC_CC_IMAGE_NAME]
-    mov x2, #0
-    mov x3, #0
-    mov x4, #0
-    mov x5, #0
-    bl cc_ctr_get_image
+    LEA x2, ctr_parent_buf
+    mov x3, #CC_CTR_PARENT_MAX
+    bl cc_ctr_resolve_chainid
     cbnz x0, .Lst_ret
-    // 3. Snapshots/Prepare(key=snapshotID, parent="") (chainID design-around)
+    // 3b. Snapshots/Prepare(key=snapshotID, parent=<image chainID>)
+    // (Go WithNewSnapshot -> Snapshots/Prepare; a NON-EMPTY parent chains
+    // the container's active snapshot onto the image's unpacked layers, so
+    // the rootfs carries /entrypoint.sh)
     mov x0, x21
     LEA x1, ctr_s_overlayfs
     ldr x2, [x19, #CC_CC_SNAPSHOT_ID]
-    LEA x3, ctr_s_empty
+    LEA x3, ctr_parent_buf
     LEA x4, ctr_prep_mounts
     mov x5, #CTR_PREP_MOUNTS_MAX
     LEA x6, ctr_n_mounts
@@ -1012,6 +1024,8 @@ ctr_scratch:
     .space CTR_SCRATCH_SIZE          // cgroups path + file:// URI
 ctr_json_buf:
     .space CTR_OCI_JSON_CAP          // OCI spec JSON output
+ctr_parent_buf:
+    .space CC_CTR_PARENT_MAX         // image rootfs chainID (resolve_chainid out)
 ctr_prep_mounts:
     .space 3140 * CTR_PREP_MOUNTS_MAX   // cc_ctr_mount records (prepare out)
 ctr_n_mounts:

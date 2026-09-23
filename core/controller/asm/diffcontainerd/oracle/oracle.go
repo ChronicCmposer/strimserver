@@ -268,8 +268,16 @@ func dumpSnapshot(snapshotKey string, chain, diffs []string) {
 
 // ---- main ------------------------------------------------------------------
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "--resolver" {
+		// Resolver-only mode: emit the REAL C-layer chainID-resolver
+		// comparison records (resolver_stage/resolver_parent) that
+		// differential-containerd.sh --real-resolver byte-compares against
+		// the C driver's cc_ctr_resolve_chainid output.  The parent is the
+		// same identity.ChainID(all diff_ids) the snapshot block emits.
+		os.Exit(resolverMode(os.Args[2]))
+	}
 	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "usage: %s <stages.conf>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s [--resolver] <stages.conf>\n", os.Args[0])
 		os.Exit(2)
 	}
 	conf, err := loadConf(os.Args[1])
@@ -358,6 +366,36 @@ func main() {
 		diffs := rootfsByKind[st.Kind]
 		dumpSnapshot(st.CC.Snapshot, chainIDs(diffs), diffs)
 	}
+}
+
+// resolverMode: the identity.ChainID reference for the REAL C-layer resolver
+// differential (differential-containerd.sh --real-resolver).  Prints the same
+// records as the C resolver_driver.c: per stage, resolver_stage + the
+// chainID the Go oracle computes.  Byte-compared against the C driver's
+// cc_ctr_resolve_chainid output.
+func resolverMode(confPath string) int {
+	conf, err := loadConf(confPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "oracle: %v\n", err)
+		return 1
+	}
+	stages := []struct{ kind, rootfs string }{
+		{"mediamtx", conf["MEDIAMTX_ROOTFS"]},
+		{"normalize", conf["NORMALIZE_ROOTFS"]},
+		{"scale-and-egress", conf["SCALE_ROOTFS"]},
+		{"single-stage-egress", conf["SINGLE_ROOTFS"]},
+	}
+	for _, st := range stages {
+		diffs := splitRootfs(st.rootfs)
+		chain := chainIDs(diffs)
+		parent := ""
+		if len(chain) > 0 {
+			parent = chain[len(chain)-1] // ChainID(all diff_ids)
+		}
+		fmt.Printf("resolver_stage=%s\n", st.kind)
+		fmt.Printf("resolver_parent=%s\n", parent)
+	}
+	return 0
 }
 
 // ---- stages.conf loader ----------------------------------------------------
