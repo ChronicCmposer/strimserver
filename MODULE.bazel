@@ -59,6 +59,7 @@ use_repo(
     "com_github_containerd_containerd_v2",
     "com_github_containerd_errdefs",
     "com_github_containerd_typeurl_v2",
+    "com_github_opencontainers_image_spec",
     "com_github_opencontainers_runtime_spec",
 )
 

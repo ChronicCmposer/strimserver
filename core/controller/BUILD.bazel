@@ -29,6 +29,7 @@ go_library(
         "@com_github_coder_websocket//wsjson",
         "@com_github_containerd_containerd_api//events",
         "@com_github_containerd_containerd_v2//client",
+        "@com_github_containerd_containerd_v2//core/events",
         "@com_github_containerd_containerd_v2//pkg/cdi",
         "@com_github_containerd_containerd_v2//pkg/cio",
         "@com_github_containerd_containerd_v2//pkg/namespaces",
@@ -58,8 +59,25 @@ go_binary(
 
 go_test(
     name = "controller_test",
-    srcs = ["controller_test.go"],
+    srcs = [
+        "container_factory_test.go",
+        "controller_test.go",
+    ],
     embed = [":controller_lib"],
+    # pure = "on" matches the binary: this package is pure Go (verified: no
+    # import "C" and no os/user anywhere in this package), so the test links
+    # statically instead of dragging in the host C toolchain/libgcc.
+    pure = "on",
+    deps = [
+        "@com_github_containerd_containerd_v2//client",
+        "@com_github_containerd_containerd_v2//core/content",
+        "@com_github_containerd_containerd_v2//core/containers",
+        "@com_github_containerd_containerd_v2//core/events",
+        "@com_github_containerd_containerd_v2//core/snapshots",
+        "@com_github_containerd_containerd_v2//pkg/oci",
+        "@com_github_opencontainers_image_spec//specs-go/v1:specs-go",
+        "@com_github_opencontainers_runtime_spec//specs-go",
+    ],
 )
 
 # --- Codegen: strimserver.env.example + the Stream Deck wire types ----------
@@ -134,6 +152,7 @@ sh_test(
         ":go_bin",
         ".golangci.yml",
         "container_factory.go",
+        "container_factory_test.go",
         "controller.go",
         "controller_test.go",
         "envspec.go",

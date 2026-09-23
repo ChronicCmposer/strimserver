@@ -132,6 +132,25 @@ extern "C" {
 #define CC_CTR_REQ_MAX  16384
 #define CC_CTR_RESP_MAX 65536
 
+/* The image rootfs chainID parent buffer (cc_ctr_resolve_chainid out).
+ * A chainID is a "sha256:" digest (71 bytes); the single-layer case passes
+ * the raw diffID verbatim (also "sha256:" + 64 hex). 256 bytes covers both
+ * with margin for longer digest algorithms; a parent that does not fit
+ * fails loudly (copy_str) instead of being silently truncated. */
+#define CC_CTR_PARENT_MAX 256
+
+/* Max bytes of a manifest/config blob read through the Content service to
+ * resolve the image chainID. The project images' blobs are a few KiB; a
+ * read that exceeds this (or the server's single-message response) fails
+ * loudly. */
+#define CC_CTR_CONTENT_BLOB_MAX 16384
+
+/* Max layer count parsed from the image config's rootfs.diff_ids, and max
+ * digest-string length ("sha256:" + 64 hex = 71; "sha512:" + 128 hex =
+ * 131). Both bound fixed-size locals; overflow fails loudly. */
+#define CC_CTR_MAX_DIFFIDS  16
+#define CC_CTR_DIGEST_MAX   256
+
 /* =========================================================================
  * Mount record (the fixed-arity form of containerd.types.Mount)
  * =========================================================================
@@ -220,11 +239,30 @@ int cc_ctr_get_image(int h, const char *image_ref,
                      char *out_name, uint32_t name_cap,
                      char *out_digest, uint32_t digest_cap);
 
+/* cc_ctr_resolve_chainid: mirror containerd's WithNewSnapshot parent
+ * computation (client/container_opts.go withNewSnapshot). Resolves the
+ * image (Images/Get), reads its manifest and config blobs through the
+ * Content service (Content/Read), extracts the image config's
+ * rootfs.diff_ids, and computes identity.ChainID(diffIDs) — the exact
+ * parent string the Go oracle passes to Snapshots/Prepare so the container
+ * snapshot is chained onto the image's unpacked layers (a non-empty rootfs
+ * with /entrypoint.sh). On OK out_parent receives the chainID
+ * ("sha256:…"), or "" for a no-layer image (base-layer Prepare). Returns 0
+ * + output, the first failing RPC's status, or a CC_CTR_ERR_* code. */
+int cc_ctr_resolve_chainid(int h, const char *image_ref,
+                           char *out_parent, uint32_t parent_cap);
+
 /* --- Snapshots (chainID design-around) -----------------------------------
  * cc_ctr_prepare_snapshot: Snapshots/Prepare.
  *   key:    the snapshot key (== the container's snapshot id for a single
  *           layer; the assembly CHOOSES it and keeps it).
- *   parent: "" for the base layer; the previous snapshot's key for a child.
+ *   parent: the snapshot's parent key — for a container rootfs this MUST be
+ *           the image's chainID (cc_ctr_resolve_chainid), never NULL and
+ *           never "" (an empty parent yields a bare rootfs with no image
+ *           layers — the exec /entrypoint.sh not-found bug). NULL is
+ *           rejected loudly (CC_CTR_ERR_BADARG); "" is still accepted at
+ *           this boundary for the base-snapshot helper callers, but the
+ *           container-create path never uses it.
  * On OK copies the returned mounts into out_mounts (at most mounts_cap
  * entries; out_n_mounts receives the count). The snapshot key the assembly
  * must thread is the `key` argument itself: PrepareSnapshotResponse in

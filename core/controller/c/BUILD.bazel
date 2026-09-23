@@ -22,6 +22,11 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
+# The translation checker (//core/controller/asm:check-translation.sh, class D
+# RPC-sequence scan) reads cc_ctr.c source directly, so the raw file must be
+# referenceable cross-package from the asm package's sh_test data/args.
+exports_files(["cc_ctr.c"])
+
 cc_library(
     name = "cc_grpc",
     srcs = [

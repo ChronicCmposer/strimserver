@@ -13,6 +13,7 @@ import (
    "time"
 
    containerd "github.com/containerd/containerd/v2/client"
+   "github.com/containerd/containerd/v2/core/events"
    "github.com/containerd/containerd/v2/pkg/cdi"
    "github.com/containerd/containerd/v2/pkg/cio"
    "github.com/containerd/containerd/v2/pkg/oci"
@@ -21,9 +22,20 @@ import (
    "github.com/opencontainers/runtime-spec/specs-go"
 )
 
+// containerClient is the subset of the containerd client the factory depends
+// on. Keeping it an interface lets the unit tests drive the factory with a
+// recording fake and assert the exact construction parameters (image name,
+// container id, snapshot option, OCI spec) without a live containerd daemon.
+// *containerd.Client satisfies it structurally.
+type containerClient interface {
+   GetImage(ctx context.Context, ref string) (containerd.Image, error)
+   NewContainer(ctx context.Context, id string, opts ...containerd.NewContainerOpts) (containerd.Container, error)
+   LoadContainer(ctx context.Context, id string) (containerd.Container, error)
+   Subscribe(ctx context.Context, filters ...string) (ch <-chan *events.Envelope, errs <-chan error)
+}
 
 type ContainerFactory struct {
-   client               *containerd.Client
+   client               containerClient
    stageNames           map[string]StageName
    gracefulStopTimeout  time.Duration
    layout               Layout
@@ -68,6 +80,46 @@ func toOCIMounts(mounts []Mount) []specs.Mount {
    return out
 }
 
+// ffmpegMounts is the bind-mount list every ffmpeg stage container (normalize,
+// scale-and-egress, single-stage-egress) is created with. It is the pure
+// construction decision the assembly ctr_fill_mounts must reproduce exactly:
+// the env file, the transcode script, the host resolv.conf and a writable
+// /tmp.
+func ffmpegMounts(layout Layout) []Mount {
+   return []Mount{
+      { Src: layout.Env,          Dst: ctrEnv },
+      { Src: layout.Transcode,    Dst: ctrTranscode },
+      { Src: layout.ResolvConf,   Dst: ctrResolvConf },
+      { Src: layout.Tmp,          Dst: ctrTmp, ReadWrite: true },
+   }
+}
+
+// mediamtxMounts is the bind-mount list the mediamtx container is created
+// with: the env file, the mediamtx template, the notify script, the SRT
+// passphrase secret, plus writable video-files and /tmp.
+func mediamtxMounts(layout Layout) []Mount {
+   return []Mount{
+      { Src: layout.Env,          Dst: ctrEnv },
+      { Src: layout.MediaMTXTmpl, Dst: ctrMediaMTXTmpl },
+      { Src: layout.Notify,       Dst: ctrNotify },
+      { Src: layout.SrtPass,      Dst: ctrSrtSecret },
+      { Src: layout.VideoDir,     Dst: ctrVideoDir, ReadWrite: true },
+      { Src: layout.Tmp,          Dst: ctrTmp,      ReadWrite: true },
+   }
+}
+
+// baseSpecOpts returns the OCI spec options every strimserver container
+// shares: the image config (env/entrypoint/cmd/cwd/user from the image), host
+// networking, the CAP_SYS_NICE capability, and the bind mounts.
+func baseSpecOpts(image oci.Image, mounts []Mount) []oci.SpecOpts {
+   return []oci.SpecOpts{
+      oci.WithImageConfig(image),
+      oci.WithHostNamespace(specs.NetworkNamespace),
+      oci.WithAddedCapabilities([]string{"CAP_SYS_NICE"}),
+      oci.WithMounts(toOCIMounts(mounts)),
+   }
+}
+
 func (f *ContainerFactory) buildContainer(
    ctx context.Context, id, snapshotID, imageName string,
    mounts []Mount, extra ...oci.SpecOpts,
@@ -75,14 +127,13 @@ func (f *ContainerFactory) buildContainer(
    image, err := f.client.GetImage(ctx, imageName)
    if err != nil { return nil, fmt.Errorf("error obtaining reference to oci image %q: %w", imageName, err) }
 
-   opts := []oci.SpecOpts{
-      oci.WithImageConfig(image),
-      oci.WithHostNamespace(specs.NetworkNamespace),
-      oci.WithAddedCapabilities([]string{"CAP_SYS_NICE"}),
-      oci.WithMounts(toOCIMounts(mounts)),
-   }
+   opts := baseSpecOpts(image, mounts)
    opts = append(opts, extra...)
 
+   // The rootfs snapshot is created FROM the resolved image: WithNewSnapshot
+   // derives the parent chain from the image's rootfs diff-ids, so the
+   // container's rootfs contains the image content. This is the contract the
+   // assembly port must reproduce — never create the snapshot empty-parented.
    container, err := f.client.NewContainer(ctx, id,
       containerd.WithNewSnapshot(snapshotID, image),
       containerd.WithNewSpec(opts...),
@@ -95,13 +146,7 @@ func (f *ContainerFactory) buildContainer(
 func (f *ContainerFactory) CreateFFmpegContainer(
    ctx context.Context, id, snapshotID, imageName string, argv ...string,
 ) (containerd.Container, error) {
-   mounts := []Mount {
-      { Src: f.layout.Env,          Dst: ctrEnv },
-      { Src: f.layout.Transcode,    Dst: ctrTranscode },
-      { Src: f.layout.ResolvConf,   Dst: ctrResolvConf },
-      { Src: f.layout.Tmp,          Dst: ctrTmp, ReadWrite: true },
-   }
-   container, err := f.buildContainer(ctx, id, snapshotID, imageName, mounts,
+   container, err := f.buildContainer(ctx, id, snapshotID, imageName, ffmpegMounts(f.layout),
       oci.WithProcessArgs(argv...),
       cdi.WithCDIDevices("nvidia.com/gpu=0"))
    if err != nil { return nil, fmt.Errorf("could not create ffmpeg container with id %q: %w", id, err) }
@@ -111,15 +156,7 @@ func (f *ContainerFactory) CreateFFmpegContainer(
 func (f *ContainerFactory) CreateMediaMTXContainer(
    ctx context.Context, id, snapshotID, imageName string,
 ) (containerd.Container, error) {
-   mounts := []Mount {
-      { Src: f.layout.Env,          Dst: ctrEnv },
-      { Src: f.layout.MediaMTXTmpl, Dst: ctrMediaMTXTmpl },
-      { Src: f.layout.Notify,       Dst: ctrNotify },
-      { Src: f.layout.SrtPass,      Dst: ctrSrtSecret },
-      { Src: f.layout.VideoDir,     Dst: ctrVideoDir, ReadWrite: true },
-      { Src: f.layout.Tmp,          Dst: ctrTmp,      ReadWrite: true },
-   }
-   container, err := f.buildContainer(ctx, id, snapshotID, imageName, mounts)
+   container, err := f.buildContainer(ctx, id, snapshotID, imageName, mediamtxMounts(f.layout))
    if err != nil { return nil, fmt.Errorf("could not create mediamtx container with id %q: %w", id, err) }
    return container, nil
 }
@@ -228,6 +265,17 @@ func (f *ContainerFactory) CreateContainerOps(
    return map[StageState]func(context.Context) error { Running: start, Stopped: stop }
 }
 
+// stageArgv returns the argv the ffmpeg stages are launched with: the
+// transcode script path followed by the stage NAME. The stage name differs
+// from the container id — the container "scale-and-egress" runs as the stage
+// "scale_and_egress" — and transcode.sh / the egress scripts switch on the
+// stage name, while containerd derives the cgroups path from the container id.
+func (f *ContainerFactory) stageArgv(containerConfig ContainerConfig) []string {
+   stageName, ok := f.stageNames[containerConfig.ContainerID]
+   if !ok { stageName = StageName(containerConfig.ContainerID) }
+   return []string{ctrTranscode, string(stageName)}
+}
+
 func (f *ContainerFactory) CreateStageOps(containerConfig ContainerConfig) map[StageState]func(context.Context) error {
    stageName, ok := f.stageNames[containerConfig.ContainerID]
    if !ok { stageName = StageName(containerConfig.ContainerID) }
@@ -235,7 +283,7 @@ func (f *ContainerFactory) CreateStageOps(containerConfig ContainerConfig) map[S
    createFunc := func(ctx context.Context) (containerd.Container, string, error) {
       container, err := f.CreateFFmpegContainer(
          ctx, containerConfig.ContainerID, containerConfig.SnapshotID, containerConfig.ImageName,
-         ctrTranscode, string(stageName))
+         f.stageArgv(containerConfig)...)
       return container, containerConfig.Logfile, err
    }
 

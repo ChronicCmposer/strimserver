@@ -27,8 +27,11 @@
 //
 //  START op:
 //    1. stop() first
-//    2. GetImage(imageName)
-//    3. Snapshots/Prepare(key=snapshotID, parent="")
+//    2. resolve the image rootfs chainID: Images/Get -> Content/Read
+//       (manifest) -> Content/Read (config) -> identity.ChainID(diff_ids)
+//       (the exact parent containerd's WithNewSnapshot computes,
+//       client/container_opts.go:242-285; cc_ctr_resolve_chainid)
+//    3. Snapshots/Prepare(key=snapshotID, parent=<image chainID>)
 //    4. (C layer supplies the OCI fields; the assembly fills the struct)
 //    5. Containers/Create(id, image, runtime=runc-v2, spec=Any(JSON),
 //       snapshotter="overlayfs", snapshot_key=snapshotID)
@@ -68,7 +71,12 @@
 //       from the env-runtime block and the Layout mount sources).
 //    2. Kill-then-Wait: cc_ctr_wait_task returns the stored exit status even
 //       for an already-exited task.
-//    3. chainID: Snapshots/Prepare(parent="") with key = the snapshotID.
+//    3. chainID: Snapshots/Prepare(parent=<image chainID>) with key = the
+//       snapshotID — the parent is computed by cc_ctr_resolve_chainid
+//       (Images/Get + Content/Read x2 + identity.ChainID), mirroring the Go
+//       oracle's containerd.WithNewSnapshot exactly (B1: the old design-
+//       around passed parent="" and produced a bare rootfs with no image
+//       layers — the exec /entrypoint.sh not-found bug).
 //    4. Return mapping: ops return the first failing RPC's result — >= 0 is
 //       a gRPC status (0 = OK), negative is a CC_CTR_ERR_*/CC_GRPC_ERR_*
 //       client error.
@@ -585,28 +593,36 @@ ctr_start:
     call ctr_stop
     test %eax, %eax
     jnz .Lst_ret
-    // 2. GetImage(imageName) (Go :75)
+    // 2-3a. Resolve the image rootfs chainID: Images/Get + Content/Read
+    // (manifest + config blobs) + identity.ChainID(rootfs.diff_ids) — the
+    // exact parent containerd's WithNewSnapshot computes and passes to
+    // Snapshots/Prepare (client/container_opts.go:242-285 withNewSnapshot;
+    // i.RootFS walks the manifest/config through the Content service). The
+    // chainID lands in ctr_parent_buf ("" for a no-layer image).
     lea ctr_state(%rip), %rax
     mov CTR_STATE_H(%rax), %r13d        // h (int)
     mov %r13d, %edi
     mov CC_CC_IMAGE_NAME(%rbx), %rsi
-    xor %edx, %edx
-    xor %ecx, %ecx
-    xor %r8d, %r8d
-    xor %r9d, %r9d
-    call cc_ctr_get_image
+    lea ctr_parent_buf(%rip), %rdx
+    mov $CC_CTR_PARENT_MAX, %ecx
+    call cc_ctr_resolve_chainid
     test %eax, %eax
     jnz .Lst_ret
-    // 3. Snapshots/Prepare(key=snapshotID, parent="")
+    // 3b. Snapshots/Prepare(key=snapshotID, parent=<image chainID>)
+    // (Go WithNewSnapshot -> Snapshots/Prepare; a NON-EMPTY parent chains
+    // the container's active snapshot onto the image's unpacked layers, so
+    // the rootfs carries /entrypoint.sh)
     mov %r13d, %edi
     lea ctr_s_overlayfs(%rip), %rsi
     mov CC_CC_SNAPSHOT_ID(%rbx), %rdx
-    lea ctr_s_empty(%rip), %rcx
+    lea ctr_parent_buf(%rip), %rcx
     lea ctr_prep_mounts(%rip), %r8
     mov $CTR_PREP_MOUNTS_MAX, %r9d
-    lea ctr_n_mounts(%rip), %rax
-    mov %rax, (%rsp)                    // 7th arg: out_n_mounts
-    call cc_ctr_prepare_snapshot
+    sub $16, %rsp                       // outgoing 7th-arg area (16 keeps the
+    lea ctr_n_mounts(%rip), %rax        //   call-site rsp 16-aligned; %rsp must
+    mov %rax, (%rsp)                    //   NOT touch the saved callee-saved
+    call cc_ctr_prepare_snapshot        //   slots below the frame)
+    add $16, %rsp
     test %eax, %eax
     jnz .Lst_ret
     // 4. assemble the OCI spec struct (deviation 1: caller-supplied fields)
@@ -655,10 +671,12 @@ ctr_start_create:
     lea ctr_s_overlayfs(%rip), %rcx
     mov CC_CC_SNAPSHOT_ID(%rbx), %r8
     xor %r9d, %r9d                      // runtime NULL -> io.containerd.runc.v2
-    lea ctr_json_buf(%rip), %rax
-    mov %rax, (%rsp)                    // 7th arg: oci_spec_json
-    mov %r14, 8(%rsp)                   // 8th arg: oci_len
+    sub $16, %rsp                       // outgoing 7th/8th-arg area (16 keeps
+    lea ctr_json_buf(%rip), %rax        //   the call-site rsp 16-aligned; %rsp
+    mov %rax, (%rsp)                    //   must NOT touch the saved callee-
+    mov %r14, 8(%rsp)                   //   saved slots below the frame)
     call cc_ctr_create_container
+    add $16, %rsp
     test %eax, %eax
     jnz .Lsc_ret
     // 7. NewTask with cio.LogFile(logfile) (Go :130, :219)
@@ -984,6 +1002,8 @@ ctr_scratch:
     .space CTR_SCRATCH_SIZE          // cgroups path + file:// URI
 ctr_json_buf:
     .space CTR_OCI_JSON_CAP          // OCI spec JSON output
+ctr_parent_buf:
+    .space CC_CTR_PARENT_MAX         // image rootfs chainID (resolve_chainid out)
 ctr_prep_mounts:
     .space 3140 * CTR_PREP_MOUNTS_MAX   // cc_ctr_mount records (prepare out)
 ctr_n_mounts:

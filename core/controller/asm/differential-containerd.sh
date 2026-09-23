@@ -1,28 +1,46 @@
 #!/usr/bin/env bash
 #
 # Phase 5 containerd-path differential: the x86-64 assembly controller's
-# containerd OCI spec-fill/mount construction vs the Go controller (the
-# oracle), byte-for-byte.
+# containerd OCI spec-fill/mount construction + snapshot/unpack/parent-chain
+# vs the Go controller (the oracle), byte-for-byte.
 #
 # This is the harness Workstream C built to close the coverage gap that let
-# the ctr_fill_mounts scale-8-vs-byte-offset bug reach production.  The
-# existing differential.sh only exercises the 3 flag paths (-print-env-example,
-# -print-ts-types, -check-env); the ad-hoc run-path harness only exercises the
-# HTTP surface.  Neither drives cc_ctr_oci_spec_fill -> ctr_fill_mounts, the
-# path that builds a stage's OCI container spec records (bind mounts, args,
-# env, cgroups path) from the Layout / per-kind descriptor tables.
+# the ctr_fill_mounts scale-8-vs-byte-offset bug reach production, extended by
+# Workstream B2 to ALSO cover the SNAPSHOT/UNPACK/PARENT-CHAIN path where the
+# production empty-rootfs bug lived (Snapshots/Prepare(key=<id>, parent="")
+# instead of containerd.WithNewSnapshot's parent = identity.ChainID(image
+# rootfs diff_ids)).
 #
 # WHAT IT COMPARES (byte-for-byte, same field order/types as the asm dump):
-#   kind, n_env + env[], n_args + args[], cwd, uid/gid/gids,
-#   n_caps + caps[], host_network, cgroups path, n_mounts + per-mount
-#   {destination, source, type, n_options, options[]}.
+#   A. mount/spec-fill records (existing):
+#        kind, n_env + env[], n_args + args[], cwd, uid/gid/gids,
+#        n_caps + caps[], host_network, cgroups path, n_mounts + per-mount
+#        {destination, source, type, n_options, options[]}.
+#   B. snapshot / parent-chain records (B2):
+#        snapshot_key, snapshot_parent, n_layers + per-layer
+#        {diff, key, parent}.
+#   The snapshot_parent is the critical field: it must equal the Go oracle's
+#   identity.ChainID(image rootfs diff_ids) — the parent
+#   containerd.WithNewSnapshot passes to Snapshots/Prepare so the container
+#   rootfs carries the image layers (/entrypoint.sh).  An empty parent (the
+#   production bug) turns B RED.
 #
 # HOW:
 #   1. Builds the x86-64 driver (diffcontainerd/driver.c) that links the REAL
-#      x86_64 cc_ctr.S + cc_util.S objects and calls cc_ctr_oci_spec_fill /
-#      ctr_fill_mounts directly for each CTR_KIND_* stage.
-#   2. Builds the Go oracle (diffcontainerd/oracle.go) that replicates
-#      container_factory.go's construction for the same stages.
+#      x86_64 cc_ctr.S + cc_util.S objects and drives BOTH paths:
+#      (A) cc_ctr_oci_spec_fill / ctr_fill_mounts directly for each
+#          CTR_KIND_* stage;
+#      (B) cc_ctr_apply(stage, CC_STATE_RUNNING) -> ctr_start, the full
+#          Images/Get -> cc_ctr_resolve_chainid -> Snapshots/Prepare ->
+#          Mounts RPC sequence.  The driver's recording stubs capture the
+#          (key, parent) the asm ACTUALLY passes to Prepare and dump them in
+#          the canonical format.  The driver feeds the image rootfs diff_ids
+#          (stages.conf *_ROOTFS, the REAL rules_oci image configs) to the
+#          asm through its cc_ctr_resolve_chainid stub — exactly what the
+#          real C layer (B1's cc_ctr_resolve_chainid) returns.
+#   2. Builds the Go oracle (diffcontainerd/oracle/oracle.go) that replicates
+#      container_factory.go's construction AND containerd.WithNewSnapshot's
+#      parent = identity.ChainID(rootfs.diff_ids) for the same stages.
 #   3. Runs both over the shared stage config (diffcontainerd/stages.conf)
 #      and diffs the canonical record dumps byte-for-byte.
 #
@@ -51,10 +69,19 @@
 #             and run the differential on it — the RED demonstration proving
 #             this harness catches the bug class.  The committed cc_ctr.S is
 #             NEVER modified (A1 owns the fix; this copies to a temp dir).
+#   --inject-empty-parent  ALSO build the driver with
+#             -DDRIVER_INJECT_EMPTY_PARENT (its cc_ctr_resolve_chainid stub
+#             returns ""), and run the differential on it — the RED
+#             demonstration proving the harness catches the empty-parent /
+#             empty-rootfs bug class.  The committed cc_ctr.S is NEVER
+#             modified (B1 owns the fix; the injection is a driver build
+#             flag).  This stays a valid demonstration even after B1's fix
+#             makes the default run GREEN.
 #
 # EXIT
-#   0 = DIFFERENTIAL GREEN (asm == Go byte-for-byte on all stages)
-#   1 = RED (a diff, a build failure, or a fill error)
+#   0 = DIFFERENTIAL GREEN (asm == Go byte-for-byte on ALL stages, BOTH the
+#       mount/spec-fill records and the snapshot/parent-chain records)
+#   1 = RED (a diff, a build failure, or a fill/start error)
 #   2 = usage error
 #
 set -euo pipefail
@@ -64,9 +91,10 @@ QEMU=0
 BIN=""
 SYSROOT=""
 INJECT_SCALE8=0
+INJECT_EMPTY_PARENT=0
 
 usage() {
-  sed -n '2,79p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,115p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -77,6 +105,7 @@ while [ $# -gt 0 ]; do
     --bin) [ $# -ge 2 ] || usage; BIN="$2"; shift ;;
     --sysroot) [ $# -ge 2 ] || usage; SYSROOT="$2"; shift ;;
     --inject-scale8) INJECT_SCALE8=1 ;;
+    --inject-empty-parent) INJECT_EMPTY_PARENT=1 ;;
     -h|--help) usage ;;
     -*) usage ;;
     *) usage ;;
@@ -168,11 +197,12 @@ else
   CTR_SRC="$ROOT/core/controller/asm/x86_64/cc_ctr.S"
   UTIL_SRC="$ROOT/core/controller/asm/x86_64/cc_util.S"
 
-  build_driver() { # $1 = cc_ctr.S source, $2 = out driver path
-    local ctr_src="$1" out_driver="$2"
+  build_driver() { # $1 = cc_ctr.S source, $2 = out driver path, $3 = extra driver CFLAGS
+    local ctr_src="$1" out_driver="$2" extra_cflags="$3"
     $CLANG -c -x assembler-with-cpp $CROSS $ISA $ASM_INC "$ctr_src" -o "$OUT/cc_ctr.o"
     $CLANG -c -x assembler-with-cpp $CROSS $ISA $ASM_INC "$UTIL_SRC" -o "$OUT/cc_util.o"
-    $CLANG -c $CROSS $ISA -std=gnu11 -I "$ROOT/core/controller/asm/diffcontainerd" \
+    $CLANG -c $CROSS $ISA -std=gnu11 -Wall -Wextra -Werror $extra_cflags \
+        -I "$ROOT/core/controller/asm/diffcontainerd" \
         -I "$ROOT/core/controller/c" \
         "$ROOT/core/controller/asm/diffcontainerd/driver.c" -o "$OUT/driver.o"
     $CLANG $CROSS -fuse-ld=lld --ld-path="$LLD" -no-canonical-prefixes \
@@ -183,7 +213,7 @@ else
   }
 
   echo "building the containerd differential driver (cc_ctr.S + cc_util.S + driver.c)..."
-  build_driver "$CTR_SRC" "$OUT/driver"
+  build_driver "$CTR_SRC" "$OUT/driver" ""
 
   if [ "$INJECT_SCALE8" -eq 1 ]; then
     # Scratch copy of cc_ctr.S with the OLD scale-8 indexing re-injected
@@ -194,8 +224,17 @@ else
     grep -q 'mov (%rax,%r11,8), %r11' "$PATCHED" \
       || { echo "ERROR: scale-8 injection pattern not found in cc_ctr.S (the fix text changed?)" >&2; exit 1; }
     echo "note: --inject-scale8: building the OLD scale-8 driver (RED demonstration)"
-    build_driver "$PATCHED" "$OUT/driver-scale8"
+    build_driver "$PATCHED" "$OUT/driver-scale8" ""
     SCALE8_DRIVER="$OUT/driver-scale8"
+  fi
+
+  if [ "$INJECT_EMPTY_PARENT" -eq 1 ]; then
+    # Scratch driver whose cc_ctr_resolve_chainid stub returns "" — the
+    # empty-parent bug class.  The committed cc_ctr.S is never touched; the
+    # injection is a driver build flag only.
+    echo "note: --inject-empty-parent: building the empty-parent driver (RED demonstration)"
+    build_driver "$CTR_SRC" "$OUT/driver-empty-parent" "-DDRIVER_INJECT_EMPTY_PARENT"
+    EMPTY_PARENT_DRIVER="$OUT/driver-empty-parent"
   fi
   DRIVER="$OUT/driver"
 fi
@@ -205,16 +244,40 @@ rc=0
 
 # Whole-run byte comparison (the authoritative check).  The driver dumps all
 # four kinds in one run; the oracle likewise.  A divergence anywhere — a
-# mount source, an option, an env/arg value, the cgroups path, the field
-# ORDER — breaks the byte comparison.
+# mount source, an option, an env/arg value, the cgroups path, the snapshot
+# parent/key, a layer chain entry, the field ORDER — breaks the byte
+# comparison.
 run_asm "$DRIVER" > "$OUT/asm.all" || { echo "FAIL: asm driver exited non-zero" >&2; rc=1; }
 "$ORACLE" "$STAGES" > "$OUT/go.all" || { echo "FAIL: oracle exited non-zero" >&2; rc=1; }
 
-if cmp -s "$OUT/go.all" "$OUT/asm.all"; then
-  echo "PASS: containerd mount/spec-fill records (asm == Go, byte-identical)"
+# Section diagnostics: split each side into the spec blocks (kind= ... up to
+# the snapshot_key=) and the snapshot blocks (snapshot_key= ... up to the
+# next kind=) so a RED reports exactly which surface diverged.
+awk '/^kind=/{in_spec=1; in_snap=0} /^snapshot_key=/{in_snap=1; in_spec=0} {if (in_spec) print}' "$OUT/go.all" > "$OUT/go.spec"
+awk '/^kind=/{in_spec=1; in_snap=0} /^snapshot_key=/{in_snap=1; in_spec=0} {if (in_snap) print}' "$OUT/go.all" > "$OUT/go.snap"
+awk '/^kind=/{in_spec=1; in_snap=0} /^snapshot_key=/{in_snap=1; in_spec=0} {if (in_spec) print}' "$OUT/asm.all" > "$OUT/asm.spec"
+awk '/^kind=/{in_spec=1; in_snap=0} /^snapshot_key=/{in_snap=1; in_spec=0} {if (in_snap) print}' "$OUT/asm.all" > "$OUT/asm.snap"
+
+SPEC_OK=0; SNAP_OK=0
+if cmp -s "$OUT/go.spec" "$OUT/asm.spec"; then
+  SPEC_OK=1; echo "PASS: mount/spec-fill records (asm == Go, byte-identical)"
 else
-  echo "FAIL: containerd mount/spec-fill records differ" >&2
-  diff -u "$OUT/go.all" "$OUT/asm.all" >&2 || true
+  echo "FAIL: mount/spec-fill records differ" >&2
+  diff -u "$OUT/go.spec" "$OUT/asm.spec" >&2 || true
+  rc=1
+fi
+if cmp -s "$OUT/go.snap" "$OUT/asm.snap"; then
+  SNAP_OK=1; echo "PASS: snapshot/parent-chain records (asm == Go, byte-identical)"
+else
+  echo "FAIL: snapshot/parent-chain records differ" >&2
+  diff -u "$OUT/go.snap" "$OUT/asm.snap" | sed -n '1,25p' >&2 || true
+  rc=1
+fi
+
+if cmp -s "$OUT/go.all" "$OUT/asm.all"; then
+  echo "PASS: whole-run containerd records (asm == Go, byte-identical)"
+else
+  echo "FAIL: whole-run containerd records differ" >&2
   rc=1
 fi
 
@@ -239,9 +302,30 @@ if [ "$INJECT_SCALE8" -eq 1 ]; then
   fi
 fi
 
+# --- 5. --inject-empty-parent: prove the harness catches the bug class ------
+if [ "$INJECT_EMPTY_PARENT" -eq 1 ]; then
+  echo ""
+  echo "--- empty-parent RED demonstration (scratch driver, committed cc_ctr.S untouched) ---"
+  if [ -z "${EMPTY_PARENT_DRIVER:-}" ]; then
+    echo "note: --inject-empty-parent with --bin: no scratch driver was built; skipping" >&2
+  else
+    if run_asm "$EMPTY_PARENT_DRIVER" > "$OUT/asm.empty-parent"; then
+      if cmp -s "$OUT/go.all" "$OUT/asm.empty-parent"; then
+        echo "FAIL: empty-parent injection unexpectedly matched the oracle (harness blind to the bug class)" >&2
+        rc=1
+      else
+        echo "PASS: empty-parent injection detected — Snapshots/Prepare(parent=\"\") diverges from Go's ChainID parent, as expected (RED demonstration)"
+        diff -u "$OUT/go.all" "$OUT/asm.empty-parent" | grep '^[-+]snapshot_parent' >&2 || true
+      fi
+    else
+      echo "PASS: empty-parent injection driver crashed/exited non-zero — the bug class is caught loudly" >&2
+    fi
+  fi
+fi
+
 if [ "$rc" -ne 0 ]; then
   echo "DIFFERENTIAL: RED" >&2
 else
-  echo "DIFFERENTIAL: GREEN (asm == Go byte-for-byte on the containerd mount/spec-fill path)"
+  echo "DIFFERENTIAL: GREEN (asm == Go byte-for-byte on the containerd mount/spec-fill AND snapshot/parent-chain paths)"
 fi
 exit "$rc"

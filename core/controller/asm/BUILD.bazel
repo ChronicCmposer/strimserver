@@ -62,14 +62,18 @@ sh_test(
 
 # check-translation.sh scans the x86_64 modules for the mechanical AArch64 ->
 # SysV translation-bug classes (scaled-index loads, ret-without-%rax, chained
-# calls without %rax->%rdi re-threading).  The AArch64 modules are detected
-# and skipped (N/A, exit 0), so this test is green on arm64 while the same
-# script drives the x86_64 suite's check_translation_x86_64_test below.
+# calls without %rax->%rdi re-threading) and the class-D RPC-sequence check
+# (missing image/snapshot parent-chain), which ALSO reads the shared C layer
+# (//core/controller/c:cc_ctr.c).  The AArch64 modules are detected and
+# skipped (N/A, exit 0), so this test is green on arm64 while the same script
+# drives the x86_64 suite's check_translation_x86_64_test below; the C-layer
+# class-D candidates surface on both hosts (the bug lives in the shared C
+# layer, independent of the port).
 sh_test(
     name = "check_translation_test",
     srcs = ["asm_checker_test.sh"],
-    args = ["$(rootpath check-translation.sh)"] + ["$(rootpath :%s)" % m for m in ASM_MODULES],
-    data = ["check-translation.sh"] + ASM_MODULES + ASM_HEADERS,
+    args = ["$(rootpath check-translation.sh)"] + ["$(rootpath :%s)" % m for m in ASM_MODULES] + ["$(rootpath //core/controller/c:cc_ctr.c)"],
+    data = ["check-translation.sh"] + ASM_MODULES + ASM_HEADERS + ["//core/controller/c:cc_ctr.c"],
     target_compatible_with = ["@platforms//cpu:aarch64"],
 )
 
@@ -301,16 +305,18 @@ X86_64_LANDED_MODULES = [
 
 # The translation-bug scanner: one sh_test over ALL seven x86_64 modules (the
 # per-module checker tests above guard ISA/clobbers; this one guards the
-# AArch64 -> SysV translation classes).  It is source-only (no assembler), so
-# it runs on amd64 hosts in CI and on amd64/aarch64 dev hosts alike; the
-# target_compatible_with keeps it out of the aarch64-only wildcard builds that
-# skip the x86_64 checker suite (the arm64 suite runs the same script via
-# check_translation_test above, where the AArch64 modules are skipped).
+# AArch64 -> SysV translation classes) PLUS the shared C layer for the class-D
+# RPC-sequence check (missing image/snapshot parent-chain).  It is source-only
+# (no assembler), so it runs on amd64 hosts in CI and on amd64/aarch64 dev
+# hosts alike; the target_compatible_with keeps it out of the aarch64-only
+# wildcard builds that skip the x86_64 checker suite (the arm64 suite runs the
+# same script via check_translation_test above, where the AArch64 modules are
+# skipped).
 sh_test(
     name = "check_translation_x86_64_test",
     srcs = ["asm_checker_test.sh"],
-    args = ["$(rootpath check-translation.sh)"] + ["$(rootpath :%s)" % p for p in X86_64_ASM_MODULES],
-    data = ["check-translation.sh"] + X86_64_ASM_MODULES + X86_64_ASM_HEADERS,
+    args = ["$(rootpath check-translation.sh)"] + ["$(rootpath :%s)" % p for p in X86_64_ASM_MODULES] + ["$(rootpath //core/controller/c:cc_ctr.c)"],
+    data = ["check-translation.sh"] + X86_64_ASM_MODULES + X86_64_ASM_HEADERS + ["//core/controller/c:cc_ctr.c"],
     target_compatible_with = ["@platforms//cpu:x86_64"],
 )
 

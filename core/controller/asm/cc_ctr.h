@@ -140,4 +140,10 @@
 #define CTR_SPEC_MOUNTS_MAX  8        // cc_ctr_oci_mount records (6 used max)
 #define CTR_PREP_MOUNTS_MAX  8        // == CC_CTR_MAX_MOUNTS (cc_ctr.h)
 
+// The image rootfs chainID buffer (ctr_parent_buf): cc_ctr_resolve_chainid
+// writes the WithNewSnapshot parent here ("sha256:" digest, 71 bytes; "" for
+// a no-layer image).  Mirrors CC_CTR_PARENT_MAX in core/controller/c/
+// cc_ctr.h (the C header is C-only, so this module carries its own copy).
+#define CC_CTR_PARENT_MAX 256
+
 #endif // CC_CTR_H

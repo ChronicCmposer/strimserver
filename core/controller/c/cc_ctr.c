@@ -16,6 +16,7 @@
 #include <google/protobuf/any.pb-c.h>
 #include <google/protobuf/empty.pb-c.h>
 #include <services/containers/v1/containers.pb-c.h>
+#include <services/content/v1/content.pb-c.h>
 #include <services/images/v1/images.pb-c.h>
 #include <services/snapshots/v1/snapshots.pb-c.h>
 #include <services/tasks/v1/tasks.pb-c.h>
@@ -225,6 +226,746 @@ int cc_ctr_get_image(int h, const char *image_ref,
 }
 
 /* =========================================================================
+ * SHA-256 (FIPS 180-4) — self-contained, used to compute the image rootfs
+ * chainID the same way containerd's identity.ChainID does
+ * (github.com/opencontainers/image-spec/identity: digest.FromBytes). No
+ * external crypto dependency; the chainID path needs only sha256.
+ * ========================================================================= */
+
+#define CC_SHA256_BLOCK 64
+
+struct cc_sha256 {
+  uint32_t h[8];
+  uint64_t total;
+  uint32_t buf_fill;
+  uint8_t buf[CC_SHA256_BLOCK];
+};
+
+static const uint32_t cc_sha256_k[64] = {
+    0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu,
+    0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u, 0xd807aa98u, 0x12835b01u,
+    0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u,
+    0xc19bf174u, 0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+    0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau, 0x983e5152u,
+    0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u,
+    0x06ca6351u, 0x14292967u, 0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu,
+    0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+    0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u,
+    0xd6990624u, 0xf40e3585u, 0x106aa070u, 0x19a4c116u, 0x1e376c08u,
+    0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu,
+    0x682e6ff3u, 0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+    0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
+};
+
+static uint32_t cc_sha256_rotr(uint32_t x, unsigned n) {
+  return (x >> n) | (x << (32u - n));
+}
+
+static void cc_sha256_init(struct cc_sha256 *s) {
+  s->h[0] = 0x6a09e667u;
+  s->h[1] = 0xbb67ae85u;
+  s->h[2] = 0x3c6ef372u;
+  s->h[3] = 0xa54ff53au;
+  s->h[4] = 0x510e527fu;
+  s->h[5] = 0x9b05688cu;
+  s->h[6] = 0x1f83d9abu;
+  s->h[7] = 0x5be0cd19u;
+  s->total = 0;
+  s->buf_fill = 0;
+}
+
+static void cc_sha256_block(struct cc_sha256 *s, const uint8_t *p) {
+  uint32_t w[64];
+  uint32_t a, b, c, d, e, f, g, h;
+  uint32_t t1, t2;
+  int i;
+
+  for (i = 0; i < 16; i++)
+    w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) |
+           ((uint32_t)p[i * 4 + 2] << 8) | (uint32_t)p[i * 4 + 3];
+  for (i = 16; i < 64; i++) {
+    uint32_t s0 = cc_sha256_rotr(w[i - 15], 7) ^ cc_sha256_rotr(w[i - 15], 18) ^
+                  (w[i - 15] >> 3);
+    uint32_t s1 = cc_sha256_rotr(w[i - 2], 17) ^ cc_sha256_rotr(w[i - 2], 19) ^
+                  (w[i - 2] >> 10);
+    w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+  }
+  a = s->h[0];
+  b = s->h[1];
+  c = s->h[2];
+  d = s->h[3];
+  e = s->h[4];
+  f = s->h[5];
+  g = s->h[6];
+  h = s->h[7];
+  for (i = 0; i < 64; i++) {
+    uint32_t S1 = cc_sha256_rotr(e, 6) ^ cc_sha256_rotr(e, 11) ^
+                  cc_sha256_rotr(e, 25);
+    uint32_t ch = (e & f) ^ (~e & g);
+    uint32_t S0 = cc_sha256_rotr(a, 2) ^ cc_sha256_rotr(a, 13) ^
+                  cc_sha256_rotr(a, 22);
+    uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+    t1 = h + S1 + ch + cc_sha256_k[i] + w[i];
+    t2 = S0 + maj;
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+  }
+  s->h[0] += a;
+  s->h[1] += b;
+  s->h[2] += c;
+  s->h[3] += d;
+  s->h[4] += e;
+  s->h[5] += f;
+  s->h[6] += g;
+  s->h[7] += h;
+}
+
+static void cc_sha256_update(struct cc_sha256 *s, const void *data,
+                             size_t len) {
+  const uint8_t *p = (const uint8_t *)data;
+
+  s->total += len;
+  while (len > 0) {
+    size_t take = CC_SHA256_BLOCK - s->buf_fill;
+    if (take > len)
+      take = len;
+    memcpy(s->buf + s->buf_fill, p, take);
+    s->buf_fill += (uint32_t)take;
+    p += take;
+    len -= take;
+    if (s->buf_fill == CC_SHA256_BLOCK) {
+      cc_sha256_block(s, s->buf);
+      s->buf_fill = 0;
+    }
+  }
+}
+
+static void cc_sha256_final(struct cc_sha256 *s, uint8_t out[32]) {
+  uint64_t bits = s->total * 8;
+  uint8_t pad = 0x80;
+  uint8_t zero = 0;
+  uint8_t lenb[8];
+  int i;
+
+  cc_sha256_update(s, &pad, 1);
+  while (s->buf_fill != 56)
+    cc_sha256_update(s, &zero, 1);
+  for (i = 0; i < 8; i++)
+    lenb[i] = (uint8_t)(bits >> (56 - i * 8));
+  cc_sha256_update(s, lenb, 8);
+  for (i = 0; i < 8; i++) {
+    out[i * 4] = (uint8_t)(s->h[i] >> 24);
+    out[i * 4 + 1] = (uint8_t)(s->h[i] >> 16);
+    out[i * 4 + 2] = (uint8_t)(s->h[i] >> 8);
+    out[i * 4 + 3] = (uint8_t)(s->h[i]);
+  }
+}
+
+/* =========================================================================
+ * Minimal JSON path extractor — for the two blobs the chainID resolution
+ * reads (the OCI manifest and the image config).  Parses a JSON document
+ * and captures values by dot-separated key path:
+ *     json_path_str(json, len, "config.digest", out, cap)         string
+ *     json_path_int(json, len, "config.size", &out)               integer
+ *     json_path_strs(json, len, "rootfs.diff_ids", out, max, &n)  string array
+ * Returns 0 (found), 1 (not found), or -1 (parse error).  Fail-loud on
+ * malformed JSON: the blobs come from containerd's content store (trusted),
+ * but a truncated or unexpected document must never be misparsed into a
+ * wrong chainID.
+ * ========================================================================= */
+
+#define CC_JSON_PATH_MAX 128
+
+struct json_ctx {
+  const char *s;
+  size_t len;
+  size_t pos;
+  char path[CC_JSON_PATH_MAX]; /* current dot-joined key path */
+  uint32_t path_len;
+  int err;
+  int captured; /* a target value was captured */
+  /* string capture target */
+  const char *tstr;
+  char *out;
+  uint32_t out_cap;
+  /* integer capture target */
+  const char *tint;
+  int64_t *out_int;
+  /* string-array capture target */
+  const char *tarr;
+  char (*out_arr)[CC_CTR_DIGEST_MAX];
+  uint32_t arr_max;
+  uint32_t *arr_n;
+};
+
+static int j_path_set(struct json_ctx *c, const char *key, size_t keylen,
+                      uint32_t parent_len) {
+  size_t need;
+
+  need = (parent_len > 0 ? (size_t)parent_len + 1 : 0) + keylen;
+  if (need + 1 > sizeof(c->path)) {
+    c->err = -1;
+    return -1;
+  }
+  if (parent_len > 0) {
+    c->path[parent_len] = '.';
+    memcpy(c->path + parent_len + 1, key, keylen);
+    c->path_len = parent_len + 1 + (uint32_t)keylen;
+  } else {
+    memcpy(c->path, key, keylen);
+    c->path_len = (uint32_t)keylen;
+  }
+  c->path[c->path_len] = '\0';
+  return 0;
+}
+
+static int j_path_matches(const struct json_ctx *c, const char *target) {
+  return target != NULL && c->path_len == strlen(target) &&
+         memcmp(c->path, target, c->path_len) == 0;
+}
+
+static void j_skip_ws(struct json_ctx *c) {
+  while (c->pos < c->len) {
+    char ch = c->s[c->pos];
+    if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r')
+      break;
+    c->pos++;
+  }
+}
+
+static int j_parse_string(struct json_ctx *c, char *out, uint32_t cap) {
+  uint32_t olen = 0;
+
+  if (c->pos >= c->len || c->s[c->pos] != '"') {
+    c->err = -1;
+    return -1;
+  }
+  c->pos++;
+  while (c->pos < c->len) {
+    unsigned char ch = (unsigned char)c->s[c->pos++];
+    if (ch == '"')
+      break;
+    if (ch == '\\') {
+      if (c->pos >= c->len) {
+        c->err = -1;
+        return -1;
+      }
+      ch = (unsigned char)c->s[c->pos++];
+      switch (ch) {
+        case '"': ch = '"'; break;
+        case '\\': ch = '\\'; break;
+        case '/': ch = '/'; break;
+        case 'b': ch = '\b'; break;
+        case 'f': ch = '\f'; break;
+        case 'n': ch = '\n'; break;
+        case 'r': ch = '\r'; break;
+        case 't': ch = '\t'; break;
+        case 'u': {
+          uint32_t cp = 0;
+          int i;
+          if (c->pos + 4 > c->len) {
+            c->err = -1;
+            return -1;
+          }
+          for (i = 0; i < 4; i++) {
+            char hc = c->s[c->pos++];
+            uint32_t v;
+            if (hc >= '0' && hc <= '9')
+              v = (uint32_t)(hc - '0');
+            else if (hc >= 'a' && hc <= 'f')
+              v = (uint32_t)(hc - 'a' + 10);
+            else if (hc >= 'A' && hc <= 'F')
+              v = (uint32_t)(hc - 'A' + 10);
+            else {
+              c->err = -1;
+              return -1;
+            }
+            cp = (cp << 4) | v;
+          }
+          /* UTF-16 code unit: encode surrogate pairs as two 3-byte UTF-8
+           * sequences (the blobs we read contain no escapes, so this is
+           * best-effort; plain BMP code units encode below). */
+          if (cp >= 0xD800 && cp <= 0xDBFF) {
+            /* lone high surrogate: emit U+FFFD and keep parsing */
+            if (olen + 3 >= cap) {
+              c->err = -1;
+              return -1;
+            }
+            out[olen++] = (char)0xEF;
+            out[olen++] = (char)0xBF;
+            out[olen++] = (char)0xBD;
+          } else if (cp >= 0x800) {
+            if (olen + 3 >= cap) {
+              c->err = -1;
+              return -1;
+            }
+            out[olen++] = (char)(0xE0 | (cp >> 12));
+            out[olen++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+            out[olen++] = (char)(0x80 | (cp & 0x3F));
+          } else if (cp >= 0x80) {
+            if (olen + 2 >= cap) {
+              c->err = -1;
+              return -1;
+            }
+            out[olen++] = (char)(0xC0 | (cp >> 6));
+            out[olen++] = (char)(0x80 | (cp & 0x3F));
+          } else {
+            if (olen + 1 >= cap) {
+              c->err = -1;
+              return -1;
+            }
+            out[olen++] = (char)cp;
+          }
+          continue;
+        }
+        default:
+          c->err = -1;
+          return -1;
+      }
+    }
+    if (olen + 1 >= cap) {
+      c->err = -1;
+      return -1;
+    }
+    out[olen++] = (char)ch;
+  }
+  if (olen + 1 > cap) {
+    c->err = -1;
+    return -1;
+  }
+  out[olen] = '\0';
+  return 0;
+}
+
+static int j_parse_number(struct json_ctx *c, int64_t *out) {
+  int64_t v = 0;
+  int neg = 0;
+
+  if (c->pos < c->len && c->s[c->pos] == '-') {
+    neg = 1;
+    c->pos++;
+  }
+  while (c->pos < c->len && c->s[c->pos] >= '0' && c->s[c->pos] <= '9') {
+    int digit = c->s[c->pos] - '0';
+    if (v > (INT64_MAX - digit) / 10) {
+      c->err = -1;
+      return -1;
+    }
+    v = v * 10 + digit;
+    c->pos++;
+  }
+  *out = neg ? -v : v;
+  return 0;
+}
+
+static int j_parse_value(struct json_ctx *c, uint32_t parent_len);
+
+static int j_parse_object(struct json_ctx *c) {
+  if (c->pos >= c->len || c->s[c->pos] != '{') {
+    c->err = -1;
+    return -1;
+  }
+  c->pos++;
+  j_skip_ws(c);
+  if (c->pos < c->len && c->s[c->pos] == '}')
+    return 0; /* empty object */
+  for (;;) {
+    char key[CC_JSON_PATH_MAX];
+    uint32_t parent = c->path_len;
+
+    j_skip_ws(c);
+    if (j_parse_string(c, key, sizeof(key)) < 0)
+      return -1;
+    j_skip_ws(c);
+    if (c->pos >= c->len || c->s[c->pos] != ':') {
+      c->err = -1;
+      return -1;
+    }
+    c->pos++;
+    if (j_path_set(c, key, strlen(key), parent) < 0)
+      return -1;
+    if (j_parse_value(c, parent) < 0)
+      return -1;
+    /* the value parser restores path_len to parent on its way out */
+    c->path_len = parent;
+    c->path[parent] = '\0';
+    j_skip_ws(c);
+    if (c->pos >= c->len) {
+      c->err = -1;
+      return -1;
+    }
+    if (c->s[c->pos] == ',') {
+      c->pos++;
+      continue;
+    }
+    if (c->s[c->pos] == '}') {
+      c->pos++;
+      return 0;
+    }
+    c->err = -1;
+    return -1;
+  }
+}
+
+static int j_parse_array(struct json_ctx *c, uint32_t parent_len) {
+  int capture = j_path_matches(c, c->tarr);
+
+  if (c->pos >= c->len || c->s[c->pos] != '[') {
+    c->err = -1;
+    return -1;
+  }
+  if (capture)
+    c->captured = 1; /* a matched array is a found target, even if empty */
+  c->pos++;
+  j_skip_ws(c);
+  if (c->pos < c->len && c->s[c->pos] == ']') {
+    c->pos++;
+    return 0; /* empty array */
+  }
+  for (;;) {
+    j_skip_ws(c);
+    if (capture) {
+      /* only string elements are expected in a diff_ids array; capture each
+       * into out_arr and count them. */
+      char elem[CC_CTR_DIGEST_MAX];
+      if (j_parse_string(c, elem, sizeof(elem)) < 0)
+        return -1;
+      if (*c->arr_n >= c->arr_max) {
+        c->err = -1;
+        return -1;
+      }
+      memcpy(c->out_arr[*c->arr_n], elem, strlen(elem) + 1);
+      (*c->arr_n)++;
+    } else {
+      if (j_parse_value(c, parent_len) < 0)
+        return -1;
+      c->path_len = parent_len;
+      c->path[parent_len] = '\0';
+    }
+    j_skip_ws(c);
+    if (c->pos >= c->len) {
+      c->err = -1;
+      return -1;
+    }
+    if (c->s[c->pos] == ',') {
+      c->pos++;
+      continue;
+    }
+    if (c->s[c->pos] == ']') {
+      c->pos++;
+      return 0;
+    }
+    c->err = -1;
+    return -1;
+  }
+}
+
+static int j_parse_value(struct json_ctx *c, uint32_t parent_len) {
+  char ch;
+
+  (void)parent_len;
+  j_skip_ws(c);
+  if (c->pos >= c->len) {
+    c->err = -1;
+    return -1;
+  }
+  ch = c->s[c->pos];
+  if (ch == '{')
+    return j_parse_object(c);
+  if (ch == '[')
+    return j_parse_array(c, c->path_len);
+  if (ch == '"') {
+    char v[CC_JSON_PATH_MAX];
+    if (j_parse_string(c, v, sizeof(v)) < 0)
+      return -1;
+    if (j_path_matches(c, c->tstr)) {
+      if (copy_str(c->out, c->out_cap, v) < 0) {
+        c->err = -1;
+        return -1;
+      }
+      c->captured = 1;
+    }
+    return 0;
+  }
+  if (ch == '-' || (ch >= '0' && ch <= '9')) {
+    int64_t v = 0;
+    if (j_parse_number(c, &v) < 0)
+      return -1;
+    if (j_path_matches(c, c->tint)) {
+      *c->out_int = v;
+      c->captured = 1;
+    }
+    return 0;
+  }
+  /* literals true/false/null — skip them */
+  if (ch == 't' && c->len - c->pos >= 4 && memcmp(c->s + c->pos, "true", 4) == 0) {
+    c->pos += 4;
+    return 0;
+  }
+  if (ch == 'f' && c->len - c->pos >= 5 && memcmp(c->s + c->pos, "false", 5) == 0) {
+    c->pos += 5;
+    return 0;
+  }
+  if (ch == 'n' && c->len - c->pos >= 4 && memcmp(c->s + c->pos, "null", 4) == 0) {
+    c->pos += 4;
+    return 0;
+  }
+  c->err = -1;
+  return -1;
+}
+
+static int json_path_str(const char *json, size_t len, const char *path,
+                         char *out, uint32_t cap) {
+  struct json_ctx c;
+  int rc;
+
+  memset(&c, 0, sizeof(c));
+  c.s = json;
+  c.len = len;
+  c.tstr = path;
+  c.out = out;
+  c.out_cap = cap;
+  rc = j_parse_value(&c, 0);
+  if (c.err != 0 || rc < 0)
+    return -1;
+  return c.captured ? 0 : 1; /* 0 found, 1 not-found */
+}
+
+static int json_path_int(const char *json, size_t len, const char *path,
+                         int64_t *out) {
+  struct json_ctx c;
+  int rc;
+
+  memset(&c, 0, sizeof(c));
+  c.s = json;
+  c.len = len;
+  c.tint = path;
+  c.out_int = out;
+  rc = j_parse_value(&c, 0);
+  if (c.err != 0 || rc < 0)
+    return -1;
+  return c.captured ? 0 : 1; /* 0 found, 1 not-found */
+}
+
+static int json_path_strs(const char *json, size_t len, const char *path,
+                          char (*out)[CC_CTR_DIGEST_MAX], uint32_t max,
+                          uint32_t *n) {
+  struct json_ctx c;
+  int rc;
+
+  *n = 0;
+  memset(&c, 0, sizeof(c));
+  c.s = json;
+  c.len = len;
+  c.tarr = path;
+  c.out_arr = out;
+  c.arr_max = max;
+  c.arr_n = n;
+  rc = j_parse_value(&c, 0);
+  if (c.err != 0 || rc < 0)
+    return -1;
+  return c.captured ? 0 : 1; /* 0 found, 1 not-found */
+}
+
+/* =========================================================================
+ * Content service read (chainID resolution)
+ * ========================================================================= */
+
+/* Read one content blob via the Content/Read server stream.  The Go oracle
+ * (core/content/proxy/content_reader.go ReadAt) sends
+ * ReadContentRequest{digest, offset=0, size=desc.Size}; containerd's
+ * contentserver answers with ReadContentResponse messages chunked by a
+ * 32 KiB pool buffer, so any blob at or below 32 KiB arrives as ONE
+ * message — which is what cc_grpc_unary's single-message reassembler
+ * supports.  The project images' manifest/config blobs are a few KiB, so
+ * this bound is safe; a bigger blob fails loudly (CC_GRPC_ERR_PROTO from
+ * the multi-message path) rather than silently mis-reading. */
+static int ctr_read_content(int h, const char *digest, int64_t size,
+                            uint8_t *out, uint32_t out_cap,
+                            uint32_t *out_len) {
+  Containerd__Services__Content__V1__ReadContentRequest req =
+      CONTAINERD__SERVICES__CONTENT__V1__READ_CONTENT_REQUEST__INIT;
+  uint8_t reqbuf[1024];
+  uint8_t respbuf[CC_CTR_CONTENT_BLOB_MAX + 64];
+  uint32_t resp_len = 0;
+  Containerd__Services__Content__V1__ReadContentResponse *resp;
+  size_t reqlen;
+  int rc;
+
+  if (h <= 0 || digest == NULL || digest[0] == '\0' || out == NULL ||
+      out_cap == 0 || out_len == NULL)
+    return CC_CTR_ERR_BADARG;
+  *out_len = 0;
+  req.digest = (char *)digest;
+  req.offset = 0;
+  req.size = (size > 0) ? size : 0;
+  reqlen =
+      containerd__services__content__v1__read_content_request__get_packed_size(
+          &req);
+  containerd__services__content__v1__read_content_request__pack(&req, reqbuf);
+  rc = cc_grpc_unary(h, "/containerd.services.content.v1.Content/Read", reqbuf,
+                     (uint32_t)reqlen, respbuf, sizeof(respbuf), &resp_len);
+  if (rc != CC_GRPC_STATUS_OK)
+    return rc;
+  resp = containerd__services__content__v1__read_content_response__unpack(
+      NULL, resp_len, respbuf);
+  if (resp == NULL)
+    return CC_CTR_ERR_STATE;
+  if (resp->data.len > out_cap) {
+    containerd__services__content__v1__read_content_response__free_unpacked(
+        resp, NULL);
+    return CC_CTR_ERR_TOOBIG;
+  }
+  memcpy(out, resp->data.data, resp->data.len);
+  *out_len = (uint32_t)resp->data.len;
+  containerd__services__content__v1__read_content_response__free_unpacked(
+      resp, NULL);
+  return CC_GRPC_STATUS_OK;
+}
+
+/* =========================================================================
+ * cc_ctr_resolve_chainid — the WithNewSnapshot parent computation
+ * ========================================================================= */
+
+int cc_ctr_resolve_chainid(int h, const char *image_ref, char *out_parent,
+                           uint32_t parent_cap) {
+  Containerd__Services__Images__V1__GetImageRequest ireq =
+      CONTAINERD__SERVICES__IMAGES__V1__GET_IMAGE_REQUEST__INIT;
+  uint8_t reqbuf[1024];
+  uint8_t respbuf[CC_CTR_RESP_MAX];
+  uint32_t resp_len = 0;
+  Containerd__Services__Images__V1__GetImageResponse *iresp;
+  uint8_t manifest[CC_CTR_CONTENT_BLOB_MAX];
+  uint8_t config[CC_CTR_CONTENT_BLOB_MAX];
+  uint32_t manifest_len = 0;
+  uint32_t config_len = 0;
+  char config_digest[CC_CTR_DIGEST_MAX];
+  int64_t manifest_size = 0;
+  int64_t config_size = 0;
+  char diffids[CC_CTR_MAX_DIFFIDS][CC_CTR_DIGEST_MAX];
+  uint32_t n_diffids = 0;
+  char chain[CC_CTR_DIGEST_MAX];
+  char tmp[CC_CTR_DIGEST_MAX];
+  size_t reqlen;
+  uint32_t i;
+  int rc;
+
+  if (h <= 0 || image_ref == NULL || image_ref[0] == '\0' ||
+      out_parent == NULL || parent_cap == 0)
+    return CC_CTR_ERR_BADARG;
+  if (out_parent != NULL)
+    out_parent[0] = '\0';
+
+  /* 1. Images/Get(image_ref) — the manifest descriptor (Go buildContainer
+   *    :75 f.client.GetImage; withNewSnapshot's image.RootFS walks it). */
+  ireq.name = (char *)image_ref;
+  reqlen =
+      containerd__services__images__v1__get_image_request__get_packed_size(
+          &ireq);
+  containerd__services__images__v1__get_image_request__pack(&ireq, reqbuf);
+  rc = cc_grpc_unary(h, "/containerd.services.images.v1.Images/Get", reqbuf,
+                     (uint32_t)reqlen, respbuf, sizeof(respbuf), &resp_len);
+  if (rc != CC_GRPC_STATUS_OK)
+    return rc;
+  iresp = containerd__services__images__v1__get_image_response__unpack(
+      NULL, resp_len, respbuf);
+  if (iresp == NULL || iresp->image == NULL || iresp->image->target == NULL) {
+    if (iresp != NULL)
+      containerd__services__images__v1__get_image_response__free_unpacked(
+          iresp, NULL);
+    return CC_CTR_ERR_STATE;
+  }
+  if (copy_str(config_digest, sizeof(config_digest),
+               iresp->image->target->digest) < 0) {
+    containerd__services__images__v1__get_image_response__free_unpacked(
+        iresp, NULL);
+    return CC_CTR_ERR_TOOBIG;
+  }
+  manifest_size = iresp->image->target->size;
+  containerd__services__images__v1__get_image_response__free_unpacked(iresp,
+                                                                      NULL);
+
+  /* 2. Content/Read(manifest) — extract the config descriptor
+   *    (core/images/image.go Manifest -> Config).  Only the plain-manifest
+   *    shape is supported: an image index ("manifests" array) is rejected
+   *    loudly — the project images are single-platform manifests. */
+  rc = ctr_read_content(h, config_digest, manifest_size, manifest,
+                        sizeof(manifest), &manifest_len);
+  if (rc != CC_GRPC_STATUS_OK)
+    return rc;
+  if (json_path_str((const char *)manifest, manifest_len, "config.digest",
+                    config_digest, sizeof(config_digest)) != 0 ||
+      config_digest[0] == '\0')
+    return CC_CTR_ERR_STATE;
+  if (json_path_int((const char *)manifest, manifest_len, "config.size",
+                    &config_size) != 0)
+    return CC_CTR_ERR_STATE;
+
+  /* 3. Content/Read(config) — extract rootfs.diff_ids
+   *    (core/images/image.go RootFS). */
+  rc = ctr_read_content(h, config_digest, config_size, config, sizeof(config),
+                        &config_len);
+  if (rc != CC_GRPC_STATUS_OK)
+    return rc;
+  if (json_path_strs((const char *)config, config_len, "rootfs.diff_ids",
+                     diffids, CC_CTR_MAX_DIFFIDS, &n_diffids) != 0)
+    return CC_CTR_ERR_STATE;
+
+  /* 4. chainID = identity.ChainID(diff_ids) (opencontainers/image-spec
+   *    identity.ChainIDs): the recursive digest of
+   *    prevChainID + " " + diffID, starting from diff_ids[0].  A 0-layer
+   *    image yields "" (base Prepare); a 1-layer image yields the diffID
+   *    itself. */
+  if (n_diffids == 0) {
+    if (copy_str(out_parent, parent_cap, "") < 0)
+      return CC_CTR_ERR_TOOBIG;
+    return CC_GRPC_STATUS_OK;
+  }
+  if (copy_str(chain, sizeof(chain), diffids[0]) < 0)
+    return CC_CTR_ERR_TOOBIG;
+  for (i = 1; i < n_diffids; i++) {
+    struct cc_sha256 sh;
+    uint8_t digest[32];
+    static const char hex[] = "0123456789abcdef";
+    size_t clen = strlen(chain);
+    size_t dlen = strlen(diffids[i]);
+    uint32_t j;
+
+    if (clen + 1 + dlen > sizeof(tmp)) {
+      tmp[0] = '\0';
+      return CC_CTR_ERR_TOOBIG;
+    }
+    memcpy(tmp, chain, clen);
+    tmp[clen] = ' ';
+    memcpy(tmp + clen + 1, diffids[i], dlen + 1);
+    cc_sha256_init(&sh);
+    cc_sha256_update(&sh, tmp, clen + 1 + dlen);
+    cc_sha256_final(&sh, digest);
+    if (copy_str(chain, sizeof(chain), "sha256:") < 0)
+      return CC_CTR_ERR_TOOBIG;
+    {
+      size_t off = strlen(chain);
+      for (j = 0; j < 32; j++) {
+        if (off + 2 >= sizeof(chain)) {
+          chain[0] = '\0';
+          return CC_CTR_ERR_TOOBIG;
+        }
+        chain[off++] = hex[digest[j] >> 4];
+        chain[off++] = hex[digest[j] & 0xF];
+      }
+      chain[off] = '\0';
+    }
+  }
+  return copy_str(out_parent, parent_cap, chain);
+}
+
+/* =========================================================================
  * Snapshots (chainID design-around)
  * ========================================================================= */
 
@@ -242,11 +983,15 @@ int cc_ctr_prepare_snapshot(int h, const char *snapshotter, const char *key,
   int rc;
 
   if (h <= 0 || snapshotter == NULL || snapshotter[0] == '\0' ||
-      key == NULL || key[0] == '\0')
+      key == NULL || key[0] == '\0' || parent == NULL)
     return CC_CTR_ERR_BADARG;
   req.snapshotter = (char *)snapshotter;
   req.key = (char *)key;
-  req.parent = (char *)(parent != NULL ? parent : "");
+  /* The parent is passed through verbatim — NEVER defaulted to "": the
+   * container-create path must chain the snapshot onto the image's
+   * chainID (cc_ctr_resolve_chainid); an empty parent yields a bare
+   * rootfs with no image layers (the exec /entrypoint.sh not-found bug). */
+  req.parent = (char *)parent;
   reqlen = containerd__services__snapshots__v1__prepare_snapshot_request__get_packed_size(
       &req);
   containerd__services__snapshots__v1__prepare_snapshot_request__pack(&req,

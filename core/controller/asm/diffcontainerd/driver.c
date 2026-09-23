@@ -1,37 +1,52 @@
 // ============================================================================
 // diffcontainerd/driver.c — freestanding x86-64 driver for the containerd
-// OCI spec-fill differential harness.
+// differential harness.
 //
 // This driver is the ASM side of differential-containerd.sh.  It links the
-// REAL x86-64 cc_ctr.S + cc_util.S objects (the fixed tree versions; the
-// scale-8 fix is A1's) and drives ONLY the mount/spec-fill path:
+// REAL x86-64 cc_ctr.S + cc_util.S objects (the fixed tree versions) and
+// drives BOTH comparison surfaces:
 //
-//     cc_ctr_init(layout, h, stop_timeout)          (sets ctr_state.layout)
-//     cc_ctr_oci_spec_fill(config, kind, spec_out, mounts_out, scratch)
-//         -> ctr_fill_mounts(mounts_out, desc_table, n)
-//            (the crash site: mediamtx mount records from the Layout's
-//             byte-offset descriptor table)
-//         -> ctr_build_cgroups(config, spec, scratch)
+//   A. mount/spec-fill:
+//        cc_ctr_init(layout, h, stop_timeout)          (sets ctr_state.layout)
+//        cc_ctr_oci_spec_fill(config, kind, spec_out, mounts_out, scratch)
+//            -> ctr_fill_mounts(mounts_out, desc_table, n)
+//            -> ctr_build_cgroups(config, spec, scratch)
 //
-// It does NOT call any C-layer RPC (cc_ctr_get_image & friends) — those are
-// stubbed below (they are never reached on this path) so the driver links
-// the cc_ctr.o object without the protobuf/gRPC C layer.
+//   B. snapshot / parent-chain (the B2 surface):
+//        cc_ctr_apply(stage, CC_STATE_RUNNING)
+//            -> ctr_start(config, kind)
+//                1. stop() first                        (no-op: NOT_FOUND)
+//                2. cc_ctr_get_image(image_ref)         (stub, OK)
+//                3. cc_ctr_resolve_chainid(image_ref)   (stub: the image
+//                   rootfs diff_ids -> identity.ChainID — B1's parent)
+//                4. cc_ctr_prepare_snapshot(snapshotter, key, parent, ...)
+//                   (recording stub: captures the asm's actual key + parent)
+//                5. cc_ctr_oci_spec_fill / oci_spec_build (real asm)
+//                6. cc_ctr_create_container(...)        (stub, OK)
+//                7. cc_ctr_create_task / cc_ctr_start_task (stubs, OK)
 //
-// The driver:
-//   1. reads the shared stage config (stages.conf) — the SAME file the Go
-//      oracle reads;
-//   2. builds the Layout struct + env-runtime block + per-stage
-//      ContainerConfigs in memory (byte offsets from cc_layout.inc);
-//   3. for each CTR_KIND_* (mediamtx, normalize, scale-and-egress,
-//      single-stage-egress), calls cc_ctr_oci_spec_fill with the stage's
-//      ContainerConfig and dumps the resulting OCI records in a canonical
-//      byte-comparable format.
+// The driver does NOT link the real C RPC layer (cc_ctr.c / cc_grpc.c); every
+// C-layer function the asm references is stubbed below.  The stubs are not
+// dead weight: they are the observation surface.  cc_ctr_prepare_snapshot
+// RECORDS the (key, parent) the asm actually passes — the exact bytes that
+// decide GREEN (parent == the oracle's ChainID) vs RED (parent == "", the
+// empty-rootfs bug).  cc_ctr_resolve_chainid supplies the image rootfs
+// diff_ids (from stages.conf *_ROOTFS, the REAL image configs) and computes
+// the containerd identity.ChainID so B1's fixed asm receives the correct
+// parent from the C boundary — exactly as the real C layer would.
 //
-// The dump format is the byte-for-byte comparison surface: the Go oracle
-// emits the identical lines.
+// The stop-path lookups (get_container/get_task/kill_task/wait_task/...)
+// report NOT_FOUND so ctr_stop() no-ops (no container exists at start time),
+// mirroring the Go controller's stop-then-start flow.
 //
-// Usage: driver <stages.conf>
-// Exit:  0 on success; non-zero on any parse/fill/dump error.
+// Output: per kind, the canonical spec block (existing) followed by the
+// canonical snapshot block (B2), byte-for-byte comparable with the Go oracle
+// (oracle/oracle.go).  Usage: driver <stages.conf>.  Exit: 0 on success;
+// non-zero on any parse/fill/start/dump error.
+//
+// Build with -DDRIVER_INJECT_EMPTY_PARENT to make cc_ctr_resolve_chainid
+// return "" — the empty-parent bug class — for the harness's RED
+// demonstration (differential-containerd.sh --inject-empty-parent).
 // ============================================================================
 
 #include <stdint.h>
@@ -39,7 +54,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../c/cc_ctr.h"   // struct cc_ctr_oci_spec / cc_ctr_oci_mount
+#include "../../c/cc_ctr.h"   // struct cc_ctr_oci_spec / cc_ctr_oci_mount /
+                              // cc_ctr_resolve_chainid declaration
 
 // ---------------------------------------------------------------------------
 // Constants mirrored from cc_layout.inc (frozen; see the header include).
@@ -63,6 +79,23 @@
 // CTR_SPEC_MOUNTS_MAX, 8; the mediamtx table uses 6, ffmpeg uses 4).
 #define DRIVER_MOUNTS_MAX 8
 
+// Stage struct / state constants (cc_layout.inc)
+#define CC_STATE_RUNNING    0
+#define CC_STATE_STOPPED    1
+#define CC_STATE_COUNT      2
+#define CC_STG_OPS          16
+#define CC_STG_SIZE         40
+
+// gRPC status codes (cc_grpc.h) — the stop path treats NotFound as no-op.
+#define CC_GRPC_STATUS_NOT_FOUND  5
+
+// Rootfs / snapshot capture bounds.
+#define DRIVER_MAX_DIFFIDS   16
+#define DRIVER_DIGEST_MAX    256   // "sha512:" + 128 hex = 131, slack
+#define DRIVER_REF_MAX       128
+#define DRIVER_SNAP_KEY_MAX  128
+#define DRIVER_PARENT_MAX    CC_CTR_PARENT_MAX
+
 // The kind -> CC_ER_* ContainerConfig offset mapping (cc_ctr.S wrappers).
 static const int k_kind_cc_er[CTR_KIND_COUNT] = {
     [CTR_KIND_MEDIAMTX]      = CC_ER_MEDIAMTX,
@@ -79,37 +112,267 @@ static const char *k_kind_name[CTR_KIND_COUNT] = {
 };
 
 // ---------------------------------------------------------------------------
-// The C-layer functions cc_ctr.S references that the spec-fill path NEVER
-// calls.  They exist only so the linker can resolve the object; if any is
-// ever reached the harness must fail loud (it would mean the driver is now
-// exercising a live-RPC path, which needs the real C layer).
+// SHA-256 (FIPS 180-4) — used to compute the image rootfs chainID exactly the
+// way containerd's identity.ChainID (opencontainers/image-spec/identity)
+// does: chain[0] = diff_ids[0]; chain[i] = sha256(chain[i-1] + " " +
+// diff_ids[i]).  The driver emits the chain so the C-side computation is
+// byte-compared with the Go oracle (a bug here shows as a RED layer record).
 // ---------------------------------------------------------------------------
-#define STUB_UNREACHABLE() do { \
-    fprintf(stderr, "driver: UNREACHABLE C-layer stub %s called\n", __func__); \
-    exit(2); \
-} while (0)
+typedef struct {
+    uint32_t h[8];
+    uint64_t nbytes;
+    uint8_t block[64];
+    size_t block_len;
+} sha256_ctx;
 
+static const uint32_t sha256_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+};
+
+static uint32_t sha256_rotr(uint32_t x, unsigned n) {
+    return (x >> n) | (x << (32u - n));
+}
+
+static void sha256_init(sha256_ctx *c) {
+    c->h[0] = 0x6a09e667; c->h[1] = 0xbb67ae85; c->h[2] = 0x3c6ef372;
+    c->h[3] = 0xa54ff53a; c->h[4] = 0x510e527f; c->h[5] = 0x9b05688c;
+    c->h[6] = 0x1f83d9ab; c->h[7] = 0x5be0cd19;
+    c->nbytes = 0; c->block_len = 0;
+}
+
+static void sha256_process_block(sha256_ctx *c, const uint8_t *p) {
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++) {
+        w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) |
+               ((uint32_t)p[i * 4 + 2] << 8) | (uint32_t)p[i * 4 + 3];
+    }
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = sha256_rotr(w[i - 15], 7) ^ sha256_rotr(w[i - 15], 18) ^
+                      (w[i - 15] >> 3);
+        uint32_t s1 = sha256_rotr(w[i - 2], 17) ^ sha256_rotr(w[i - 2], 19) ^
+                      (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = c->h[0], b = c->h[1], cc = c->h[2], d = c->h[3];
+    uint32_t e = c->h[4], f = c->h[5], g = c->h[6], h = c->h[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t s1 = sha256_rotr(e, 6) ^ sha256_rotr(e, 11) ^
+                      sha256_rotr(e, 25);
+        uint32_t ch = (e & f) ^ (~e & g);
+        uint32_t t1 = h + s1 + ch + sha256_k[i] + w[i];
+        uint32_t s0 = sha256_rotr(a, 2) ^ sha256_rotr(a, 13) ^
+                      sha256_rotr(a, 22);
+        uint32_t maj = (a & b) ^ (a & cc) ^ (b & cc);
+        uint32_t t2 = s0 + maj;
+        h = g; g = f; f = e; e = d + t1;
+        d = cc; cc = b; b = a; a = t1 + t2;
+    }
+    c->h[0] += a; c->h[1] += b; c->h[2] += cc; c->h[3] += d;
+    c->h[4] += e; c->h[5] += f; c->h[6] += g; c->h[7] += h;
+}
+
+static void sha256_update(sha256_ctx *c, const void *data, size_t len) {
+    const uint8_t *p = data;
+    c->nbytes += len;
+    while (len > 0) {
+        size_t take = 64 - c->block_len;
+        if (take > len) take = len;
+        memcpy(c->block + c->block_len, p, take);
+        c->block_len += take;
+        p += take;
+        len -= take;
+        if (c->block_len == 64) {
+            sha256_process_block(c, c->block);
+            c->block_len = 0;
+        }
+    }
+}
+
+static void sha256_final(sha256_ctx *c, uint8_t out[32]) {
+    uint64_t bits = c->nbytes * 8;
+    uint8_t pad = 0x80;
+    sha256_update(c, &pad, 1);
+    uint8_t zero = 0;
+    while (c->block_len != 56)
+        sha256_update(c, &zero, 1);
+    uint8_t lenbuf[8];
+    for (int i = 0; i < 8; i++)
+        lenbuf[i] = (uint8_t)(bits >> (56 - 8 * i));
+    sha256_update(c, lenbuf, 8);
+    for (int i = 0; i < 8; i++) {
+        out[i * 4]     = (uint8_t)(c->h[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(c->h[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(c->h[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)(c->h[i]);
+    }
+}
+
+// chainid_next: out = "sha256:" + hex(sha256(prev + " " + diff)).
+static void chainid_next(const char *prev, const char *diff, char *out,
+                         size_t out_cap) {
+    sha256_ctx c;
+    sha256_init(&c);
+    sha256_update(&c, prev, strlen(prev));
+    sha256_update(&c, " ", 1);
+    sha256_update(&c, diff, strlen(diff));
+    uint8_t d[32];
+    sha256_final(&c, d);
+    static const char hexdig[] = "0123456789abcdef";
+    if (out_cap < 72) return;  // 7 + 64 hex + NUL; guarded by caller caps
+    memcpy(out, "sha256:", 7);
+    for (int i = 0; i < 32; i++) {
+        out[7 + i * 2]     = hexdig[d[i] >> 4];
+        out[7 + i * 2 + 1] = hexdig[d[i] & 15];
+    }
+    out[71] = '\0';
+}
+
+// ---------------------------------------------------------------------------
+// Image rootfs state (the shared input the oracle and the driver both derive
+// the parent chain from).  Parsed from stages.conf *_ROOTFS.
+// ---------------------------------------------------------------------------
+struct stage_rootfs {
+    char image_ref[DRIVER_REF_MAX];
+    char diffs[DRIVER_MAX_DIFFIDS][DRIVER_DIGEST_MAX];
+    char chain[DRIVER_MAX_DIFFIDS][DRIVER_DIGEST_MAX];
+    int n_diffs;
+};
+
+static struct stage_rootfs g_rootfs[CTR_KIND_COUNT];
+
+#ifndef DRIVER_INJECT_EMPTY_PARENT
+static const struct stage_rootfs *rootfs_by_ref(const char *image_ref) {
+    if (!image_ref) return NULL;
+    for (int k = 0; k < CTR_KIND_COUNT; k++)
+        if (strcmp(g_rootfs[k].image_ref, image_ref) == 0)
+            return &g_rootfs[k];
+    return NULL;
+}
+#endif
+
+// str_copy_bounded: copy src into dst, always NUL-terminated, never overflow.
+static void str_copy_bounded(char *dst, size_t dst_cap, const char *src) {
+    if (!src || dst_cap == 0) {
+        if (dst_cap > 0) dst[0] = '\0';
+        return;
+    }
+    size_t n = strlen(src);
+    if (n >= dst_cap) n = dst_cap - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+static int parse_rootfs(const char *val, struct stage_rootfs *rf,
+                        const char *image_ref) {
+    str_copy_bounded(rf->image_ref, sizeof(rf->image_ref), image_ref);
+    rf->n_diffs = 0;
+    const char *p = val;
+    while (*p) {
+        if (rf->n_diffs >= DRIVER_MAX_DIFFIDS) {
+            fprintf(stderr, "driver: too many diff_ids in %s\n", image_ref);
+            return -1;
+        }
+        const char *comma = strchr(p, ',');
+        size_t n = comma ? (size_t)(comma - p) : strlen(p);
+        if (n == 0 || n >= DRIVER_DIGEST_MAX) {
+            fprintf(stderr, "driver: bad diff_id in %s\n", image_ref);
+            return -1;
+        }
+        memcpy(rf->diffs[rf->n_diffs], p, n);
+        rf->diffs[rf->n_diffs][n] = '\0';
+        rf->n_diffs++;
+        p = comma ? comma + 1 : p + n;
+    }
+    for (int i = 0; i < rf->n_diffs; i++) {
+        if (i == 0) {
+            str_copy_bounded(rf->chain[0], DRIVER_DIGEST_MAX, rf->diffs[0]);
+        } else {
+            chainid_next(rf->chain[i - 1], rf->diffs[i], rf->chain[i],
+                         DRIVER_DIGEST_MAX);
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot capture (the observation surface of the B2 comparison).
+// ---------------------------------------------------------------------------
+struct snapshot_capture {
+    int captured;                       // cc_ctr_prepare_snapshot was called
+    char key[DRIVER_SNAP_KEY_MAX];      // the asm's Prepare key arg
+    char parent[DRIVER_PARENT_MAX];     // the asm's Prepare parent arg
+};
+
+static struct snapshot_capture g_snap;
+
+// ---------------------------------------------------------------------------
+// The C-layer functions cc_ctr.S references.  The start/stop path now reaches
+// every one of them (unlike the old spec-fill-only driver), so each stub
+// either records (prepare/get) or returns the status the asm's sequence
+// expects (get_container = NotFound -> stop() no-ops; task ops = OK).
+// ---------------------------------------------------------------------------
 int cc_ctr_get_image(int h, const char *image_ref,
                      char *out_name, uint32_t name_cap,
                      char *out_digest, uint32_t digest_cap) {
-    (void)h; (void)image_ref; (void)out_name; (void)name_cap;
-    (void)out_digest; (void)digest_cap;
-    STUB_UNREACHABLE();
+    (void)h; (void)image_ref;
+    if (out_name && name_cap > 0) out_name[0] = '\0';
+    if (out_digest && digest_cap > 0) out_digest[0] = '\0';
+    return 0;   // Images/Get OK; the rootfs travels via resolve_chainid
+}
+
+int cc_ctr_resolve_chainid(int h, const char *image_ref,
+                           char *out_parent, uint32_t parent_cap) {
+    (void)h;
+    if (!out_parent || parent_cap == 0)
+        return CC_CTR_ERR_BADARG;
+#ifdef DRIVER_INJECT_EMPTY_PARENT
+    // The empty-parent bug class: the container snapshot is prepared with NO
+    // parent, so the rootfs contains no image layers (exec /entrypoint.sh
+    // not-found).  The oracle's snapshot_parent is the real ChainID, so the
+    // differential turns RED — proving the harness catches this bug.
+    (void)image_ref;
+    out_parent[0] = '\0';
+    return 0;
+#else
+    const struct stage_rootfs *rf = rootfs_by_ref(image_ref);
+    if (!rf || rf->n_diffs <= 0) {
+        out_parent[0] = '\0';
+        return 0;                       // unknown/no-layer image: base parent
+    }
+    const char *parent = rf->chain[rf->n_diffs - 1];
+    if (strlen(parent) + 1 > parent_cap)
+        return CC_CTR_ERR_TOOBIG;
+    memcpy(out_parent, parent, strlen(parent) + 1);
+    return 0;
+#endif
 }
 
 int cc_ctr_prepare_snapshot(int h, const char *snapshotter, const char *key,
                             const char *parent,
                             struct cc_ctr_mount *out_mounts,
                             uint32_t mounts_cap, uint32_t *out_n_mounts) {
-    (void)h; (void)snapshotter; (void)key; (void)parent;
-    (void)out_mounts; (void)mounts_cap; (void)out_n_mounts;
-    STUB_UNREACHABLE();
+    (void)h; (void)snapshotter; (void)out_mounts; (void)mounts_cap;
+    g_snap.captured = 1;
+    str_copy_bounded(g_snap.key, sizeof(g_snap.key), key);
+    str_copy_bounded(g_snap.parent, sizeof(g_snap.parent), parent);
+    if (out_n_mounts) *out_n_mounts = 0;
+    return 0;                           // Snapshots/Prepare OK, no mounts
 }
 
 int cc_ctr_oci_spec_build(const struct cc_ctr_oci_spec *spec, char *out,
                           uint32_t cap) {
     (void)spec; (void)out; (void)cap;
-    STUB_UNREACHABLE();
+    return 0;                           // empty spec JSON; len 0 (>= 0 = OK)
 }
 
 int cc_ctr_create_container(int h, const char *id, const char *image_ref,
@@ -118,7 +381,7 @@ int cc_ctr_create_container(int h, const char *id, const char *image_ref,
                             uint32_t oci_len) {
     (void)h; (void)id; (void)image_ref; (void)snapshotter;
     (void)snapshot_key; (void)runtime; (void)oci_spec_json; (void)oci_len;
-    STUB_UNREACHABLE();
+    return 0;                           // Containers/Create OK
 }
 
 int cc_ctr_create_task(int h, const char *container_id,
@@ -126,52 +389,53 @@ int cc_ctr_create_task(int h, const char *container_id,
                        uint32_t *out_pid, const char *nvidia_bin) {
     (void)h; (void)container_id; (void)stdout_uri; (void)stderr_uri;
     (void)out_pid; (void)nvidia_bin;
-    STUB_UNREACHABLE();
+    return 0;                           // Tasks/Create OK
 }
 
 int cc_ctr_start_task(int h, const char *container_id, uint32_t *out_pid) {
     (void)h; (void)container_id; (void)out_pid;
-    STUB_UNREACHABLE();
+    return 0;                           // Tasks/Start OK
 }
 
 int cc_ctr_get_container(int h, const char *id,
                          char *out_snapshotter, uint32_t ss_cap,
                          char *out_snapshot_key, uint32_t sk_cap) {
-    (void)h; (void)id; (void)out_snapshotter; (void)ss_cap;
-    (void)out_snapshot_key; (void)sk_cap;
-    STUB_UNREACHABLE();
+    (void)h; (void)id;
+    if (out_snapshotter && ss_cap > 0) out_snapshotter[0] = '\0';
+    if (out_snapshot_key && sk_cap > 0) out_snapshot_key[0] = '\0';
+    return CC_GRPC_STATUS_NOT_FOUND;    // stop() no-op: no container yet
 }
 
 int cc_ctr_get_task(int h, const char *container_id, uint32_t *out_pid) {
     (void)h; (void)container_id; (void)out_pid;
-    STUB_UNREACHABLE();
+    return CC_GRPC_STATUS_NOT_FOUND;
 }
 
 int cc_ctr_kill_task(int h, const char *container_id, uint32_t signal) {
     (void)h; (void)container_id; (void)signal;
-    STUB_UNREACHABLE();
+    return CC_GRPC_STATUS_NOT_FOUND;
 }
 
 int cc_ctr_wait_task(int h, const char *container_id,
                      uint32_t *out_exit_status) {
     (void)h; (void)container_id; (void)out_exit_status;
-    STUB_UNREACHABLE();
+    return CC_GRPC_STATUS_NOT_FOUND;
 }
 
 int cc_ctr_delete_task(int h, const char *container_id,
                        uint32_t *out_exit_status) {
     (void)h; (void)container_id; (void)out_exit_status;
-    STUB_UNREACHABLE();
+    return CC_GRPC_STATUS_NOT_FOUND;
 }
 
 int cc_ctr_delete_container(int h, const char *id) {
     (void)h; (void)id;
-    STUB_UNREACHABLE();
+    return CC_GRPC_STATUS_NOT_FOUND;
 }
 
 int cc_grpc_set_unary_timeout(int h, uint64_t timeout_ns) {
     (void)h; (void)timeout_ns;
-    STUB_UNREACHABLE();
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +446,41 @@ extern int cc_ctr_oci_spec_fill(const void *config, int kind,
                                 struct cc_ctr_oci_spec *spec_out,
                                 struct cc_ctr_oci_mount *mounts_out,
                                 char *cgroups_scratch);
+extern int cc_ctr_apply(void *stage, int target);
+extern int cc_ctr_mediamtx_start(void *stage);
+extern int cc_ctr_mediamtx_stop(void *stage);
+extern int cc_ctr_normalize_start(void *stage);
+extern int cc_ctr_normalize_stop(void *stage);
+extern int cc_ctr_scale_egress_start(void *stage);
+extern int cc_ctr_scale_egress_stop(void *stage);
+extern int cc_ctr_single_egress_start(void *stage);
+extern int cc_ctr_single_egress_stop(void *stage);
+
+typedef int (*driver_op_fn)(void *stage);
+
+static const driver_op_fn k_kind_start[CTR_KIND_COUNT] = {
+    [CTR_KIND_MEDIAMTX]      = cc_ctr_mediamtx_start,
+    [CTR_KIND_NORMALIZE]     = cc_ctr_normalize_start,
+    [CTR_KIND_SCALE_EGRESS]  = cc_ctr_scale_egress_start,
+    [CTR_KIND_SINGLE_EGRESS] = cc_ctr_single_egress_start,
+};
+
+static const driver_op_fn k_kind_stop[CTR_KIND_COUNT] = {
+    [CTR_KIND_MEDIAMTX]      = cc_ctr_mediamtx_stop,
+    [CTR_KIND_NORMALIZE]     = cc_ctr_normalize_stop,
+    [CTR_KIND_SCALE_EGRESS]  = cc_ctr_scale_egress_stop,
+    [CTR_KIND_SINGLE_EGRESS] = cc_ctr_single_egress_stop,
+};
+
+// Minimal Stage (cc_layout.inc): status {desired, actual}, ops TABLE POINTER
+// at CC_STG_OPS (the table holds one fn ptr per CC_STATE_* index),
+// inflightSince timespec at +24.
+struct driver_stage {
+    uint64_t status_desired;            // +0  (CC_STG_STATUS)
+    uint64_t status_actual;             // +8
+    driver_op_fn *ops_table;            // +16 (CC_STG_OPS): pointer
+    uint64_t inflight[2];               // +24 (CC_STG_INFLIGHT_SINCE)
+};                                      // 40 bytes == CC_STG_SIZE
 
 // ---------------------------------------------------------------------------
 // Tiny stages.conf parser (KEY=VALUE lines, '#' comments).
@@ -281,6 +580,22 @@ static void dump_spec(const char *kind, const struct cc_ctr_oci_spec *spec,
     }
 }
 
+// dump_snapshot: the B2 record block.  snapshot_key/snapshot_parent come from
+// what the ASM actually passed to cc_ctr_prepare_snapshot (the observation
+// surface); n_layers + the per-layer diff/key/parent records come from the
+// driver's C chainID computation over the supplied image rootfs (a
+// byte-for-byte cross-check of the C chain math vs the Go oracle).
+static void dump_snapshot(const struct stage_rootfs *rf) {
+    printf("snapshot_key=%s\n", g_snap.captured ? g_snap.key : "");
+    printf("snapshot_parent=%s\n", g_snap.captured ? g_snap.parent : "");
+    printf("n_layers=%d\n", rf->n_diffs);
+    for (int i = 0; i < rf->n_diffs; i++) {
+        printf("layer[%d].diff=%s\n", i, rf->diffs[i]);
+        printf("layer[%d].key=%s\n", i, rf->chain[i]);
+        printf("layer[%d].parent=%s\n", i, i > 0 ? rf->chain[i - 1] : "");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -332,6 +647,22 @@ int main(int argc, char **argv) {
         }
     }
 
+    // Image rootfs diff_ids (stages.conf *_ROOTFS) — the shared B2 input.
+    const char *stage_rootfs_keys[CTR_KIND_COUNT] = {
+        "MEDIAMTX_ROOTFS", "NORMALIZE_ROOTFS", "SCALE_ROOTFS", "SINGLE_ROOTFS",
+    };
+    for (int k = 0; k < CTR_KIND_COUNT; k++) {
+        const char *image_ref = conf_get(entries, n_entries, stage_keys[k][2]);
+        const char *rootfs_val = conf_get(entries, n_entries,
+                                          stage_rootfs_keys[k]);
+        if (!image_ref || !rootfs_val) {
+            fprintf(stderr, "driver: missing %s\n", stage_rootfs_keys[k]);
+            return 1;
+        }
+        if (parse_rootfs(rootfs_val, &g_rootfs[k], image_ref) != 0)
+            return 1;
+    }
+
     // ---- Build the Layout + env-runtime block in one heap region. -------
     // [0, CC_LAY_SIZE)             = Layout: 8 string pointers (CC_LAY_*)
     // [CC_LAY_SIZE, +CC_ER_SIZE)   = env-runtime block: namespace ptr at
@@ -371,6 +702,7 @@ int main(int argc, char **argv) {
             const char *v = conf_get(entries, n_entries, stage_keys[k][f]);
             if (!v) {
                 fprintf(stderr, "driver: missing %s\n", stage_keys[k][f]);
+                free(block);
                 return 1;
             }
             *(const char **)(cfg + (size_t)f * 8) = v;
@@ -380,10 +712,11 @@ int main(int argc, char **argv) {
     // ---- Module state: ctr_state.layout must be set before spec fill. ----
     if (cc_ctr_init(block, 0, 0) != 0) {
         fprintf(stderr, "driver: cc_ctr_init failed\n");
+        free(block);
         return 1;
     }
 
-    // ---- Spec-fill per kind (the comparison surface). --------------------
+    // ---- Per kind: spec-fill records + snapshot records. -----------------
     struct cc_ctr_oci_spec spec;
     struct cc_ctr_oci_mount mounts[DRIVER_MOUNTS_MAX];
     char scratch[1024];
@@ -393,14 +726,42 @@ int main(int argc, char **argv) {
         memset(mounts, 0, sizeof(mounts));
         memset(scratch, 0, sizeof(scratch));
 
+        // Pass A: the mount/spec-fill surface (existing).
         const void *config = er + k_kind_cc_er[kind];
         int rc = cc_ctr_oci_spec_fill(config, kind, &spec, mounts, scratch);
         if (rc != 0) {
             fprintf(stderr, "driver: cc_ctr_oci_spec_fill(kind=%d) -> %d\n",
                     kind, rc);
+            free(block);
             return 1;
         }
         dump_spec(k_kind_name[kind], &spec, mounts);
+
+        // Pass B: drive the start op (Images/Get -> resolve chainID ->
+        // Snapshots/Prepare -> Mounts) and dump the snapshot records.  The
+        // recording prepare stub captures what the asm ACTUALLY passed.
+        driver_op_fn ops_table[CC_STATE_COUNT];
+        ops_table[CC_STATE_RUNNING] = k_kind_start[kind];
+        ops_table[CC_STATE_STOPPED] = k_kind_stop[kind];
+        struct driver_stage stage;
+        memset(&stage, 0, sizeof(stage));
+        stage.ops_table = ops_table;
+        memset(&g_snap, 0, sizeof(g_snap));
+
+        int src = cc_ctr_apply(&stage, CC_STATE_RUNNING);
+        if (src != 0) {
+            fprintf(stderr, "driver: cc_ctr_apply(kind=%d) -> %d\n", kind, src);
+            free(block);
+            return 1;
+        }
+        if (!g_snap.captured) {
+            fprintf(stderr,
+                    "driver: asm did not call Snapshots/Prepare (kind=%d) — "
+                    "the start path diverged\n", kind);
+            free(block);
+            return 1;
+        }
+        dump_snapshot(&g_rootfs[kind]);
     }
 
     free(block);

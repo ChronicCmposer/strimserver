@@ -28,6 +28,24 @@
 //	mount[0].options[0]=rbind
 //	mount[0].options[1]=ro
 //	...
+//	# --- snapshot / parent-chain records (the B2 surface) ---
+//	snapshot_key=mediamtx-snapshot
+//	snapshot_parent=sha256:<ChainID(all diff_ids)>
+//	n_layers=2
+//	layer[0].diff=sha256:...
+//	layer[0].key=sha256:...
+//	layer[0].parent=
+//	layer[1].diff=sha256:...
+//	layer[1].key=sha256:<ChainID(diff[0],diff[1])>
+//	layer[1].parent=sha256:...
+//
+// The snapshot block replicates containerd.WithNewSnapshot(snapshotID, image)
+// (client/container_opts.go:252-284): the container snapshot key is the
+// stage's snapshot id, and its Prepare parent is
+// identity.ChainID(image.RootFS().diff_ids) — the LAST layer's chainID after
+// the image unpack (core/unpack/unpacker.go:369-372).  The per-layer
+// diff -> key -> parent records are the unpacked chain the parent is derived
+// from.  stages.conf *_ROOTFS carries the REAL image rootfs diff_ids.
 //
 // WHAT IT REPLICATES (the exact Go controller construction, see
 // core/controller/container_factory.go + the containerd oci package):
@@ -63,6 +81,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -180,6 +200,72 @@ func dumpSpec(kind string, mounts []specsMount, env, args []string,
 	}
 }
 
+// ---- snapshot / parent-chain records (the B2 comparison surface) ----------
+//
+// This block is the byte-for-byte reference for the asm's snapshot-prepare
+// path (cc_ctr_apply -> ctr_start -> Snapshots/Prepare).  It replicates what
+// containerd's containerd.WithNewSnapshot(snapshotID, image) computes in
+// client/container_opts.go:252-284 (withNewSnapshot):
+//
+//	parent = identity.ChainID(image.RootFS(ctx).diff_ids).String()
+//	         (opencontainers/image-spec/identity/chainid.go)
+//
+// and what the image unpacker commits for each layer in
+// core/unpack/unpacker.go:369-372:
+//
+//	chainIDs = identity.ChainIDs(diffIDs)   // per-layer prefix chain IDs
+//	layer i is committed under key chainIDs[i] with parent chainIDs[i-1]
+//	("" for the base layer), so the container snapshot's parent is the LAST
+//	layer's chainID.
+//
+// chainIDs computes identity.ChainIDs exactly: chain[0] = diff_ids[0],
+// chain[i] = sha256(chain[i-1] + " " + diff_ids[i]) — the recursive digest
+// over the string forms (always "sha256:<hex>" for OCI diff_ids).
+func chainIDs(diffs []string) []string {
+	chain := make([]string, len(diffs))
+	for i, d := range diffs {
+		if i == 0 {
+			chain[i] = d
+			continue
+		}
+		sum := sha256.Sum256([]byte(chain[i-1] + " " + d))
+		chain[i] = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	return chain
+}
+
+// splitRootfs parses a stages.conf *_ROOTFS value ("diff1,diff2,...") into
+// the ordered, bottom-up diff_id list the image config's rootfs.diff_ids
+// carries.
+func splitRootfs(v string) []string {
+	var out []string
+	for _, d := range strings.Split(v, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func dumpSnapshot(snapshotKey string, chain, diffs []string) {
+	parent := ""
+	if len(chain) > 0 {
+		parent = chain[len(chain)-1] // ChainID(all diff_ids)
+	}
+	fmt.Printf("snapshot_key=%s\n", snapshotKey)
+	fmt.Printf("snapshot_parent=%s\n", parent)
+	fmt.Printf("n_layers=%d\n", len(diffs))
+	for i, d := range diffs {
+		fmt.Printf("layer[%d].diff=%s\n", i, d)
+		fmt.Printf("layer[%d].key=%s\n", i, chain[i])
+		layerParent := ""
+		if i > 0 {
+			layerParent = chain[i-1]
+		}
+		fmt.Printf("layer[%d].parent=%s\n", i, layerParent)
+	}
+}
+
 // ---- main ------------------------------------------------------------------
 func main() {
 	if len(os.Args) != 2 {
@@ -214,6 +300,18 @@ func main() {
 		{Kind: "normalize", CC: normalize, StageName: "normalize"},
 		{Kind: "scale-and-egress", CC: scale, StageName: "scale_and_egress"},
 		{Kind: "single-stage-egress", CC: single, StageName: "single_stage_egress"},
+	}
+
+	// Image rootfs diff_ids (OCI image config rootfs.diff_ids, bottom-up) —
+	// the ground truth the oracle derives the parent chain from.  The values
+	// are the REAL rootfs of the rules_oci images (bazel-bin/core
+	// mediamtx_image/ffmpeg_image configs); mediamtx and the ffmpeg stages
+	// share per-image roots.
+	rootfsByKind := map[string][]string{
+		"mediamtx":            splitRootfs(conf["MEDIAMTX_ROOTFS"]),
+		"normalize":           splitRootfs(conf["NORMALIZE_ROOTFS"]),
+		"scale-and-egress":    splitRootfs(conf["SCALE_ROOTFS"]),
+		"single-stage-egress": splitRootfs(conf["SINGLE_ROOTFS"]),
 	}
 
 	for _, st := range stages {
@@ -254,6 +352,11 @@ func main() {
 		hostNetwork := 1                 // oci.WithHostNamespace(NetworkNamespace)
 
 		dumpSpec(st.Kind, oci, env, args, cwd, 0, 0, 0, caps, hostNetwork, cgroups)
+
+		// Snapshot / parent-chain records: the WithNewSnapshot reference the
+		// asm's Snapshots/Prepare must match byte-for-byte.
+		diffs := rootfsByKind[st.Kind]
+		dumpSnapshot(st.CC.Snapshot, chainIDs(diffs), diffs)
 	}
 }
 
@@ -292,6 +395,7 @@ func loadConf(path string) (map[string]string, error) {
 		"NORMALIZE_ID", "NORMALIZE_SNAPSHOT", "NORMALIZE_IMAGE", "NORMALIZE_LOG",
 		"SCALE_ID", "SCALE_SNAPSHOT", "SCALE_IMAGE", "SCALE_LOG",
 		"SINGLE_ID", "SINGLE_SNAPSHOT", "SINGLE_IMAGE", "SINGLE_LOG",
+		"MEDIAMTX_ROOTFS", "NORMALIZE_ROOTFS", "SCALE_ROOTFS", "SINGLE_ROOTFS",
 	}
 	for _, k := range required {
 		if _, ok := conf[k]; !ok || conf[k] == "" {
