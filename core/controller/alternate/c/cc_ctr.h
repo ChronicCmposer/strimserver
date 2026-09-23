@@ -5,7 +5,7 @@
  * it builds containerd gRPC requests with the vendored protobuf-c codecs
  * (//third_party/containerd-api:codecs), calls the h2c/gRPC client
  * (cc_grpc, Phase 3b) for the unary RPCs, and parses the responses. The
- * orchestration/state-machine half (`core/controller/asm/cc_ctr.S`) calls
+ * orchestration/state-machine half (`core/controller/alternate/asm/cc_ctr.S`) calls
  * these helpers; it owns the RPC *sequence* (the create→start→kill→delete
  * lifecycle) and the chainID threading.
  *

@@ -15,7 +15,7 @@
 //  4.6): the WIRE LOGIC half of the serving stack — the handlers that
 //  serialize the /status JSON, parse and route the /event and /control
 //  bodies, run reconcile, and the per-client listener trampolines the state
-//  module invokes.  The C layer (core/controller/c/cc_http.c) owns ALL
+//  module invokes.  The C layer (core/controller/alternate/c/cc_http.c) owns ALL
 //  libwebsockets calls and invokes the exported functions below through the
 //  handler pointers passed at cc_http_init.  cc_state.S owns the state
 //  machine; cc_json.S owns JSON; this module owns neither.

@@ -15,7 +15,7 @@
 //
 //  This module is Phase 4.4b: the OP ORCHESTRATION half of the `cc_ctr`
 //  module — the x86-64 translation of the AArch64 cc_ctr.S.  The C
-//  operation layer (core/controller/c/cc_ctr.c, Phase 4.4a) owns the
+//  operation layer (core/controller/alternate/c/cc_ctr.c, Phase 4.4a) owns the
 //  protocol/encoding; this module owns the SEQUENCES: given a stage's
 //  target state, run the correct start/stop sequence by calling the C
 //  helpers in the order the Go controller does.  The reconcile loop that

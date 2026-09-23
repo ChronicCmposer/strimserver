@@ -250,3 +250,4 @@ Plan: [`plans/stream-mode-round-2.md`](../../plans/stream-mode-round-2.md).
 - 2026-09-15: session 2026-09-15T19:27:04-0400 → 2026-09-16T03:04:01-0400; 0 dropout marks; logs in `/Users/connor/stream-logs/2026-09-15`; see `timeline.md` there
 - 2026-09-16: session 2026-09-16T13:29:09-0400 → 2026-09-16T20:00:25-0400; 0 dropout marks; logs in `/Users/connor/stream-logs/2026-09-16`; see `timeline.md` there
 - 2026-09-16-2121: session 2026-09-16T21:21:31-0400 → 2026-09-17T01:01:04-0400; 0 dropout marks; logs in `/Users/connor/stream-logs/2026-09-16-2121`; see `timeline.md` there
+- 2026-09-22: session 2026-09-22T23:34:53-0400 → 2026-09-23T02:23:44-0400; 0 marks (none heard: NOT recorded); logs in `/Users/connor/stream-logs/2026-09-22`; see `timeline.md` there

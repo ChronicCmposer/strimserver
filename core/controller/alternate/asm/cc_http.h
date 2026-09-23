@@ -9,7 +9,7 @@
 //  The CC_* layout ids and offsets come from cc_layout.inc; this header adds
 //  only what THIS module needs.
 //
-//  The C-layer contract this module calls is core/controller/c/cc_http.h —
+//  The C-layer contract this module calls is core/controller/alternate/c/cc_http.h —
 //  the thin libwebsockets wrapper that owns the sockets, the HTTP parsing,
 //  and the ws framing.  This module owns the WIRE LOGIC: the handlers that
 //  serialize status JSON, parse and route /event and /control bodies,
@@ -39,7 +39,7 @@
 #define CC_HTTP_H
 
 // ----------------------------------------------------------------------------
-// Handler result codes (shared with core/controller/c/cc_http.h).
+// Handler result codes (shared with core/controller/alternate/c/cc_http.h).
 // ----------------------------------------------------------------------------
 #define CC_HTTP_ERR_BADJSON  (-100) // parse failed: 400 "bad json: <err>"
 //  (-100 is outside the CC_STATE_ERR_* range -1..-10, so the C layer's 400-vs-500

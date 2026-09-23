@@ -16,12 +16,13 @@ cutover — read it before any arm64 launch.
 | CPU ISA | x86_64 | arm64, armv8.2-a (Neoverse N1) |
 | GPU / gencode | T4 `sm_75` (L4 `sm_89` on g6) | T4G `sm_75` — same gencode as T4 |
 | AMI | Pinned x86_64 AL2023 NVIDIA DLAMI (`DEFAULT_AMI_ID`, us-east-2) | arm64 AL2023 NVIDIA DLAMI via the SSM float `.../arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id` |
-| Controller in image | Go controller (the oracle), pure-Go static `linux/amd64` | Statically-linked aarch64 assembly controller (`//core/controller:controller_asm`) |
+| Controller in image | Go controller (the oracle), pure-Go static `linux/amd64` | Go controller (the oracle), pure-Go static `linux/arm64`; the alternate asm build (`//core/controller/alternate/asm:controller_asm`) is explicit/manual |
 
 The controller image is platform-selected in `core/controller/BUILD.bazel`:
-amd64 ships the Go binary, arm64 ships the assembly controller (all seven
-`cc_*.S` modules plus the vendored C protocol layer, linked static so it needs
-no loader/libs on a scratch image). Both land at `/strimserver-controller`.
+both amd64 and arm64 ship the pure-Go controller binary (static, so it needs
+no loader/libs on a scratch image), landing at `/strimserver-controller`.
+The alternate assembly controller (`//core/controller/alternate/asm:controller_asm`)
+is an explicit/manual build — it is no longer bundled in the arm64 image.
 
 The deployment bundle is per-architecture: `--platforms` (or the arm64
 platform transition) selects the controller binary, the image architectures,
@@ -59,12 +60,13 @@ Verify the assembly controller against the Go oracle byte-for-byte — on an
 aarch64 host with a host `go` toolchain on PATH:
 
 ```sh
-core/controller/asm/differential.sh
+core/controller/alternate/asm/differential.sh
 ```
 
-It builds the Go oracle, builds `controller_asm` for arm64, and diffs
-`-print-env-example`, `-print-ts-types`, and `-check-env` (stdout, stderr, exit
-codes). `DIFFERENTIAL: GREEN` means asm == Go.
+It builds the Go oracle, then builds the alternate assembly controller
+(`//core/controller/alternate/asm:controller_asm`, explicit/manual — only on
+request) for arm64, and diffs `-print-env-example`, `-print-ts-types`, and
+`-check-env` (stdout, stderr, exit codes). `DIFFERENTIAL: GREEN` means asm == Go.
 
 ## 3. Infrastructure (CloudFormation)
 
@@ -256,7 +258,7 @@ task attached to the GPU via CDI.
 
 ```sh
 bazel test //core/controller:image_smoke_test --platforms=//tools/bazel:linux_arm64
-bazel test //core/controller/asm:phase5_checkers --platforms=//tools/bazel:linux_arm64
+bazel test //core/controller/alternate/asm:phase5_checkers --platforms=//tools/bazel:linux_arm64
 ```
 
 `phase5_checkers` (check-isa + check-clobbers) is arm64-native and gates the

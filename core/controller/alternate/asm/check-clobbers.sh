@@ -43,7 +43,7 @@
 #       line numbers refer to the EXPANDED stream, not the raw file. Review
 #       macro bodies by hand either way. If preprocessing needs an include
 #       dir, pass -I (the modules include cc_platform.h/cc_layout.inc; the
-#       gate passes -I core/controller/asm).
+#       gate passes -I core/controller/alternate/asm).
 #     * Write-detection classifies mnemonics by family: loads write the GPR
 #       operand(s) before the first '['; stores write nothing; swp/ld<op>
 #       atomics write the second operand (Rt); casp writes the first two
@@ -85,8 +85,8 @@
 #
 # EXAMPLES
 #   ./check-clobbers.sh cc_http.S
-#   ./check-clobbers.sh -I core/controller/asm core/controller/asm/cc_*.S
-#   ./check-clobbers.sh -I core/controller/asm cc_json.S
+#   ./check-clobbers.sh -I core/controller/alternate/asm core/controller/alternate/asm/cc_*.S
+#   ./check-clobbers.sh -I core/controller/alternate/asm cc_json.S
 #
 set -euo pipefail
 

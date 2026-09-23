@@ -2,7 +2,7 @@
  * cc_grpc.h — hand-written HTTP/2 (h2c) + gRPC client for containerd.
  *
  * Phase 3b of the ARM controller rewrite. This is the C protocol layer that
- * the assembly controller (core/controller/asm/) drives for all containerd
+ * the assembly controller (core/controller/alternate/asm/) drives for all containerd
  * gRPC work: unary RPCs and the long-lived Events/Subscribe server stream.
  *
  * Protocol envelope (verified against containerd's grpc-go server):

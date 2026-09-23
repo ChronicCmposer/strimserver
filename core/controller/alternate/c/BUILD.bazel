@@ -11,24 +11,25 @@
 # third platform arm64-only, matching the pre-amd64-port behavior.
 #
 # Targets:
-#   //core/controller/c:cc_grpc         the client library
-#   //core/controller/c:cc_grpc_test    standalone test executable: HPACK /
-#                                       HTTP2 self-tests always; the live
-#                                       containerd block (Version, List,
-#                                       Subscribe) runs only when a daemon
-#                                       socket is reachable, else SKIPPED.
+#   //core/controller/alternate/c:cc_grpc          the client library
+#   //core/controller/alternate/c:cc_grpc_test     standalone test executable: HPACK /
+#                                                  HTTP2 self-tests always; the live
+#                                                  containerd block (Version, List,
+#                                                  Subscribe) runs only when a daemon
+#                                                  socket is reachable, else SKIPPED.
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
-# The translation checker (//core/controller/asm:check-translation.sh, class D
+# The translation checker (//core/controller/alternate/asm:check-translation.sh, class D
 # RPC-sequence scan) reads cc_ctr.c source directly, so the raw file must be
-# referenceable cross-package from the asm package's sh_test data/args.
+# referenceable cross-package from the alternate/asm package's sh_test data/args.
 exports_files(["cc_ctr.c"])
 
 cc_library(
     name = "cc_grpc",
+    tags = ["manual"],
     srcs = [
         "cc_grpc.c",
         "cc_grpc_huff.inc",
@@ -49,6 +50,7 @@ cc_library(
 
 cc_test(
     name = "cc_grpc_test",
+    tags = ["manual"],
     srcs = ["cc_grpc_test.c"],
     copts = [
         "-std=gnu11",
@@ -69,6 +71,7 @@ cc_test(
 # ---------------------------------------------------------------------------
 cc_library(
     name = "cc_ctr",
+    tags = ["manual"],
     srcs = ["cc_ctr.c"],
     hdrs = ["cc_ctr.h"],
     copts = [
@@ -89,6 +92,7 @@ cc_library(
 
 cc_test(
     name = "cc_ctr_test",
+    tags = ["manual"],
     srcs = ["cc_ctr_test.c"],
     copts = [
         "-std=gnu11",
@@ -106,11 +110,12 @@ cc_test(
 # ---------------------------------------------------------------------------
 # Phase 4.6: cc_http — the HTTP/1.1 + websocket serving layer (thin C wrapper
 # over the vendored libwebsockets v5.0.0 server-only static lib; the asm
-# module core/controller/asm/cc_http.S owns the wire logic and is linked into
+# module core/controller/alternate/asm/cc_http.S owns the wire logic and is linked into
 # the cc_binary at 4.8). The static lib requires -lm -ldl -lpthread.
 # ---------------------------------------------------------------------------
 cc_library(
     name = "cc_http",
+    tags = ["manual"],
     srcs = ["cc_http.c"],
     hdrs = ["cc_http.h"],
     copts = [

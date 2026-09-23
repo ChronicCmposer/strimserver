@@ -57,7 +57,7 @@
 #     non-x86_64 host.
 #
 # USAGE
-#   core/controller/asm/differential-containerd.sh [--arch amd64] [--qemu]
+#   core/controller/alternate/asm/differential-containerd.sh [--arch amd64] [--qemu]
 #                                                 [--bin PATH] [--sysroot PATH]
 #   --arch    amd64 only (the containerd driver is the x86-64 port).
 #   --qemu    run the amd64 driver under qemu-x86_64 -cpu max (auto-on for
@@ -79,7 +79,7 @@
 #             makes the default run GREEN.
 #   --real-resolver  ALSO build and run the REAL C-layer chainID resolver
 #             differential: a standalone driver (diffcontainerd/
-#             resolver_driver.c) links the REAL shipped core/controller/c/
+#             resolver_driver.c) links the REAL shipped core/controller/alternate/c/
 #             cc_ctr.c (cc_ctr_resolve_chainid + its self-contained SHA-256,
 #             JSON path extractor, and Images/Get + Content/Read request
 #             framing — the ~750 lines the v1.0.23 review flagged as never
@@ -145,7 +145,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/diffcontainerd.XXXXXX")"
 trap 'rm -rf "$OUT"' EXIT
 
-STAGES="$ROOT/core/controller/asm/diffcontainerd/stages.conf"
+STAGES="$ROOT/core/controller/alternate/asm/diffcontainerd/stages.conf"
 [ -f "$STAGES" ] || { echo "ERROR: missing stage config $STAGES" >&2; exit 1; }
 
 # --- qemu runner (amd64 driver only; the oracle always runs natively) ------
@@ -174,7 +174,7 @@ run_asm() { # $1 = driver binary
 # The oracle lives in its own oracle/ subdir (the diffcontainerd/ parent also
 # holds driver.c; a mixed C+Go package would break `go build ./...`).
 ORACLE="$OUT/oracle"
-( cd "$ROOT/core/controller/asm/diffcontainerd/oracle" && go build -o "$ORACLE" oracle.go )
+( cd "$ROOT/core/controller/alternate/asm/diffcontainerd/oracle" && go build -o "$ORACLE" oracle.go )
 [ -x "$ORACLE" ] || { echo "ERROR: go build produced no oracle at $ORACLE" >&2; exit 1; }
 
 # --- 2. Build the x86-64 driver -------------------------------------------
@@ -209,7 +209,7 @@ else
   [ -x "$CLANG" ] || { echo "ERROR: $CLANG not found" >&2; exit 1; }
   [ -x "$LLD" ] || { echo "ERROR: $LLD not found" >&2; exit 1; }
 
-  ASM_INC="-I $ROOT/core/controller/asm -I $ROOT/core/controller/asm/x86_64"
+  ASM_INC="-I $ROOT/core/controller/alternate/asm -I $ROOT/core/controller/alternate/asm/x86_64"
   ISA="-march=x86-64-v4 -mno-avx512f -mno-avx512vl -mno-avx512bw -mno-avx512dq -mno-avx512cd"
   CROSS="--target=x86_64-linux-gnu -B/usr/bin -no-canonical-prefixes \
          -isystem $SYSROOT/include -isystem $SYSROOT/lib/gcc/x86_64-linux-gnu/14/include \
@@ -217,17 +217,17 @@ else
 
   # The REAL cc_ctr.S + cc_util.S (fixed tree objects; cc_util provides
   # cc_cat_cstr which ctr_build_cgroups/ctr_build_uri call).
-  CTR_SRC="$ROOT/core/controller/asm/x86_64/cc_ctr.S"
-  UTIL_SRC="$ROOT/core/controller/asm/x86_64/cc_util.S"
+  CTR_SRC="$ROOT/core/controller/alternate/asm/x86_64/cc_ctr.S"
+  UTIL_SRC="$ROOT/core/controller/alternate/asm/x86_64/cc_util.S"
 
   build_driver() { # $1 = cc_ctr.S source, $2 = out driver path, $3 = extra driver CFLAGS
     local ctr_src="$1" out_driver="$2" extra_cflags="$3"
     $CLANG -c -x assembler-with-cpp $CROSS $ISA $ASM_INC "$ctr_src" -o "$OUT/cc_ctr.o"
     $CLANG -c -x assembler-with-cpp $CROSS $ISA $ASM_INC "$UTIL_SRC" -o "$OUT/cc_util.o"
     $CLANG -c $CROSS $ISA -std=gnu11 -Wall -Wextra -Werror $extra_cflags \
-        -I "$ROOT/core/controller/asm/diffcontainerd" \
-        -I "$ROOT/core/controller/c" \
-        "$ROOT/core/controller/asm/diffcontainerd/driver.c" -o "$OUT/driver.o"
+        -I "$ROOT/core/controller/alternate/asm/diffcontainerd" \
+        -I "$ROOT/core/controller/alternate/c" \
+        "$ROOT/core/controller/alternate/asm/diffcontainerd/driver.c" -o "$OUT/driver.o"
     $CLANG $CROSS -fuse-ld=lld --ld-path="$LLD" -no-canonical-prefixes \
         -L "$SYSROOT/lib" -L "$SYSROOT/lib/gcc/x86_64-linux-gnu/14" \
         -Wl,--build-id=md5 --rtlib=libgcc -static \
@@ -262,7 +262,7 @@ else
   DRIVER="$OUT/driver"
 
   # --- 2b. --real-resolver: build the REAL C-layer chainID resolver driver.
-  # Links the REAL shipped core/controller/c/cc_ctr.c (the resolver + its
+  # Links the REAL shipped core/controller/alternate/c/cc_ctr.c (the resolver + its
   # static helpers are retained via --gc-sections) + the vendored containerd
   # API codecs (third_party/containerd-api/codecgen) + the vendored
   # protobuf-c runtime, driven by diffcontainerd/resolver_driver.c whose
@@ -321,15 +321,15 @@ else
     # drag in the other service codecs.
     $CLANG -c $CROSS $ISA -std=gnu11 -Wall -Wextra -Werror \
         -ffunction-sections -fdata-sections \
-        -I "$ROOT/core/controller/c" $PBC_INC \
-        "$ROOT/core/controller/c/cc_ctr.c" -o "$OUT/cc_ctr_real.o"
+        -I "$ROOT/core/controller/alternate/c" $PBC_INC \
+        "$ROOT/core/controller/alternate/c/cc_ctr.c" -o "$OUT/cc_ctr_real.o"
 
     # The resolver driver (test-only; MUST build -Wall -Wextra -Werror).
     $CLANG -c $CROSS $ISA -std=gnu11 -Wall -Wextra -Werror \
         -ffunction-sections -fdata-sections \
-        -I "$ROOT/core/controller/asm/diffcontainerd" \
-        -I "$ROOT/core/controller/c" $PBC_INC \
-        "$ROOT/core/controller/asm/diffcontainerd/resolver_driver.c" \
+        -I "$ROOT/core/controller/alternate/asm/diffcontainerd" \
+        -I "$ROOT/core/controller/alternate/c" $PBC_INC \
+        "$ROOT/core/controller/alternate/asm/diffcontainerd/resolver_driver.c" \
         -o "$OUT/resolver_driver.o"
 
     $CLANG $CROSS -fuse-ld=lld --ld-path="$LLD" -no-canonical-prefixes \

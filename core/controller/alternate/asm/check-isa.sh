@@ -69,9 +69,9 @@
 #
 # EXAMPLES
 #   ./check-isa.sh cc_http.S
-#   ./check-isa.sh -I core/controller/asm core/controller/asm/cc_*.S
-#   ASM_INCLUDES=core/controller/asm ./check-isa.sh cc_json.S
-#   ./check-isa.sh --strict-blacklist-update core/controller/asm
+#   ./check-isa.sh -I core/controller/alternate/asm core/controller/alternate/asm/cc_*.S
+#   ASM_INCLUDES=core/controller/alternate/asm ./check-isa.sh cc_json.S
+#   ./check-isa.sh --strict-blacklist-update core/controller/alternate/asm
 #
 set -euo pipefail
 

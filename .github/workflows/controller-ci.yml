@@ -5,6 +5,11 @@
 # assembles the full deployment bundle (`//:package`) after bootstrapping
 # core/strimserver.env from the example, mirroring `make prepare`.
 #
+# NOTE: the alternate assembly controller (core/controller/alternate/asm +
+# alternate/c) is a MANUAL build — its targets are not matched by the
+# //core/controller:all or //:package wildcards below. It is intentionally
+# absent from default CI; build it explicitly when needed.
+#
 # The pinned ffmpeg artifact has its own weekly reproducibility canary
 # (.github/workflows/ffmpeg-reproducibility.yml); this workflow covers
 # the normal test/build path on every pull request.

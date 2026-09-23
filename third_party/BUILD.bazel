@@ -1,6 +1,6 @@
 # Phase 3a: vendored C infrastructure for the ARM controller rewrite.
 #
-# The assembly controller (core/controller/asm/) drives this C layer for
+# The assembly controller (core/controller/alternate/asm/) drives this C layer for
 # protocol work. Everything here is arm64-only (the controller rewrite is
 # ARM-only; the existing amd64 Go controller never links the C layer), so:
 #   - `bazel build //third_party/...` with --platforms=linux_arm64 genuinely

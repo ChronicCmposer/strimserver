@@ -19,7 +19,7 @@ of content digests we compute.
 
 ## The contract (what cc_ctr.S must do)
 
-### RPCs the assembly uses (all via the cc_grpc client, `core/controller/c/`)
+### RPCs the assembly uses (all via the cc_grpc client, `core/controller/alternate/c/`)
 
 | Purpose | Method path | Messages (raw protobuf, caller-encoded with the `.pb-c` codecs) |
 |---|---|---|

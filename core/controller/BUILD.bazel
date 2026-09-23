@@ -40,15 +40,17 @@ go_library(
     ],
 )
 
-# Built as a pure-Go static linux/amd64 binary: pure=on matches the old
+# Built as a pure-Go static linux binary: pure=on matches the old
 # CGO_ENABLED=0 (verified: no `import "C"` and no os/user anywhere in this
 # package); -trimpath is a rules_go default; the old -ldflags='-s -w' becomes
-# gc_linkopts below.
+# gc_linkopts below. No explicit goos/goarch: rules_go derives both from the
+# target platform, so an amd64 target produces a linux/amd64 binary and an
+# arm64 target produces a linux/arm64 binary. (rules_go's go_binary macro
+# rejects a select() in goarch, and goarch must be set if goos is set, so the
+# derivation must be implicit.)
 go_binary(
     name = "strimserver-controller",
     embed = [":controller_lib"],
-    goarch = "amd64",
-    goos = "linux",
     gc_linkopts = [
         "-s",
         "-w",
@@ -197,11 +199,33 @@ pkg_files(
     prefix = "/bin",
 )
 
+# The aarch64 loader's ELF interpreter path is /lib/ld-linux-aarch64.so.1 (there
+# is no /lib64 on aarch64; the amd64 loader lives at /lib64/ld-linux-x86-64.so.2,
+# matching the amd64 bin/sh's interpreter). :controller_ld_linux keeps the amd64
+# output basename on both arches (byte-identical amd64 image), so the loader is
+# placed per-arch at the exact interpreter path the dash bin/sh requests:
+#  - amd64: /lib64/ld-linux-x86-64.so.2 (via :controller_lib64, unchanged)
+#  - arm64: /lib/ld-linux-aarch64.so.1 (via :controller_arm64_loader_interp,
+#    added to the tar only on the is_arm64_target select branch, mirroring
+#    //core:ffmpeg_arm64_loader_interp)
+# :controller_lib64 is emptied on arm64 so the image does NOT ship the
+# amd64-basename loader at /lib64/ld-linux-x86-64.so.2 carrying aarch64 content.
 pkg_files(
     name = "controller_lib64",
-    srcs = [":controller_ld_linux"],
+    srcs = select({
+        "//tools/bazel:is_amd64_target": [":controller_ld_linux"],
+        "//tools/bazel:is_arm64_target": [],
+    }),
     attributes = pkg_attributes(mode = "0755"),
     prefix = "/lib64",
+)
+
+pkg_files(
+    name = "controller_arm64_loader_interp",
+    srcs = [":controller_ld_linux"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/lib",
+    renames = {":controller_ld_linux": "ld-linux-aarch64.so.1"},
 )
 
 pkg_files(
@@ -215,20 +239,20 @@ pkg_files(
 )
 
 # The image controller is platform-selected (same pattern as
-# //core:mediamtx_dist_bin): amd64 ships the statically-linked pure-Go
-# controller (//core/controller:strimserver-controller — pure = "on",
-# linux/amd64, so it needs no loader/libs in the FROM-scratch image), arm64
-# ships the statically-linked assembly controller
-# (//core/controller:controller_asm, Phase 4.8). Both land at the same image
-# path /strimserver-controller. Each branch's binary is single-arch (the Go
-# target is hardcoded linux/amd64; controller_asm is
-# target_compatible_with aarch64), so the unselected select branch is never
-# analyzed.
+# //core:mediamtx_dist_bin): BOTH amd64 and arm64 ship the statically-linked
+# pure-Go controller (//core/controller:strimserver-controller — pure = "on",
+# so it needs no loader/libs in the FROM-scratch image). The binary's GOARCH
+# follows the target platform (amd64 target → amd64 binary, arm64 target →
+# arm64 binary). Both land at the same image path /strimserver-controller.
+# The assembly controller lives in the manual alternate packages
+# //core/controller/alternate/asm:controller_asm (aarch64) and
+# //core/controller/alternate/asm:controller_asm_x86_64, built only on
+# explicit request — never as part of the image.
 filegroup(
     name = "controller_bin_src",
     srcs = select({
         "//tools/bazel:is_amd64_target": [":strimserver-controller"],
-        "//tools/bazel:is_arm64_target": [":controller_asm"],
+        "//tools/bazel:is_arm64_target": [":strimserver-controller"],
     }),
 )
 
@@ -255,7 +279,10 @@ pkg_tar(
         ":controller_entrypoint",
         ":controller_lib64",
         ":controller_libs",
-    ],
+    ] + select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": [":controller_arm64_loader_interp"],
+    }),
 )
 
 oci_image(
@@ -290,203 +317,4 @@ filegroup(
     srcs = [":controller_image_tarball"],
     output_group = "tarball",
     visibility = ["//visibility:public"],
-)
-
-# =============================================================================
-# Phase 4.8: controller_asm — the AArch64 assembly controller binary.
-#
-# All seven asm modules (cc_util/cc_env/cc_json/cc_ctr/cc_state/cc_http/
-# cc_main .S) plus the vendored C protocol layer (cc_grpc/cc_ctr/cc_http)
-# link into one binary. cc_main.S exports `main` as a one-instruction tail
-# call to cc_main_entry, so the standard crt0 entry works unchanged.
-# Cross-language linkage is plain extern symbols; no registration is needed.
-#
-# -Werror policy: the C files are proven clean under -Wall -Wextra -Werror,
-# so the cc_binary keeps it. The .S files are compiled by the toolchain's
-# assembler-with-cpp and assembler warnings are toolchain-sensitive (a
-# different host gcc could emit one), so -Werror stays OFF the asm
-# cc_library; -Wall -Wextra still surfaces anything, and the real asm gates
-# are check-isa.sh / check-clobbers.sh.
-# =============================================================================
-
-cc_library(
-    name = "controller_asm_lib",
-    srcs = [
-        "//core/controller/asm:cc_util.S",
-        "//core/controller/asm:cc_env.S",
-        "//core/controller/asm:cc_json.S",
-        "//core/controller/asm:cc_ctr.S",
-        "//core/controller/asm:cc_state.S",
-        "//core/controller/asm:cc_http.S",
-        "//core/controller/asm:cc_main.S",
-    ],
-    hdrs = [
-        "//core/controller/asm:cc_platform.h",
-        "//core/controller/asm:cc_layout.inc",
-        "//core/controller/asm:cc_env.h",
-        "//core/controller/asm:cc_json.h",
-        "//core/controller/asm:cc_ctr.h",
-        "//core/controller/asm:cc_state.h",
-        "//core/controller/asm:cc_http.h",
-        "//core/controller/asm:cc_main.h",
-    ],
-    copts = [
-        "-Wall",
-        "-Wextra",
-    ],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
-)
-
-cc_binary(
-    name = "controller_asm",
-    # core/controller/c is its own Bazel package, so its sources are
-    # referenced by label. cc_binary has no hdrs attribute; the C headers
-    # and the Huffman include are declared in srcs as non-compiled inputs
-    # (same-dir quote includes resolve regardless, this just makes the
-    # dependency explicit).
-    srcs = [
-        "//core/controller/c:cc_grpc.c",
-        "//core/controller/c:cc_ctr.c",
-        "//core/controller/c:cc_http.c",
-        "//core/controller/c:cc_grpc.h",
-        "//core/controller/c:cc_ctr.h",
-        "//core/controller/c:cc_http.h",
-        "//core/controller/c:cc_grpc_huff.inc",
-    ],
-    copts = [
-        "-std=gnu11",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-    ],
-    # Static link: the controller image is FROM scratch and ships a
-    # statically-linked Go controller, so the asm controller must also need
-    # no loader/libs at runtime (avoids the known arm64 loader-basename gap).
-    # The host toolchain has libc.a/libm.a/libpthread.a/libdl.a (glibc static
-    # archives), so -static links clean; ldd reports "not a dynamic
-    # executable".
-    linkopts = [
-        "-lm",
-        "-ldl",
-        "-lpthread",
-        "-static",
-    ],
-    target_compatible_with = ["@platforms//cpu:aarch64"],
-    deps = [
-        ":controller_asm_lib",
-        "//third_party/protobuf-c:runtime",
-        "//third_party/containerd-api:codecs",
-        "//third_party/libwebsockets:libwebsockets",
-    ],
-)
-
-# =============================================================================
-# Phase 5.2: controller_asm_x86_64 — the x86-64-v4 assembly controller binary.
-#
-# Mirror of controller_asm (Phase 4.8) for the x86-64-v4 port
-# (core/controller/asm/x86_64/): the same seven-module shape, the same
-# vendored C protocol layer, the same third_party deps.  ISA floor
-# x86-64-v4 with the AVX-512 features the floor would otherwise imply
-# explicitly disabled (the cap is AVX2 — no zmm/k/AMX — target
-# g4dn.xlarge), SysV ABI.  The C protocol layer (core/controller/c) is
-# arch-neutral; the third_party C deps are already dual-arch (amd64 has no
-# compatibility constraint).
-#
-# -Werror policy mirrors the AArch64 controller_asm: -Werror stays ON the C
-# files (proven clean under -Wall -Wextra -Werror) and OFF the .S files
-# (assembler warnings are toolchain-sensitive; the real asm gates are
-# check-isa-x86_64.sh / check-clobbers-x86_64.sh).
-#
-# All seven x86_64 modules have landed and the run-path differential is GREEN
-# byte-for-byte vs the AArch64 reference on every function it exercises
-# (env_fail_invalid/env_fail_missing, main_build_layout, http_is_null,
-# http_badjson_lit, http_str_value; http_badjson_msg runs to completion with
-# two documented out-of-contract classifier divergences that intentionally
-# match the AArch64 original — see the http_badjson_msg header in
-# core/controller/asm/x86_64/cc_http.S). Gate 3 is satisfied for the
-# run-path modules, so hard rule 9 no longer gates the binary or its
-# aggregate library: both are live (no tags = ["manual"]). The per-module
-# checker tests in //core/controller/asm:phase5_checkers_x86_64 remain fully
-# active.  The controller image select() above no longer ships the x86-64 asm
-# controller for amd64 — that branch now carries the pure-Go
-# :strimserver-controller — so controller_asm_x86_64 stays live only as the
-# amd64 target of the differential harness
-# (core/controller/asm/differential.sh); the arm64 image keeps shipping the
-# AArch64 asm controller.
-# =============================================================================
-
-cc_library(
-    name = "controller_asm_lib_x86_64",
-    srcs = [
-        "//core/controller/asm:x86_64/cc_util.S",
-        "//core/controller/asm:x86_64/cc_env.S",
-        "//core/controller/asm:x86_64/cc_json.S",
-        "//core/controller/asm:x86_64/cc_ctr.S",
-        "//core/controller/asm:x86_64/cc_state.S",
-        "//core/controller/asm:x86_64/cc_http.S",
-        "//core/controller/asm:x86_64/cc_main.S",
-    ],
-    hdrs = [
-        "//core/controller/asm:x86_64/cc_platform_x86_64.h",
-        "//core/controller/asm:cc_layout.inc",
-        "//core/controller/asm:cc_env.h",
-        "//core/controller/asm:cc_json.h",
-        "//core/controller/asm:cc_ctr.h",
-        "//core/controller/asm:cc_state.h",
-        "//core/controller/asm:cc_http.h",
-        "//core/controller/asm:cc_main.h",
-    ],
-    copts = [
-        "-Wall",
-        "-Wextra",
-        # ISA floor x86-64-v4 with the AVX-512 feature set the floor implies
-        # explicitly disabled (the cap is AVX2 — no zmm/k/AMX). This library
-        # compiles the seven .S modules directly, so the floor/cap must gate
-        # the asm compilation here (x86 gas accepts everything by default) —
-        # mirroring X86_64_ASM_COPTS in //core/controller/asm.
-        "-march=x86-64-v4",
-        "-mno-avx512f",
-        "-mno-avx512vl",
-        "-mno-avx512bw",
-        "-mno-avx512dq",
-        "-mno-avx512cd",
-    ],
-    target_compatible_with = ["@platforms//cpu:x86_64"],
-)
-
-cc_binary(
-    name = "controller_asm_x86_64",
-    srcs = [
-        "//core/controller/c:cc_grpc.c",
-        "//core/controller/c:cc_ctr.c",
-        "//core/controller/c:cc_http.c",
-        "//core/controller/c:cc_grpc.h",
-        "//core/controller/c:cc_ctr.h",
-        "//core/controller/c:cc_http.h",
-        "//core/controller/c:cc_grpc_huff.inc",
-    ],
-    # C-only copts: srcs are just the C protocol layer (arch-neutral). The ISA
-    # floor/cap (-march=x86-64-v4 -mno-avx512*) lives on the asm compilation
-    # itself — controller_asm_lib_x86_64 above, which compiles the .S modules.
-    copts = [
-        "-std=gnu11",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-    ],
-    # Static link: same rationale as controller_asm — the controller image
-    # is FROM scratch, so the binary needs no loader/libs at runtime.
-    linkopts = [
-        "-lm",
-        "-ldl",
-        "-lpthread",
-        "-static",
-    ],
-    target_compatible_with = ["@platforms//cpu:x86_64"],
-    deps = [
-        ":controller_asm_lib_x86_64",
-        "//third_party/protobuf-c:runtime",
-        "//third_party/containerd-api:codecs",
-        "//third_party/libwebsockets:libwebsockets",
-    ],
 )

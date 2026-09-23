@@ -87,8 +87,8 @@
 #
 # EXAMPLES
 #   ./check-isa-x86_64.sh x86_64/cc_http.S
-#   ./check-isa-x86_64.sh -I core/controller/asm/x86_64 core/controller/asm/x86_64
-#   ASM_INCLUDES=core/controller/asm/x86_64 ./check-isa-x86_64.sh cc_json.S
+#   ./check-isa-x86_64.sh -I core/controller/alternate/asm/x86_64 core/controller/alternate/asm/x86_64
+#   ASM_INCLUDES=core/controller/alternate/asm/x86_64 ./check-isa-x86_64.sh cc_json.S
 #   ./check-isa-x86_64.sh --strict-blacklist-update x86_64
 #
 set -euo pipefail

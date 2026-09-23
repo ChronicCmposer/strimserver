@@ -2,7 +2,7 @@
  * cc_grpc.c — hand-written HTTP/2 (h2c) + gRPC client for containerd.
  *
  * Phase 3b of the ARM controller rewrite. The assembly controller
- * (core/controller/asm/) drives this fixed-arity C API for all containerd
+ * (core/controller/alternate/asm/) drives this fixed-arity C API for all containerd
  * gRPC protocol work. See cc_grpc.h for the API contract and the protocol
  * envelope this file implements.
  *

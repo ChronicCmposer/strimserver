@@ -16,7 +16,7 @@
 //  See the cc_main.S header comment for the full behavior map.
 //
 //  FROZEN 4.6 cc_http CONTRACT — AUTHORITATIVE (the real Phase 4.6 module now
-//  exists: core/controller/asm/cc_http.S + core/controller/c/cc_http.h).
+//  exists: core/controller/alternate/asm/cc_http.S + core/controller/alternate/c/cc_http.h).
 //  DIFF from the phase-plan sketch: cc_http_init takes THREE args — the
 //  controller pointer alone cannot reach the env block, so the caller passes
 //  the parsed WEBSOCKET_WRITE_TIMEOUT (cc_http.S:81-91):
@@ -54,7 +54,7 @@
 #define CC_TM_YEAR      20
 
 // ----------------------------------------------------------------------------
-// cc_grpc_poll event codes (mirrors core/controller/c/cc_grpc.h:97-105 — the
+// cc_grpc_poll event codes (mirrors core/controller/alternate/c/cc_grpc.h:97-105 — the
 // frozen C-layer contract; the assembly tests these values).
 // ----------------------------------------------------------------------------
 #define CC_GRPC_EV_NONE       0   // timeout, no progress

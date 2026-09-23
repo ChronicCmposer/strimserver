@@ -1,4 +1,4 @@
-# Assembly Authoring Playbook — `core/controller/asm/`
+# Assembly Authoring Playbook — `core/controller/alternate/asm/`
 
 > **Read this file before writing, reviewing, or modifying any assembly in
 > this directory.** It is the contract for every `cc_*.S` module, for the
@@ -157,8 +157,8 @@ review always applies. Run them after every edit to a `cc_*.S` module.
 ### `check-isa.sh` — ISA compliance (Graviton2 parity)
 
 ```sh
-./check-isa.sh core/controller/asm/cc_*.S        # files or a directory
-./check-isa.sh -I core/controller/asm cc_http.S  # add include dirs
+./check-isa.sh core/controller/alternate/asm/cc_*.S        # files or a directory
+./check-isa.sh -I core/controller/alternate/asm cc_http.S  # add include dirs
 ```
 
 What it does: (1) rejects any `.arch` above `armv8.2-a` and any
@@ -183,8 +183,8 @@ mnemonics (st2g/stz2g/cosp) are skipped, not failed.
 ### `check-clobbers.sh` — clobber discipline (AAPCS64 callee-saved)
 
 ```sh
-./check-clobbers.sh core/controller/asm/cc_*.S
-./check-clobbers.sh -I core/controller/asm cc_http.S
+./check-clobbers.sh core/controller/alternate/asm/cc_*.S
+./check-clobbers.sh -I core/controller/alternate/asm cc_http.S
 ```
 
 What it does: for EVERY function — exported `cc_*:` and local helper
@@ -274,7 +274,7 @@ BEFORE gdb. gdb only after those are green and a real logic bug remains.
 - [ ] differential harness (built at Gate 0) passing; disasm proof exists (Gate 3)
 ---
 
-# x86_64 translation — `core/controller/asm/x86_64/`
+# x86_64 translation — `core/controller/alternate/asm/x86_64/`
 
 > This section governs the **x86-64 port** of the controller: the AArch64
 > modules above are being **translated** (not re-imagined) to GNU-as AT&T
@@ -448,7 +448,7 @@ criteria are met.
 - **Gate 5 — Integration.** The module is wired into the controller build,
   linked, and smoke-tested end to end.
 
-## Module inventory (all to live in `core/controller/asm/x86_64/`)
+## Module inventory (all to live in `core/controller/alternate/asm/x86_64/`)
 
 The seven modules mirror the AArch64 tree. `cc_util.S` exists today; the
 rest land one Gate-2 step at a time.
@@ -473,7 +473,7 @@ module.
 
 ```sh
 ./check-isa-x86_64.sh x86_64/cc_*.S                    # files or a directory
-./check-isa-x86_64.sh -I core/controller/asm/x86_64 cc_util.S
+./check-isa-x86_64.sh -I core/controller/alternate/asm/x86_64 cc_util.S
 ./check-isa-x86_64.sh --strict-blacklist-update x86_64 # self-check
 ```
 
@@ -497,7 +497,7 @@ entry is a typo.
 
 ```sh
 ./check-clobbers-x86_64.sh x86_64/cc_*.S
-./check-clobbers-x86_64.sh -I core/controller/asm/x86_64 cc_util.S
+./check-clobbers-x86_64.sh -I core/controller/alternate/asm/x86_64 cc_util.S
 ```
 
 What it does: for EVERY function — exported `cc_*:` and local helper
@@ -517,7 +517,7 @@ or more findings.
 
 ```sh
 # built at Gate 0, per function; the Go binary is the oracle
-./core/controller/asm/differential.sh <function> <x86_64/cc_<module>.S> ...
+./core/controller/alternate/asm/differential.sh <function> <x86_64/cc_<module>.S> ...
 ```
 
 A function is unverified until the harness passes byte-for-byte against the

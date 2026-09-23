@@ -7,7 +7,7 @@
  * parsing (method/path/body), the protocol callback switch, ws handshake/
  * read/write/framing, and the per-client 1-slot queue with write-timeout
  * semantics. It must NOT do JSON, state, or routing logic — the assembly
- * module core/controller/asm/cc_http.S owns those and is invoked through the
+ * module core/controller/alternate/asm/cc_http.S owns those and is invoked through the
  * handler function pointers passed to cc_http_init.
  *
  * The wire contract is the Go controller (core/controller/main.go:235-400):

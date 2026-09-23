@@ -101,9 +101,9 @@
 #
 # EXAMPLES
 #   ./check-translation.sh x86_64/cc_*.S
-#   ./check-translation.sh core/controller/asm/x86_64
-#   ./check-translation.sh core/controller/asm/cc_util.S   # AArch64 -> skipped
-#   ./check-translation.sh core/controller/c/cc_ctr.c      # C-layer class D
+#   ./check-translation.sh core/controller/alternate/asm/x86_64
+#   ./check-translation.sh core/controller/alternate/asm/cc_util.S   # AArch64 -> skipped
+#   ./check-translation.sh core/controller/alternate/c/cc_ctr.c      # C-layer class D
 #
 set -u
 

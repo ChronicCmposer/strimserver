@@ -3,7 +3,7 @@
 //
 // This driver closes the Gate-3 coverage gap that left the shipped C-layer
 // containerd chainID resolver (`cc_ctr_resolve_chainid` in
-// core/controller/c/cc_ctr.c — its self-contained SHA-256, JSON path
+// core/controller/alternate/c/cc_ctr.c — its self-contained SHA-256, JSON path
 // extractor, Images/Get + Content/Read request framing, and the
 // identity.ChainID computation) unexecuted by the differential harness.
 //

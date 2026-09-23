@@ -3,7 +3,7 @@
  *
  * Thin C wrapper over the vendored libwebsockets v5.0.0 (server-only, H1+WS).
  * Owns every libwebsockets call; delegates JSON/state/routing to the asm
- * module (core/controller/asm/cc_http.S) through the handler pointers passed
+ * module (core/controller/alternate/asm/cc_http.S) through the handler pointers passed
  * to cc_http_init. The wire contract is ported byte-for-byte from the Go
  * controller (core/controller/main.go:235-400) — see cc_http.h and the
  * assembly module header for the per-route citations.

@@ -14,7 +14,7 @@
 //  CC_ER_* / CC_CC_* ids and the CC_CTR_* mount-content strings come from
 //  cc_layout.inc; this header adds only what THIS module needs.
 //
-//  The C-layer contract this module calls is core/controller/c/cc_ctr.h —
+//  The C-layer contract this module calls is core/controller/alternate/c/cc_ctr.h —
 //  fixed-arity helpers returning gRPC status (>= 0, 0 = OK) or negative
 //  CC_CTR_ERR_*.  The two files share the layout of struct cc_ctr_oci_spec
 //  and struct cc_ctr_oci_mount: the byte offsets below were VERIFIED with a
@@ -142,7 +142,7 @@
 
 // The image rootfs chainID buffer (ctr_parent_buf): cc_ctr_resolve_chainid
 // writes the WithNewSnapshot parent here ("sha256:" digest, 71 bytes; "" for
-// a no-layer image).  Mirrors CC_CTR_PARENT_MAX in core/controller/c/
+// a no-layer image).  Mirrors CC_CTR_PARENT_MAX in core/controller/alternate/c/
 // cc_ctr.h (the C header is C-only, so this module carries its own copy).
 #define CC_CTR_PARENT_MAX 256
 

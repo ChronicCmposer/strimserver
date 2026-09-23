@@ -1,6 +1,6 @@
 # third_party: Vendored C infrastructure (Phase 3a)
 
-The ARM64 assembly controller (`core/controller/asm/`, built by a parallel
+The ARM64 assembly controller (`core/controller/alternate/asm/`, built by a parallel
 task) drives this vendored C layer for protocol work. Everything here is
 **arm64-only**: the controller rewrite is ARM-only, so all C targets carry
 `target_compatible_with = ["@platforms//cpu:aarch64"]`. The default amd64

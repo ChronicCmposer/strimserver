@@ -29,9 +29,9 @@
 # ARCHITECTURE SELECTION
 #   --arch arm64|amd64  (default: inferred from uname -m: aarch64 -> arm64,
 #                        x86_64 -> amd64)
-#       arm64: target //core/controller:controller_asm,
+#       arm64: target //core/controller/alternate/asm:controller_asm,
 #              --platforms=//tools/bazel:linux_arm64 (the AArch64 port)
-#       amd64: target //core/controller:controller_asm_x86_64,
+#       amd64: target //core/controller/alternate/asm:controller_asm_x86_64,
 #              --platforms=//tools/bazel:linux_amd64 (the x86-64 port; the
 #              target may still be provided by another agent -- the script
 #              resolves it via cquery and fails with a clear message if the
@@ -55,7 +55,7 @@
 # so it is a committed dev harness, run by hand (or by a CI gate).
 #
 # USAGE
-#   core/controller/asm/differential.sh [--arch arm64|amd64] [--qemu]
+#   core/controller/alternate/asm/differential.sh [--arch arm64|amd64] [--qemu]
 #                                       [--bin PATH] [--4way]
 # EXIT
 #   0 = GREEN (asm == Go byte-for-byte on all three flags)
@@ -101,12 +101,12 @@ if [ -z "$ARCH" ]; then
 fi
 case "$ARCH" in
   arm64)
-    TARGET="//core/controller:controller_asm"
+    TARGET="//core/controller/alternate/asm:controller_asm"
     TARGET_NAME="controller_asm"
     PLATFORM="//tools/bazel:linux_arm64"
     ;;
   amd64)
-    TARGET="//core/controller:controller_asm_x86_64"
+    TARGET="//core/controller/alternate/asm:controller_asm_x86_64"
     TARGET_NAME="controller_asm_x86_64"
     PLATFORM="//tools/bazel:linux_amd64"
     ;;
@@ -146,7 +146,7 @@ else
   # Resolve the built file via cquery; fall back to the conventional
   # bazel-bin path (same pattern the aarch64-only script used).
   ASM="$(bazel cquery --output=files "$TARGET" --platforms="$PLATFORM" 2>/dev/null \
-        || echo "$ROOT/bazel-bin/core/controller/$TARGET_NAME")"
+        || echo "$ROOT/bazel-bin/core/controller/alternate/asm/$TARGET_NAME")"
   [ -x "$ASM" ] || { echo "ERROR: asm controller not found at $ASM" >&2; exit 1; }
 fi
 

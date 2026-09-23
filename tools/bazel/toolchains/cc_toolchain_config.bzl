@@ -2,7 +2,7 @@
 
 Part of workstream A2: this toolchain executes on the aarch64 dev host
 (exec = aarch64) and targets linux/amd64, so
-//core/controller:controller_asm_x86_64 compiles and assembles on the aarch64
+//core/controller/alternate/asm:controller_asm_x86_64 compiles and assembles on the aarch64
 host without qemu.
 
 Tool binaries are the host's own Debian clang/lld/llvm-ar, referenced by
@@ -61,7 +61,7 @@ GCC_TRIPLE_DIR = "x86_64-linux-gnu/14"
 
 # ISA floor x86-64-v4 with the AVX-512 feature set the floor implies explicitly
 # disabled (the cap is AVX2 — no zmm/k/AMX), mirroring
-# //core/controller:controller_asm_lib_x86_64. Applied to every compile and
+# //core/controller/alternate/asm:controller_asm_lib_x86_64. Applied to every compile and
 # preprocess_assemble action so the .S modules are gated identically to the C.
 ISA_FLOOR = [
     "-march=x86-64-v4",

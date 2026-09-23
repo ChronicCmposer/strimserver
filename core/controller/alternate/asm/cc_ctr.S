@@ -10,7 +10,7 @@
 //              nothing higher, no .arch_extension, no .cpu (Graviton2 parity).
 //
 //  This module is Phase 4.4b: the OP ORCHESTRATION half of the `cc_ctr`
-//  module.  The C operation layer (core/controller/c/cc_ctr.c, Phase 4.4a)
+//  module.  The C operation layer (core/controller/alternate/c/cc_ctr.c, Phase 4.4a)
 //  owns the protocol/encoding — building the containerd gRPC requests and
 //  parsing the responses.  This module owns the SEQUENCES: given a stage's
 //  target state, run the correct start/stop sequence by calling the C
