@@ -10,8 +10,8 @@ Nice=-10
 CPUWeight=150
 
 # before starting, kill & delete any leftover container/task
-ExecStartPre=-/usr/bin/ctr -n strimserver tasks kill --signal SIGKILL strimserver-controller
-ExecStartPre=-/usr/bin/ctr -n strimserver containers delete strimserver-controller
+ExecStartPre=-/usr/bin/ctr -n strimserver tasks kill --signal SIGKILL __CONTAINER__
+ExecStartPre=-/usr/bin/ctr -n strimserver containers delete __CONTAINER__
 ExecStart=/usr/bin/ctr -n strimserver run --net-host --cap-add CAP_SYS_ADMIN \
    --mount type=bind,src=/mnt/nvme/config/strimserver.env,dst=/strimserver.env,options=rbind:rw \
    --mount type=bind,src=/run/containerd/containerd.sock,dst=/containerd.sock,options=rbind:rw \
@@ -19,13 +19,12 @@ ExecStart=/usr/bin/ctr -n strimserver run --net-host --cap-add CAP_SYS_ADMIN \
    --mount type=bind,src=/mnt/nvme/containerd,dst=/mnt/nvme/containerd,options=rbind:rslave \
    --mount type=bind,src=/var/run/cdi,dst=/var/run/cdi,options=rbind:ro \
    --mount type=bind,src=/dev,dst=/dev,options=rbind:rslave \
-   docker.io/library/strimserver-controller:latest strimserver-controller
+   __IMAGE__ __CONTAINER__
 
 # on stop, terminate task, then delete container
-ExecStop=/usr/bin/ctr -n strimserver tasks kill --signal SIGTERM strimserver-controller
-ExecStopPost=-/usr/bin/ctr -n strimserver containers delete strimserver-controller
+ExecStop=/usr/bin/ctr -n strimserver tasks kill --signal SIGTERM __CONTAINER__
+ExecStopPost=-/usr/bin/ctr -n strimserver containers delete __CONTAINER__
 
 
 [Install]
 WantedBy=multi-user.target
-

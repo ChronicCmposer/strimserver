@@ -44,9 +44,13 @@ all managed by the controller:
 
 | Image | Source target | Role |
 | --- | --- | --- |
-| `strimserver-controller:latest` | `core/controller/BUILD.bazel` (rules_oci from `debian:trixie` snapshot apt packages via the `@trixie` apt extension in `MODULE.bazel`) | Go control plane: drives containerd, reconciles stages, serves the HTTP/WebSocket API |
+| `strimserver-controller-go:latest` | `core/controller/BUILD.bazel` (rules_oci from `debian:trixie` snapshot apt packages via the `@trixie` apt extension in `MODULE.bazel`) | Go control plane: drives containerd, reconciles stages, serves the HTTP/WebSocket API |
 | `mediamtx:latest` | `core/BUILD.bazel` (rules_oci from `@mediamtx_dist` + `debian:trixie` snapshot apt packages) | MediaMTX media server: SRT ingest, RTSP routing, Unix MPEG-TS source, recording |
 | `ffmpeg:latest` | `core/BUILD.bazel` (rules_oci from the pinned `@ffmpeg_dist` S3 artifact, `s3_http_archive`) | FFmpeg + NVIDIA HW accel; the same image backs both ffmpeg stages |
+
+Each bundle carries exactly one controller image — the Go default
+`strimserver-controller-go:latest`, or `strimserver-controller-c:latest` in the
+C bundles — alongside the `ffmpeg` and `mediamtx` images.
 
 The controller supervises **three pipeline stages**, each a
 container whose desired/actual state it reconciles:
@@ -567,12 +571,12 @@ published **alongside** the deployment tars — never inside them:
   //tools/streamdeck-plugin:streamdeck_plugin_bundle` and
   `//tools/streamdeck-plugin:streamdeck_plugin_tar_gz`.
 
-All three deployment paths build the same three OCI images per architecture —
-`strimserver-controller:latest`, `ffmpeg:latest`, and
-`mediamtx:latest` — all assembled natively by Bazel
-(`rules_oci`) from pinned inputs — then package those images
-together with
-the configuration, scripts, systemd service, and the offline
+All three deployment paths build the same controller-agnostic images per
+architecture — `ffmpeg:latest` and `mediamtx:latest` — plus the bundle's own
+controller image (`strimserver-controller-go:latest` for Go bundles,
+`strimserver-controller-c:latest` for C bundles), all assembled natively by
+Bazel (`rules_oci`) from pinned inputs — then package those images together
+with the configuration, scripts, the generated systemd unit, and the offline
 segment into the deployment tars.
 `make package` and `make release` also produce `.sha256`
 checksums for the tars they build (consumers verify them via
@@ -595,7 +599,7 @@ The deployment bundle contains:
 - `controller-container.tar`, `ffmpeg-container.tar`, `mediamtx-container.tar`
 - `strimserver-offline-2160p60.mp4`
 - `deploy.sh`, `fish-deploy.sh`, `imdslib.sh`, `prompt_login.fish`
-- `strimserver.service`
+- `strimserver.service` — the per-bundle systemd unit generated from `deploy/aws/strimserver.service.template`, carrying the bundle's controller image and container name
 - `strimserver.env`, `mediamtx.yaml.template`, `transcode.sh`, `notify.sh`
 - `openssh-experimental.rpm` (always included; from the pinned `@openssh_dist` artifact)
 
@@ -860,7 +864,11 @@ It then places the deployment bundle on the box (HTTPS
 download, S3 pull, or scp upload, per `DEPLOYMENT_SRC`),
 unpacks it, and runs `deploy.sh`, which stages config/bin/video-file directories
 under `/mnt/nvme`, configures and restarts containerd,
-installs the systemd unit, **imports all three OCI images**
+installs the generated systemd unit from the bundle
+(`install -D -m 644 strimserver.service /etc/systemd/system/strimserver.service`,
+then `systemctl daemon-reload` and `systemctl enable strimserver.service` —
+the first start stays an operator action),
+**imports all three OCI images**
 (`controller-container.tar`, `ffmpeg-container.tar`,
 `mediamtx-container.tar`) into the `strimserver` containerd
 namespace, generates the SRT passphrase, and creates the
@@ -875,16 +883,30 @@ deploy/aws/start_strimserver
 deploy/aws/stop_strimserver
 ```
 
-The systemd unit runs the imported
-`docker.io/library/strimserver-controller:latest` image
-through `ctr` in the `strimserver` namespace, with host
-networking and `CAP_SYS_ADMIN`, and bind-mounts the
-containerd socket, `/tmp`, the containerd root under
-`/mnt/nvme`, the CDI directory, `/dev`, and
-`strimserver.env`. The controller then creates and
-supervises the `mediamtx`, `normalize`, and
-`scale_and_egress` stage containers, attaching the GPU to
-the ffmpeg stages via CDI.
+The systemd unit is generated per bundle from
+`deploy/aws/strimserver.service.template` and ships inside the deployment tar
+as `strimserver.service`; every bundle carries exactly one unit matching its
+controller — the Go bundles reference the image
+`docker.io/library/strimserver-controller-go:latest` and the container
+`strimserver-controller-go`, the C bundles reference
+`docker.io/library/strimserver-controller-c:latest` and the container
+`strimserver-controller-c`. `deploy.sh` installs the unit to
+`/etc/systemd/system/strimserver.service`, runs `systemctl daemon-reload` and
+`systemctl enable strimserver.service`, and defers the first start to the
+operator. The unit runs the imported controller image through `ctr` in the
+`strimserver` namespace, with host networking and `CAP_SYS_ADMIN`, and
+bind-mounts the containerd socket, `/tmp`, the containerd root under
+`/mnt/nvme`, the CDI directory, `/dev`, and `strimserver.env`. The controller
+then creates and supervises the `mediamtx`, `normalize`, and
+`scale_and_egress` stage containers, attaching the GPU to the ffmpeg stages
+via CDI.
+
+**Tag/upgrade note:** the Go controller image tag gained the `-go` suffix —
+`strimserver-controller-go:latest` replaces the previous bare
+`strimserver-controller` tag. Hosts deployed under the previous scheme imported
+the old tag and must re-import the new one — deploying a fresh bundle
+re-imports `controller-container.tar`, which carries the image under its new
+`-go` tag and installs the matching generated unit.
 
 ## Local encoder setup
 

@@ -4,5 +4,51 @@ exports_files([
     "imdslib.sh",
     "prompt_login.fish",
     "setup-gpu.sh",
-    "strimserver.service",
 ])
+
+# --- Generated systemd units (Go / C controller variants) --------------------
+# Both controller variants share ONE unit template (strimserver.service.template)
+# — a verbatim copy of the former static deploy/aws/strimserver.service with two
+# placeholders:
+#   __IMAGE__     -> the OCI image reference
+#   __CONTAINER__ -> the container name used by the ctr run/kill/delete calls
+#
+# OUTPUT DISAMBIGUATION (IMPORTANT): two expand_template targets in the same
+# package cannot both emit "strimserver.service" (duplicate output file), and
+# that basename also collides with the still-present static source file
+# deploy/aws/strimserver.service (until it is removed). Each target therefore
+# emits a DISTINCT basename:
+#   //deploy/aws:strimserver_unit_go -> strimserver-go.service
+#   //deploy/aws:strimserver_unit_c  -> strimserver-c.service
+# Bundle consumers (the root BUILD.bazel pkg_files) must RENAME the member to
+# "strimserver.service" at packaging time via `renames`, e.g.
+#   renames = {"//deploy/aws:strimserver_unit_go": "strimserver.service"}
+# which matches the existing controller-container.tar rename pattern used by
+# :bundle_images / :bundle_images_c.
+#
+# The C unit is a pure text expansion (no C toolchain in the graph), so it is
+# intentionally NOT tagged manual: it builds in the default config and is
+# config-independent.
+load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
+
+expand_template(
+    name = "strimserver_unit_go",
+    template = "strimserver.service.template",
+    out = "strimserver-go.service",
+    substitutions = {
+        "__IMAGE__": "docker.io/library/strimserver-controller-go:latest",
+        "__CONTAINER__": "strimserver-controller-go",
+    },
+    visibility = ["//visibility:public"],
+)
+
+expand_template(
+    name = "strimserver_unit_c",
+    template = "strimserver.service.template",
+    out = "strimserver-c.service",
+    substitutions = {
+        "__IMAGE__": "docker.io/library/strimserver-controller-c:latest",
+        "__CONTAINER__": "strimserver-controller-c",
+    },
+    visibility = ["//visibility:public"],
+)

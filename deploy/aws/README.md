@@ -61,6 +61,15 @@ uploads all four tars and all four `.sha256` assets:
 GIT_TAG=v1.0.0 bazel run //:release
 ```
 
+Each bundle carries a generated `strimserver.service` systemd unit (expanded by
+Bazel from `deploy/aws/strimserver.service.template`) matching its controller:
+Go bundles ship the unit referencing the image
+`docker.io/library/strimserver-controller-go:latest` and the container
+`strimserver-controller-go`; C bundles reference
+`docker.io/library/strimserver-controller-c:latest` and the container
+`strimserver-controller-c`. There is no static unit file anymore — each bundle
+contains exactly one unit for its controller.
+
 Verify the assembly controller against the Go oracle byte-for-byte — on an
 aarch64 host with a host `go` toolchain on PATH:
 
@@ -196,7 +205,11 @@ the GPU-runtime step:
    containerd 2.x (config v3).
 3. Prepend `root='/mnt/nvme/containerd'` / `state='/mnt/nvme/containerd-state'`
    to `/etc/containerd/config.toml`, restart containerd.
-4. Install the systemd unit to `/usr/local/lib/systemd/system`, `daemon-reload`.
+4. Install the bundle's generated systemd unit to
+   `/etc/systemd/system/strimserver.service` (`install -D -m 644`), then
+   `systemctl daemon-reload` and `systemctl enable strimserver.service`. The
+   first start stays an explicit operator action (the container images are
+   imported in the next step).
 5. Import the three images into the `strimserver` namespace:
    `ctr -n strimserver i import {controller,ffmpeg,mediamtx}-container.tar`.
 6. Generate a 70-char SRT read passphrase → `/mnt/nvme/srt-passphrase`.
@@ -208,9 +221,18 @@ the GPU-runtime step:
    segment into `video-files`.
 10. Print the next-step commands (SSH service start, encoder configuration).
 
-`deploy.sh` deliberately leaves the service stopped. Start it with
+`deploy.sh` deliberately leaves the service stopped — the unit is installed and
+enabled, but the first start stays an explicit operator action. Start it with
 `deploy/aws/start_strimserver` or `ssh strimserver 'sudo systemctl start
 strimserver.service'`.
+
+**Tag/upgrade note:** the Go controller image tag gained the `-go` suffix —
+`strimserver-controller-go:latest` replaces the previous bare
+`strimserver-controller` tag (the C controller has always shipped as
+`strimserver-controller-c:latest`). Hosts deployed under the previous scheme
+imported the old tag and must re-import the new one — running `deploy.sh` with
+a fresh bundle re-imports `controller-container.tar` under the new `-go` tag
+and installs the matching generated unit.
 
 ## 5. Post-deploy verification (arm64)
 

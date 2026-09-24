@@ -51,8 +51,9 @@ touch $@
 #     manifest); plain files get default_mode "" which the tar writer maps to
 #     0644. setup-gpu.sh shipped 0644 and broke `./setup-gpu.sh` on the host
 #     ("Permission denied"). Pin modes explicitly with pkg_attributes.
-#   * data/config files - sourced (fish-deploy.sh, imdslib.sh), a systemd unit,
-#     a fish prompt, and core config templates. 0644.
+#   * data/config files - sourced (fish-deploy.sh, imdslib.sh), a fish prompt,
+#     core config templates, and the generated systemd units (bundled
+#     per-language as bundle_unit_go / bundle_unit_c below). 0644.
 pkg_files(
     name = "bundle_exec_scripts",
     srcs = [
@@ -71,11 +72,41 @@ pkg_files(
         "//deploy/aws:fish-deploy.sh",
         "//deploy/aws:imdslib.sh",
         "//deploy/aws:prompt_login.fish",
-        "//deploy/aws:strimserver.service",
         "//core:strimserver.env",
         "//core:mediamtx.yaml.template",
     ],
     attributes = pkg_attributes(mode = "0644"),
+    strip_prefix = strip_prefix.files_only(),
+)
+
+# The systemd unit is the SECOND bundle member that differs per language (the
+# controller image below is the first): the Go bundle ships the generated Go
+# unit (//deploy/aws:strimserver_unit_go) and the C bundle the generated C unit
+# (//deploy/aws:strimserver_unit_c), both renamed to strimserver.service inside
+# the tar so the on-box deploy flow is identical for every bundle. The unit is
+# arch-independent: both amd64 and arm64 bundles of a language share the SAME
+# generated unit; no arch variants are created. Lane B supplies the two
+# expand_template targets (they may emit distinct basenames such as
+# strimserver-go.service / strimserver-c.service because two expand_template
+# targets cannot both emit strimserver.service); the renames below normalize
+# them to strimserver.service regardless of Lane B's output basename.
+pkg_files(
+    name = "bundle_unit_go",
+    srcs = ["//deploy/aws:strimserver_unit_go"],
+    attributes = pkg_attributes(mode = "0644"),
+    renames = {
+        "//deploy/aws:strimserver_unit_go": "strimserver.service",
+    },
+    strip_prefix = strip_prefix.files_only(),
+)
+
+pkg_files(
+    name = "bundle_unit_c",
+    srcs = ["//deploy/aws:strimserver_unit_c"],
+    attributes = pkg_attributes(mode = "0644"),
+    renames = {
+        "//deploy/aws:strimserver_unit_c": "strimserver.service",
+    },
     strip_prefix = strip_prefix.files_only(),
 )
 
@@ -94,11 +125,12 @@ pkg_files(
     strip_prefix = strip_prefix.files_only(),
 )
 
-# The controller-container.tar member is the ONE bundle member that differs
-# per language: the Go controller image (:controller_image_tar_file, the
-# long-standing default) or the C controller image (:controller_image_c_tar_file,
-# the musl-static port). Both land at the same controller-container.tar name so
-# the on-box deploy flow is identical for every bundle.
+# The controller-container.tar member is one of the TWO bundle members that
+# differ per language (the other is the generated systemd unit above): the Go
+# controller image (:controller_image_tar_file, the long-standing default) or
+# the C controller image (:controller_image_c_tar_file, the musl-static port).
+# Both land at the same controller-container.tar name so the on-box deploy flow
+# is identical for every bundle.
 pkg_files(
     name = "bundle_images_c",
     srcs = [
@@ -177,6 +209,7 @@ pkg_tar(
     name = "_strimserver_deployment_go_tar_unchecked",
     srcs = [
         ":bundle_images",
+        ":bundle_unit_go",
         ":bundle_offline_segment",
         ":bundle_openssh_rpm",
         ":bundle_exec_scripts",
@@ -247,6 +280,7 @@ pkg_tar(
     name = "_strimserver_deployment_c_tar_unchecked",
     srcs = [
         ":bundle_images_c",
+        ":bundle_unit_c",
         ":bundle_offline_segment",
         ":bundle_openssh_rpm",
         ":bundle_exec_scripts",

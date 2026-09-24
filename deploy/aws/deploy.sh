@@ -88,18 +88,20 @@ set +x
 printf "containerd configured!\n"
 
 
-# systemd service files
-printf "installing systemd service files...\n"
-SERVICE_FILES_TARGET=/usr/local/lib/systemd/system
+# systemd service file (ships inside the bundle as strimserver.service).
+# Enabled but not started: the container images are imported further below, and
+# the first start stays an explicit operator action (deploy/aws/start_strimserver).
+printf "installing systemd service file...\n"
 set -x
 
-sudo install -D -t $SERVICE_FILES_TARGET /mnt/nvme/strimserver.service
+sudo install -D -m 644 /mnt/nvme/strimserver.service /etc/systemd/system/strimserver.service
 
 rm -f /mnt/nvme/strimserver.service
 
 sudo systemctl daemon-reload
+sudo systemctl enable strimserver.service
 set +x
-printf "systemd service files installed!\n"
+printf "systemd service file installed and enabled!\n"
 
 # import images
 printf "importing images (%s)...\n" "$CONTROLLER_VARIANT"

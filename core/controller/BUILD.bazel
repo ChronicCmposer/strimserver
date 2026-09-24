@@ -299,7 +299,7 @@ oci_image(
 oci_load(
     name = "controller_image_tarball",
     image = ":controller_image",
-    repo_tags = ["docker.io/library/strimserver-controller:latest"],
+    repo_tags = ["docker.io/library/strimserver-controller-go:latest"],
 )
 
 sh_test(
