@@ -41,12 +41,40 @@ build:linux --sandbox_add_mount_pair=/home
 # clang/glibc toolchain (the pure-Go controller needs no C toolchain at all).
 # zig cc enables UBSan by default; -fno-sanitize=undefined turns it off for
 # these hermetic builds.
+#
+# Binary-size reduction for the shipped C controller (mirrored in
+# c_controller_transition.bzl): the zig toolchain's fastbuild mode passes no
+# -O flag (i.e. -O0), which made the ~1.5 MB static binary ~58% larger than
+# necessary. compilation_mode=opt makes the toolchain emit -O2 + -DNDEBUG;
+# Bazel appends user --copt AFTER toolchain flags, so -Os (added after -O2)
+# wins. -ffunction-sections/-fdata-sections plus --gc-sections prune unused
+# functions from the pre-built musl static libc (built with function-sections)
+# and unused MHD/nanopb/yyjson paths; -Wl,-s strips the symtab (the binary is
+# a shipped image entrypoint, no debugging use); --build-id=none drops a
+# trivial note section. NOTE: -Wl,--icf=safe (identical code folding) was
+# intentionally NOT included: the zig 0.15.2 self-hosted linker errors with
+# "unsupported linker arg: --icf" (Zig upstream limitation; zig cc ignores
+# -fuse-ld=lld). -flto is intentionally excluded too (Zig/LLVM LTO bugs).
 build:amd64 --platforms=@zig_sdk//platform:linux_amd64
 build:amd64 --extra_toolchains=@zig_sdk//toolchain:linux_amd64_musl
 build:amd64 --copt=-fno-sanitize=undefined
 build:amd64 --linkopt=-fno-sanitize=undefined
+build:amd64 --compilation_mode=opt
+build:amd64 --copt=-Os
+build:amd64 --copt=-ffunction-sections
+build:amd64 --copt=-fdata-sections
+build:amd64 --linkopt=-Wl,--gc-sections
+build:amd64 --linkopt=-Wl,-s
+build:amd64 --linkopt=-Wl,--build-id=none
 
 build:arm64 --platforms=@zig_sdk//platform:linux_arm64
 build:arm64 --extra_toolchains=@zig_sdk//toolchain:linux_arm64_musl
 build:arm64 --copt=-fno-sanitize=undefined
 build:arm64 --linkopt=-fno-sanitize=undefined
+build:arm64 --compilation_mode=opt
+build:arm64 --copt=-Os
+build:arm64 --copt=-ffunction-sections
+build:arm64 --copt=-fdata-sections
+build:arm64 --linkopt=-Wl,--gc-sections
+build:arm64 --linkopt=-Wl,-s
+build:arm64 --linkopt=-Wl,--build-id=none

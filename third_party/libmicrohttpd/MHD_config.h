@@ -234,7 +234,13 @@
 #define HAVE_MEMMEM 1
 
 /* Define to 1 to enable support for text messages. */
-#define HAVE_MESSAGES 1
+/* Bazel vendoring patch (not emitted by this host's configure run):
+   HAVE_MESSAGES is intentionally disabled: the controller writes its own
+   HTTP responses, so MHD's built-in error message strings and MHD_DLOG()
+   logging machinery are dead weight (~5-15 KB rodata). reason_phrase.c (the
+   RFC status-line reason phrases) is compiled regardless -- it is not gated
+   on HAVE_MESSAGES and is required for correct HTTP status lines. */
+/* #undef HAVE_MESSAGES */
 
 /* Define to 1 if you have the 'nanosleep' function. */
 #define HAVE_NANOSLEEP 1
@@ -599,8 +605,17 @@
 /* The default HTTP Digest Auth default nonce timeout value (in seconds) */
 /* #undef MHD_DAUTH_DEF_TIMEOUT_ */
 
+/* Bazel vendoring patch (not emitted by this host's configure run):
+   MHD_FAVOR_FAST_CODE is deliberately left undefined. The whole C build
+   compiles with -Os, which defines __OPTIMIZE_SIZE__; src/include/mhd_options.h
+   then auto-selects MHD_FAVOR_SMALL_CODE (the compact code path) at compile
+   time. Pinning the fast code path here would keep MHD on its larger code
+   path (~10-20% more text) despite -Os. MHD_FAVOR_SMALL_CODE is not hardcoded
+   either: it must pair with -Os, and defining both FAST and SMALL triggers
+   #error in mhd_options.h. */
+
 /* Define to '1' to use fast (and larger) code version */
-#define MHD_FAVOR_FAST_CODE 1
+/* #undef MHD_FAVOR_FAST_CODE */
 
 /* Define to '1' to use compact code version */
 /* #undef MHD_FAVOR_SMALL_CODE */

@@ -37,7 +37,23 @@ cc_library(
     # yyjson requires C11. The amd64 clang cross-toolchain already passes
     # -std=gnu11 via its conly_flags; this makes the native arm64 toolchain
     # match explicitly.
-    copts = ["-std=gnu11"],
+    #
+    # Binary-size reduction for the static C controller, whose JSON is
+    # integer/string/enum-only (verified: no double/float JSON read or write
+    # anywhere in core/controller/c):
+    #   -YYJSON_DISABLE_FAST_FP_CONV: drop the Schubfach-based fast float/double
+    #     read+write code (the FP_READER/FP_WRITER sections), the largest chunk
+    #     of yyjson's size; libc strtod/snprintf is used instead. NOTE: the
+    #     upstream macro is YYJSON_DISABLE_FAST_FP_CONV (yyjson.h line 74), not
+    #     YYJSON_DISABLE_FAST_FP.
+    #   -YYJSON_DISABLE_NON_STANDARD: drop non-standard JSON support (comments,
+    #     trailing commas, NaN/Infinity literals). Both are safe for a
+    #     controller whose JSON never uses doubles/floats.
+    copts = [
+        "-std=gnu11",
+        "-DYYJSON_DISABLE_FAST_FP_CONV=1",
+        "-DYYJSON_DISABLE_NON_STANDARD=1",
+    ],
     target_compatible_with = select({
         "//tools/bazel:is_amd64_target": [],
         "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],

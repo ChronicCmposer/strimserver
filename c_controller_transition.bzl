@@ -12,10 +12,32 @@ configs set:
   --extra_toolchains=@zig_sdk//toolchain:linux_<arch>_musl
   --copt=-fno-sanitize=undefined
   --linkopt=-fno-sanitize=undefined
+  --compilation_mode=opt
+  --copt=-Os
+  --copt=-ffunction-sections
+  --copt=-fdata-sections
+  --linkopt=-Wl,--gc-sections
+  --linkopt=-Wl,-s
+  --linkopt=-Wl,--build-id=none
 
 Without the transition, the C controller would resolve the DEFAULT
 clang/glibc toolchain (registered before zig) and link a dynamic glibc
 binary -- the very thing the FROM-scratch, no-donor image forbids.
+
+Binary-size reduction (same flags as the .bazelrc configs): the zig
+toolchain's fastbuild mode passes no -O flag (i.e. -O0), which made the
+~1.5 MB static binary ~58% larger than necessary. compilation_mode=opt
+makes the toolchain emit -O2 + -DNDEBUG; Bazel appends the user --copt
+after the toolchain flags, so -Os (added after -O2) wins.
+-ffunction-sections/-fdata-sections plus --gc-sections prune unused
+functions from the pre-built musl static libc (built with
+function-sections) and unused MHD/nanopb/yyjson paths; -Wl,-s strips the
+symtab (the binary is a shipped image entrypoint, no debugging use);
+--build-id=none drops a trivial note section. NOTE: -Wl,--icf=safe
+(identical code folding) is intentionally NOT included: the zig 0.15.2
+self-hosted linker errors with "unsupported linker arg: --icf" (Zig
+upstream limitation; zig cc ignores -fuse-ld=lld). -flto is intentionally
+excluded too (Zig/LLVM LTO bugs).
 
 The rule mirrors //tools/bazel/platform_transition.bzl: it symlinks the
 transitioned target's default output under the caller-chosen `out` basename.
@@ -28,15 +50,37 @@ def _c_controller_transition_impl(settings, attr):
         return {
             "//command_line_option:platforms": "@zig_sdk//platform:linux_amd64",
             "//command_line_option:extra_toolchains": ["@zig_sdk//toolchain:linux_amd64_musl"],
-            "//command_line_option:copt": ["-fno-sanitize=undefined"],
-            "//command_line_option:linkopt": ["-fno-sanitize=undefined"],
+            "//command_line_option:compilation_mode": "opt",
+            "//command_line_option:copt": [
+                "-fno-sanitize=undefined",
+                "-Os",
+                "-ffunction-sections",
+                "-fdata-sections",
+            ],
+            "//command_line_option:linkopt": [
+                "-fno-sanitize=undefined",
+                "-Wl,--gc-sections",
+                "-Wl,-s",
+                "-Wl,--build-id=none",
+            ],
         }
     if attr.to_arch == "arm64":
         return {
             "//command_line_option:platforms": "@zig_sdk//platform:linux_arm64",
             "//command_line_option:extra_toolchains": ["@zig_sdk//toolchain:linux_arm64_musl"],
-            "//command_line_option:copt": ["-fno-sanitize=undefined"],
-            "//command_line_option:linkopt": ["-fno-sanitize=undefined"],
+            "//command_line_option:compilation_mode": "opt",
+            "//command_line_option:copt": [
+                "-fno-sanitize=undefined",
+                "-Os",
+                "-ffunction-sections",
+                "-fdata-sections",
+            ],
+            "//command_line_option:linkopt": [
+                "-fno-sanitize=undefined",
+                "-Wl,--gc-sections",
+                "-Wl,-s",
+                "-Wl,--build-id=none",
+            ],
         }
     fail("to_arch must be 'amd64' or 'arm64', got %r" % attr.to_arch)
 
@@ -46,6 +90,7 @@ _c_controller_transition = transition(
     outputs = [
         "//command_line_option:platforms",
         "//command_line_option:extra_toolchains",
+        "//command_line_option:compilation_mode",
         "//command_line_option:copt",
         "//command_line_option:linkopt",
     ],
