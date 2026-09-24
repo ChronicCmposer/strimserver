@@ -82,6 +82,26 @@ typedef struct strim_event_envelope    strim_event_envelope;
 #define STRIM_CTRD_ERR_PROTO     (-6) /* protocol / parse error              */
 #define STRIM_CTRD_ERR_CLOSED    (-7) /* use after Close                     */
 #define STRIM_CTRD_ERR_NOMEM     (-8) /* internal allocation failed          */
+#define STRIM_CTRD_ERR_RPC       (-9) /* daemon returned a non-OK gRPC status */
+
+/* =========================================================================
+ * Error diagnostics
+ * ========================================================================= */
+
+/* LastError(client, buf, cap): copy a description of the most recent
+ * daemon-returned gRPC error status observed on the shared connection into
+ * buf (e.g. "grpc status 13 (INTERNAL)"). This is how a caller tells WHY an
+ * RPC failed once a strim_containerd_* call returned STRIM_CTRD_ERR_RPC: the
+ * folded code alone cannot distinguish a shim/runc error on Tasks/Create
+ * (INTERNAL) from a bad argument (INVALID_ARGUMENT). Returns the number of
+ * chars copied, 0 when no daemon error has been observed since connect, or
+ * STRIM_CTRD_ERR_BADARG.
+ *
+ * NOTE: the daemon's grpc-message TEXT is decoded and retained inside the h2c
+ * layer but is not yet exposed through a public accessor; this surfaces the
+ * status code + canonical name. Thread-safe: reads under the client lock. */
+int strim_containerd_last_error(const strim_containerd_client *client,
+                                char *buf, size_t cap);
 
 /* =========================================================================
  * Client lifecycle

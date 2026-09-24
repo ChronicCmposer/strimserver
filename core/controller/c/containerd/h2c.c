@@ -1025,6 +1025,8 @@ struct strim_h2c {
  * ========================================================================= */
 
 static void stream_destroy(struct strim_h2c *c, struct strim_h2c_stream *s);
+static void stream_credit_message(struct strim_h2c *c, struct strim_h2c_stream *s,
+                                  uint32_t total);
 
 static struct strim_h2c_stream *stream_find(struct strim_h2c *c, uint32_t sid) {
   int i;
@@ -1552,6 +1554,11 @@ static void stream_feed_data(struct strim_h2c *c, struct strim_h2c_stream *s,
             stream_abort(c, s, H2_ERR_PROTOCOL, H2C_ERR_PROTO);
             return;
           }
+          /* The unary caller owns the response now; credit the receive
+           * windows exactly like the stream-queue path, so a shared
+           * connection never drains below the peer's advertised window.
+           * A stream that aborts above is never credited (at most once). */
+          stream_credit_message(c, s, s->rasm_got + 5);
         }
         s->rasm_state = 0;
         s->rasm_hdr_fill = 0;

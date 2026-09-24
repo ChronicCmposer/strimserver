@@ -129,6 +129,11 @@ struct strim_containerd_client {
   char *socket_path;
   char *namespace_;
   struct strim_event_stream *streams; /* streams opened on this client   */
+  /* Most recent daemon-returned gRPC status on the shared connection (0 =
+   * none). Retained by shared_unary_locked so strim_containerd_last_error
+   * can explain WHY an RPC failed (STRIM_CTRD_ERR_RPC). Written and read
+   * under the client lock. */
+  int last_grpc_status;
   /* Derived handles (owned by the client per containerd_client.h: "owned by
    * the client and stays valid until close"); freed by Close. */
   struct strim_image *images;
@@ -184,6 +189,70 @@ struct strim_event_envelope {
  * Error mapping
  * ========================================================================= */
 
+/* The canonical gRPC status names (google.golang.org/grpc/codes), used to
+ * render the daemon's retained status for operators. */
+static const char *grpc_status_name(int status) {
+  switch (status) {
+  case H2C_STATUS_OK:
+    return "OK";
+  case H2C_STATUS_CANCELLED:
+    return "CANCELLED";
+  case H2C_STATUS_UNKNOWN:
+    return "UNKNOWN";
+  case H2C_STATUS_INVALID_ARGUMENT:
+    return "INVALID_ARGUMENT";
+  case H2C_STATUS_DEADLINE_EXCEEDED:
+    return "DEADLINE_EXCEEDED";
+  case H2C_STATUS_NOT_FOUND:
+    return "NOT_FOUND";
+  case H2C_STATUS_ALREADY_EXISTS:
+    return "ALREADY_EXISTS";
+  case H2C_STATUS_PERMISSION_DENIED:
+    return "PERMISSION_DENIED";
+  case H2C_STATUS_RESOURCE_EXHAUSTED:
+    return "RESOURCE_EXHAUSTED";
+  case H2C_STATUS_FAILED_PRECONDITION:
+    return "FAILED_PRECONDITION";
+  case H2C_STATUS_ABORTED:
+    return "ABORTED";
+  case H2C_STATUS_OUT_OF_RANGE:
+    return "OUT_OF_RANGE";
+  case H2C_STATUS_UNIMPLEMENTED:
+    return "UNIMPLEMENTED";
+  case H2C_STATUS_INTERNAL:
+    return "INTERNAL";
+  case H2C_STATUS_UNAVAILABLE:
+    return "UNAVAILABLE";
+  case H2C_STATUS_DATA_LOSS:
+    return "DATA_LOSS";
+  case H2C_STATUS_UNAUTHENTICATED:
+    return "UNAUTHENTICATED";
+  default:
+    return "UNKNOWN";
+  }
+}
+
+/* Map an RPC result's raw code to the public error space. A positive rc is a
+ * real gRPC status the DAEMON returned (the server finished the RPC with an
+ * error status, e.g. a trailers-only grpc-status != 0); a negative rc is a
+ * client-side H2C_ERR_* transport/protocol failure.
+ *
+ * Daemon-returned statuses:
+ *   - NOT_FOUND -> STRIM_CTRD_ERR_NOTFOUND (the Go errdefs.NotFound
+ *     contract; callers tolerate it on kill/delete).
+ *   - DEADLINE_EXCEEDED -> STRIM_CTRD_ERR_TIMEOUT (Go DeadlineExceeded).
+ *   - ALREADY_EXISTS -> STRIM_CTRD_ERR_IO (historical; the callers that
+ *     tolerate it — new_container_locked's Snapshots/Prepare — check the RAW
+ *     status before this mapping, so this only surfaces when a caller treats
+ *     it as an error).
+ *   - UNAVAILABLE -> STRIM_CTRD_ERR_IO (h2c also synthesizes UNAVAILABLE for
+ *     client-side connection failures — conn_fail / GOAWAY — so it is
+ *     ambiguous and treated as transport).
+ *   - every other non-OK status -> STRIM_CTRD_ERR_RPC: the daemon itself
+ *     rejected the RPC (e.g. a shim/runc error on Tasks/Create surfaces as
+ *     INTERNAL). The retained status is queryable via
+ *     strim_containerd_last_error.
+ */
 static int map_grpc_err(int rc) {
   if (rc >= 0) {
     switch (rc) {
@@ -194,9 +263,11 @@ static int map_grpc_err(int rc) {
     case H2C_STATUS_DEADLINE_EXCEEDED:
       return STRIM_CTRD_ERR_TIMEOUT;
     case H2C_STATUS_ALREADY_EXISTS:
-      return STRIM_CTRD_ERR_IO; /* caller decides whether to tolerate */
+      return STRIM_CTRD_ERR_IO; /* tolerated by new_container_locked */
+    case H2C_STATUS_UNAVAILABLE:
+      return STRIM_CTRD_ERR_IO; /* h2c uses it for client conn-fail too */
     default:
-      return STRIM_CTRD_ERR_IO;
+      return STRIM_CTRD_ERR_RPC; /* daemon-returned non-OK status */
     }
   }
   switch (rc) {
@@ -285,6 +356,11 @@ static int shared_unary_locked(strim_containerd_client *client,
                  timeout_ms);
   if (rc < 0 && transport_is_dead(rc))
     shared_conn_reset_locked(client);
+  /* Retain the daemon's gRPC status (a positive rc) so
+   * strim_containerd_last_error can explain why the RPC failed; any other
+   * result (success or a client-side failure) clears it. Always under the
+   * client lock, so the getter's read is race-free. */
+  client->last_grpc_status = (rc > 0) ? rc : 0;
   return rc;
 }
 
@@ -378,6 +454,19 @@ static char **dup_str_array(yyjson_val *arr, size_t *out_n) {
   return out;
 }
 
+/* Look up an image-config key case-insensitively, matching the Go oracle's
+ * json.Unmarshal field matching (encoding/json folds struct tags). The OCI
+ * image-spec canonical spelling is capitalized ("Entrypoint", "Cmd", "Env",
+ * "WorkingDir", "User"); some producers emit lowercase ("entrypoint").
+ * Prefer the canonical spelling, fall back to lowercase. */
+static yyjson_val *image_config_get(yyjson_val *config, const char *canonical,
+                                    const char *lowercase) {
+  yyjson_val *v = yyjson_obj_get(config, canonical);
+  if (v == NULL)
+    v = yyjson_obj_get(config, lowercase);
+  return v;
+}
+
 /* Parse the OCI image config JSON blob into a struct image_config. Returns
  * 0, or -1 on malformed JSON / missing diff-ids. */
 static int parse_image_config(const uint8_t *blob, size_t len,
@@ -408,18 +497,18 @@ static int parse_image_config(const uint8_t *blob, size_t len,
     goto done;
 
   if (yyjson_is_obj(config)) {
-    v = yyjson_obj_get(config, "env");
+    v = image_config_get(config, "Env", "env");
     out->env = dup_str_array(v, &out->cfg.n_env);
     out->cfg.env = (const char *const *)out->env;
-    v = yyjson_obj_get(config, "entrypoint");
+    v = image_config_get(config, "Entrypoint", "entrypoint");
     out->entrypoint = dup_str_array(v, &out->cfg.n_entrypoint);
     out->cfg.entrypoint = (const char *const *)out->entrypoint;
-    v = yyjson_obj_get(config, "cmd");
+    v = image_config_get(config, "Cmd", "cmd");
     out->cmd = dup_str_array(v, &out->cfg.n_cmd);
     out->cfg.cmd = (const char *const *)out->cmd;
-    v = yyjson_obj_get(config, "workingdir");
+    v = image_config_get(config, "WorkingDir", "workingdir");
     out->cfg.working_dir = dup_yy_str(v);
-    v = yyjson_obj_get(config, "user");
+    v = image_config_get(config, "User", "user");
     out->cfg.user = dup_yy_str(v);
   }
 
@@ -720,6 +809,32 @@ void strim_containerd_close(strim_containerd_client *client) {
   free(client->socket_path);
   free(client->namespace_);
   free(client);
+}
+
+/* =========================================================================
+ * Public API — error diagnostics
+ * ========================================================================= */
+
+int strim_containerd_last_error(const strim_containerd_client *client,
+                                char *buf, size_t cap) {
+  int status;
+  const char *name;
+  int n;
+
+  if (client == NULL || buf == NULL || cap == 0)
+    return STRIM_CTRD_ERR_BADARG;
+  /* The status is written under the client lock (shared_unary_locked); read
+   * it under the same lock. */
+  pthread_mutex_lock(&((strim_containerd_client *)client)->lock);
+  status = client->last_grpc_status;
+  pthread_mutex_unlock(&((strim_containerd_client *)client)->lock);
+  if (status <= 0)
+    return 0; /* no daemon-returned status observed since connect */
+  name = grpc_status_name(status);
+  n = snprintf(buf, cap, "grpc status %d (%s)", status, name);
+  if (n < 0)
+    return 0;
+  return (size_t)n >= cap ? (int)cap - 1 : n;
 }
 
 /* =========================================================================

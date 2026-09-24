@@ -188,7 +188,8 @@ static size_t fake_read_request_sid(int fd, uint8_t *req, size_t req_cap,
     uint8_t flags;
     uint32_t sid;
     uint8_t payload[4096];
-    CHECK(read_exact(fd, hdr, 9) == 0);
+    if (read_exact(fd, hdr, 9) != 0)
+      return (size_t)-1; /* client closed the connection */
     len = ((uint32_t)hdr[0] << 16) | ((uint32_t)hdr[1] << 8) | hdr[2];
     type = hdr[3];
     flags = hdr[4];
@@ -198,8 +199,8 @@ static size_t fake_read_request_sid(int fd, uint8_t *req, size_t req_cap,
       *req_sid = sid;
     if (len > sizeof(payload))
       CHECK(0 && "fake server payload too big");
-    if (len)
-      CHECK(read_exact(fd, payload, len) == 0);
+    if (len && read_exact(fd, payload, len) != 0)
+      return (size_t)-1;
     if (type == 0) { /* DATA: skip the 5-byte gRPC header */
       size_t data = len > 5 ? len - 5 : 0;
       if (total + data <= req_cap)
@@ -229,14 +230,46 @@ static const uint8_t TRAILERS_OK[] = {
 static const uint8_t HUFF_GRPC_STATUS[] = {0x9a, 0xca, 0xc8, 0xb2,
                                            0x12, 0x34, 0xda, 0x8f};
 
-/* Build a trailers-only block carrying a single grpc-status (0..9). */
+/* grpc-message Huffman code for "grpc-message" (9 bytes; the exact encoding
+ * grpc-go emits — h2c.c's selftest_huffman vector proves it decodes). */
+static const uint8_t HUFF_GRPC_MESSAGE[] = {0x9a, 0xca, 0xc8, 0xb5, 0x25,
+                                            0x42, 0x07, 0x31, 0x7f};
+
+/* Build a trailers-only block carrying a single grpc-status (any 0..99). */
 static void build_trailers_status(uint8_t *out, size_t *len, int status) {
+  char sval[8];
+  size_t slen;
+  snprintf(sval, sizeof sval, "%d", status);
+  slen = strlen(sval);
   out[0] = 0x00; /* literal without indexing, new name */
   out[1] = 0x88; /* Huffman, 8 bytes */
   memcpy(out + 2, HUFF_GRPC_STATUS, 8);
-  out[10] = 0x01; /* plain, 1 byte */
-  out[11] = (uint8_t)('0' + (status % 10));
-  *len = 12;
+  out[10] = (uint8_t)slen; /* plain value */
+  memcpy(out + 11, sval, slen);
+  *len = 11 + slen;
+}
+
+/* Build a trailers-only block carrying grpc-status (any 0..99) and a plain
+ * grpc-message. Both names are Huffman-coded (the encodings grpc-go emits
+ * for a trailers-only error response). */
+static void build_trailers_status_msg(uint8_t *out, size_t *len, int status,
+                                      const char *msg) {
+  char sval[8];
+  size_t slen;
+  size_t msglen = strlen(msg);
+  snprintf(sval, sizeof sval, "%d", status);
+  slen = strlen(sval);
+  out[0] = 0x00; /* literal without indexing, new name */
+  out[1] = 0x88; /* Huffman, 8 bytes */
+  memcpy(out + 2, HUFF_GRPC_STATUS, 8);
+  out[10] = (uint8_t)slen; /* plain value */
+  memcpy(out + 11, sval, slen);
+  out[11 + slen] = 0x00; /* literal without indexing, new name */
+  out[12 + slen] = 0x89; /* Huffman, 9 bytes */
+  memcpy(out + 13 + slen, HUFF_GRPC_MESSAGE, 9);
+  out[22 + slen] = (uint8_t)msglen; /* plain value */
+  memcpy(out + 23 + slen, msg, msglen);
+  *len = 23 + slen + msglen;
 }
 
 static void fake_grpc_frame(uint8_t *out, const uint8_t *msg, uint32_t len) {
@@ -413,6 +446,7 @@ struct fstep {
   size_t n_msgs;
   uint32_t *msg_lens;
   int grpc_status;           /* FS_ERR                                      */
+  const char *grpc_message;  /* FS_ERR: optional grpc-message               */
 };
 
 struct script_arg {
@@ -420,7 +454,19 @@ struct script_arg {
   const struct fstep *script;
   size_t n_steps;
   int *request_count; /* optional; incremented per request served */
+  /* Optional: copy the request body of one step (e.g. Containers/Create, to
+   * inspect the OCI spec JSON it carries) into the caller's buffer. */
+  size_t capture_step;   /* step index whose request body is copied */
+  uint8_t *capture_body; /* caller-owned buffer                     */
+  size_t *capture_len;   /* caller-owned length out (bytes copied)  */
+  size_t capture_cap;    /* capture_body capacity                   */
 };
+
+/* Largest gRPC message body a single scripted step frames in one DATA frame
+ * (the frame buffer must hold the 5-byte gRPC header plus the body). The
+ * flow-control test feeds 16 KiB responses, so the old 4 KiB stack buffer
+ * overflowed. */
+#define SCRIPT_MAX_BODY (16 * 1024)
 
 static void *scripted_server(void *arg) {
   struct script_arg *sa = (struct script_arg *)arg;
@@ -453,14 +499,26 @@ static void *scripted_server(void *arg) {
       cur_is_main = 0;
     }
 
-    fake_read_request_sid(cur_fd, req, sizeof(req), &req_sid);
-    if (sa->request_count != NULL)
-      (*sa->request_count)++;
+    {
+      size_t rlen = fake_read_request_sid(cur_fd, req, sizeof(req), &req_sid);
+      if (rlen == (size_t)-1)
+        break; /* the client went away (e.g. a flow-control stall); stop */
+      if (sa->request_count != NULL)
+        (*sa->request_count)++;
+      if (sa->capture_body != NULL && i == sa->capture_step) {
+        size_t copied = rlen < sa->capture_cap ? rlen : sa->capture_cap;
+        if (copied > sizeof(req))
+          copied = sizeof(req); /* the read buffer caps what was copied */
+        memcpy(sa->capture_body, req, copied);
+        if (sa->capture_len != NULL)
+          *sa->capture_len = copied;
+      }
+    }
 
     switch (st->kind) {
     case FS_UNARY:
     case FS_NEWCONN: {
-      uint8_t frame[4096];
+      uint8_t frame[SCRIPT_MAX_BODY + 8];
       frame_write_fake(cur_fd, 1, 0x4, req_sid, RESP_HEADERS,
                        sizeof(RESP_HEADERS));
       fake_grpc_frame(frame, st->body, st->body_len);
@@ -475,7 +533,7 @@ static void *scripted_server(void *arg) {
       break;
     }
     case FS_STREAM: {
-      uint8_t frame[4096];
+      uint8_t frame[SCRIPT_MAX_BODY + 8];
       frame_write_fake(cur_fd, 1, 0x4, req_sid, RESP_HEADERS,
                        sizeof(RESP_HEADERS));
       for (j = 0; j < st->n_msgs; j++) {
@@ -487,9 +545,13 @@ static void *scripted_server(void *arg) {
       break;
     }
     case FS_ERR: {
-      uint8_t trailers[16];
+      uint8_t trailers[256];
       size_t tlen;
-      build_trailers_status(trailers, &tlen, st->grpc_status);
+      if (st->grpc_message != NULL)
+        build_trailers_status_msg(trailers, &tlen, st->grpc_status,
+                                  st->grpc_message);
+      else
+        build_trailers_status(trailers, &tlen, st->grpc_status);
       frame_write_fake(cur_fd, 1, 0x5, req_sid, trailers, tlen);
       break;
     }
@@ -680,6 +742,20 @@ static const char MANIFEST_JSON[] =
 static const char CONFIG_JSON[] =
     "{\"config\":{\"env\":[\"PATH=/usr/bin\"],"
     "\"entrypoint\":[\"/transcode.sh\"],\"workingdir\":\"/\"},"
+    "\"rootfs\":{\"type\":\"layers\","
+    "\"diff_ids\":[\"sha256:aaa\",\"sha256:bbb\"]}}";
+
+/* The OCI/Docker image config uses CAPITALIZED keys ("Entrypoint", "Cmd",
+ * "Env", "WorkingDir", "User") — the exact shape of the mediamtx image that
+ * failed ("Entrypoint":["/entrypoint.sh"], no lowercase spelling). The C
+ * parser must read these like the Go oracle's case-insensitive
+ * json.Unmarshal. */
+static const char CONFIG_JSON_CAPS[] =
+    "{\"config\":{\"Env\":[\"PATH=/usr/bin\"],"
+    "\"Entrypoint\":[\"/entrypoint.sh\"],"
+    "\"Cmd\":[\"--flag\"],"
+    "\"WorkingDir\":\"/\","
+    "\"User\":\"1000\"},"
     "\"rootfs\":{\"type\":\"layers\","
     "\"diff_ids\":[\"sha256:aaa\",\"sha256:bbb\"]}}";
 
@@ -1532,6 +1608,165 @@ static void test_lifecycle_start(void) {
 }
 
 /* =========================================================================
+ * Test 8b: image config parsing — the OCI/Docker config blob uses
+ * CAPITALIZED keys ("Entrypoint", "Cmd", "Env", "WorkingDir", "User"). The
+ * C parser must read them (the Go oracle's json.Unmarshal matches struct
+ * fields case-insensitively), and the lowercase spelling must keep working.
+ *
+ * parse_image_config is static, so the observable is the OCI spec the
+ * client builds from it: entrypoint+cmd -> process.args, env ->
+ * process.env, working_dir -> cwd, user -> uid. The fake server captures
+ * the Containers/Create request body and the test decodes the spec JSON it
+ * carried.
+ * ========================================================================= */
+
+/* Run the new-container sequence with the given image-config blob and check
+ * the built OCI spec's process fields. expect_user == NULL means the config
+ * carries no user (root: no "uid" is emitted). */
+static void test_image_config_keys_case(const char *config_json,
+                                        const char *expect_args,
+                                        const char *expect_user,
+                                        const char *expect_cwd) {
+  char path[128];
+  int lfd = temp_listen(path, sizeof(path));
+  uint8_t image_resp[512], create_ctr_resp[256];
+  uint8_t read_manifest[512], read_config[512];
+  uint8_t captured[4096];
+  size_t image_len, create_ctr_len, read_manifest_len, read_config_len;
+  size_t captured_len = 0;
+  const uint8_t *manifest_msgs[1], *config_msgs[1];
+  uint32_t manifest_lens[1], config_lens[1];
+  struct script_arg sa;
+  struct fstep script[5];
+  pthread_t th;
+  strim_containerd_client *client = NULL;
+  strim_container *ctr = NULL;
+  strim_spec spec;
+  strim_mount mounts[1];
+  containerd_services_containers_v1_CreateContainerRequest req =
+      containerd_services_containers_v1_CreateContainerRequest_init_zero;
+  pb_istream_t is;
+  char spec_json[4096];
+  int rc;
+
+  CHECK(lfd >= 0);
+  if (lfd < 0)
+    return;
+
+  build_image_get_resp(image_resp, sizeof(image_resp), &image_len);
+  build_create_container_resp(create_ctr_resp, sizeof(create_ctr_resp),
+                              &create_ctr_len);
+  build_read_resp(read_manifest, sizeof(read_manifest), &read_manifest_len,
+                  MANIFEST_JSON, strlen(MANIFEST_JSON));
+  build_read_resp(read_config, sizeof(read_config), &read_config_len,
+                  config_json, strlen(config_json));
+
+  manifest_msgs[0] = read_manifest;
+  manifest_lens[0] = (uint32_t)read_manifest_len;
+  config_msgs[0] = read_config;
+  config_lens[0] = (uint32_t)read_config_len;
+
+  memset(script, 0, sizeof(script));
+  script[0].kind = FS_UNARY;
+  script[0].body = image_resp;
+  script[0].body_len = (uint32_t)image_len;
+  script[1].kind = FS_STREAM; /* Content/Read: the image manifest */
+  script[1].msgs = manifest_msgs;
+  script[1].n_msgs = 1;
+  script[1].msg_lens = manifest_lens;
+  script[2].kind = FS_STREAM; /* Content/Read: the image config */
+  script[2].msgs = config_msgs;
+  script[2].n_msgs = 1;
+  script[2].msg_lens = config_lens;
+  script[3].kind = FS_UNARY; /* Snapshots/Prepare (body ignored) */
+  script[3].body = NULL;
+  script[3].body_len = 0;
+  script[4].kind = FS_UNARY; /* Containers/Create */
+  script[4].body = create_ctr_resp;
+  script[4].body_len = (uint32_t)create_ctr_len;
+
+  memset(&sa, 0, sizeof(sa));
+  sa.listener_fd = lfd;
+  sa.script = script;
+  sa.n_steps = sizeof(script) / sizeof(script[0]);
+  sa.capture_step = 4;
+  sa.capture_body = captured;
+  sa.capture_len = &captured_len;
+  sa.capture_cap = sizeof(captured);
+  pthread_create(&th, NULL, scripted_server, &sa);
+
+  rc = strim_containerd_connect(path, "strimserver", &client);
+  CHECK(rc == 0 && client != NULL);
+  if (rc != 0)
+    return;
+
+  /* The OCI spec (no CDI resolution in this test). */
+  memset(&spec, 0, sizeof(spec));
+  mounts[0].source = "/mnt/nvme/config/strimserver.env";
+  mounts[0].destination = "/strimserver.env";
+  mounts[0].read_write = false;
+  spec.mounts = mounts;
+  spec.n_mounts = 1;
+  spec.host_network = true;
+
+  rc = strim_containerd_new_container(client, "ctr-1", "snap-ctr-1",
+                                      "docker.io/library/ffmpeg:latest",
+                                      &spec, &ctr);
+  CHECK(rc == 0 && ctr != NULL);
+  if (rc != 0) {
+    strim_containerd_close(client);
+    pthread_join(th, NULL);
+    close(lfd);
+    unlink(path);
+    return;
+  }
+
+  /* Decode the captured Containers/Create request and inspect the OCI spec
+   * JSON it carried. */
+  is = pb_istream_from_buffer(captured, captured_len);
+  CHECK(pb_decode(
+      &is, containerd_services_containers_v1_CreateContainerRequest_fields,
+      &req));
+  CHECK(req.has_container && req.container.has_spec &&
+        req.container.spec.value != NULL);
+  if (req.has_container && req.container.has_spec &&
+      req.container.spec.value != NULL) {
+    size_t json_len = req.container.spec.value->size;
+    if (json_len >= sizeof(spec_json))
+      json_len = sizeof(spec_json) - 1;
+    memcpy(spec_json, req.container.spec.value->bytes, json_len);
+    spec_json[json_len] = '\0';
+    CHECK(expect_args == NULL ||
+          strstr(spec_json, expect_args) != NULL);
+    CHECK(expect_user == NULL ||
+          strstr(spec_json, expect_user) != NULL);
+    CHECK(expect_cwd == NULL ||
+          strstr(spec_json, expect_cwd) != NULL);
+    /* The image config env must land in process.env. */
+    CHECK(strstr(spec_json, "\"PATH=/usr/bin\"") != NULL);
+  }
+  pb_release(containerd_services_containers_v1_CreateContainerRequest_fields,
+             &req);
+
+  strim_containerd_close(client);
+  pthread_join(th, NULL);
+  close(lfd);
+  unlink(path);
+}
+
+static void test_image_config_case_insensitive(void) {
+  /* Capitalized keys (OCI canonical — the exact mediamtx case that failed):
+   * Entrypoint lands in args, Cmd follows it, WorkingDir -> cwd, User ->
+   * uid. */
+  test_image_config_keys_case(CONFIG_JSON_CAPS,
+                              "\"args\":[\"/entrypoint.sh\",\"--flag\"]",
+                              "\"uid\":1000", "\"cwd\":\"/\"");
+  /* Lowercase keys (the parser's historical input) must keep working. */
+  test_image_config_keys_case(CONFIG_JSON, "\"args\":[\"/transcode.sh\"]",
+                              NULL, "\"cwd\":\"/\"");
+}
+
+/* =========================================================================
  * Test 9: Task-18 lifecycle — stop sequence (graceful) over the fake server
  * ========================================================================= */
 static void test_lifecycle_stop(void) {
@@ -1780,6 +2015,166 @@ static void test_concurrent_client(void) {
   unlink(path);
 }
 
+/* =========================================================================
+ * Test 12: unary flow-control credit — many sequential unary RPCs on ONE
+ * shared connection, each returning a ~16 KiB response. The unary path must
+ * credit the receive windows exactly like the stream-queue path: without
+ * that, the 64 KiB connection window drains after ~4 responses, the next
+ * DATA frame is rejected and the connection dies (or, against a
+ * window-respecting peer, every later RPC times out). All 24 must succeed.
+ * ========================================================================= */
+
+#define FC_UNARY_RPCS 24
+#define FC_UNARY_BODY (16 * 1024)
+
+static void test_unary_flow_control_credit(void) {
+  char path[128];
+  int lfd = temp_listen(path, sizeof(path));
+  uint8_t big_body[FC_UNARY_BODY];
+  struct script_arg sa;
+  struct fstep script[FC_UNARY_RPCS];
+  pthread_t th;
+  strim_h2c *c = NULL;
+  uint8_t req[] = {1, 2, 3};
+  uint8_t resp[FC_UNARY_BODY];
+  uint32_t resp_len = 0;
+  int served = 0;
+  int i;
+  int rc;
+
+  CHECK(lfd >= 0);
+  if (lfd < 0)
+    return;
+
+  for (i = 0; i < (int)sizeof(big_body); i++)
+    big_body[i] = (uint8_t)(0xA0 + (i % 16));
+
+  memset(script, 0, sizeof(script));
+  for (i = 0; i < FC_UNARY_RPCS; i++) {
+    script[i].kind = FS_UNARY;
+    script[i].body = big_body;
+    script[i].body_len = FC_UNARY_BODY;
+  }
+
+  memset(&sa, 0, sizeof(sa));
+  sa.listener_fd = lfd;
+  sa.script = script;
+  sa.n_steps = FC_UNARY_RPCS;
+  sa.request_count = &served;
+  pthread_create(&th, NULL, scripted_server, &sa);
+
+  rc = h2c_connect(&c, path, "test-ns");
+  CHECK(rc == 0 && c != NULL);
+  if (rc != 0)
+    return;
+
+  for (i = 0; i < FC_UNARY_RPCS; i++) {
+    rc = h2c_unary(c, "/test.Service/Call", req, sizeof(req), resp,
+                   sizeof(resp), &resp_len, 5000);
+    /* Every RPC must succeed: a receive window that is never re-credited
+     * stalls the shared connection after ~4 responses (rejected DATA ->
+     * H2C_ERR_PROTO, or an H2C_ERR_TIMEOUT against a compliant peer). */
+    CHECK(rc == 0);
+    CHECK(resp_len == FC_UNARY_BODY);
+    CHECK(memcmp(resp, big_body, FC_UNARY_BODY) == 0);
+  }
+  CHECK(served == FC_UNARY_RPCS);
+
+  h2c_close(c);
+  pthread_join(th, NULL);
+  close(lfd);
+  unlink(path);
+}
+
+/* =========================================================================
+ * Test 13: gRPC error diagnosability — a daemon that finishes a unary RPC
+ * with a trailers-only non-OK gRPC status (INTERNAL, the code a shim/runc
+ * failure surfaces on Tasks/Create) must fold to STRIM_CTRD_ERR_RPC, never
+ * the old blanket STRIM_CTRD_ERR_IO, and strim_containerd_last_error must
+ * explain it. A follow-up RPC on the same connection must then succeed (a
+ * daemon-returned status is an RPC-level answer, NOT a transport death) and
+ * must clear the retained status.
+ * ========================================================================= */
+static void test_grpc_status_error(void) {
+  char path[128];
+  int lfd = temp_listen(path, sizeof(path));
+  uint8_t image_resp[512];
+  size_t image_len;
+  struct script_arg sa;
+  struct fstep script[2];
+  pthread_t th;
+  strim_containerd_client *client = NULL;
+  strim_image *img = NULL;
+  char reason[96];
+  int served = 0;
+  int n;
+  int rc;
+
+  CHECK(lfd >= 0);
+  if (lfd < 0)
+    return;
+
+  build_image_get_resp(image_resp, sizeof(image_resp), &image_len);
+
+  memset(script, 0, sizeof(script));
+  /* Step 0: the daemon rejects the RPC with trailers-only grpc-status 13
+   * (INTERNAL) plus a grpc-message — exactly what a shim/runc failure on
+   * Tasks/Create produces. The message text is decoded and retained inside
+   * the h2c layer; the public getter surfaces the status + canonical name. */
+  script[0].kind = FS_ERR;
+  script[0].grpc_status = H2C_STATUS_INTERNAL;
+  script[0].grpc_message =
+      "runc create failed: unable to start container process";
+  /* Step 1: a healthy GetImage response on the SAME connection, proving the
+   * daemon-returned error did not tear the shared transport down. */
+  script[1].kind = FS_UNARY;
+  script[1].body = image_resp;
+  script[1].body_len = (uint32_t)image_len;
+
+  memset(&sa, 0, sizeof(sa));
+  sa.listener_fd = lfd;
+  sa.script = script;
+  sa.n_steps = sizeof(script) / sizeof(script[0]);
+  sa.request_count = &served;
+  pthread_create(&th, NULL, scripted_server, &sa);
+
+  rc = strim_containerd_connect(path, "strimserver", &client);
+  CHECK(rc == 0 && client != NULL);
+  if (rc != 0)
+    return;
+
+  /* Before any RPC no daemon status has been observed. */
+  n = strim_containerd_last_error(client, reason, sizeof(reason));
+  CHECK(n == 0);
+
+  rc = strim_containerd_get_image(client, "docker.io/library/ffmpeg:latest",
+                                  &img);
+  /* A daemon-returned INTERNAL must map to STRIM_CTRD_ERR_RPC (-9), NOT the
+   * old blanket STRIM_CTRD_ERR_IO — that distinction is what makes a shim
+   * failure diagnosable instead of a generic IO error. */
+  CHECK(rc == STRIM_CTRD_ERR_RPC);
+
+  /* The getter explains WHY: the retained daemon status + canonical name. */
+  n = strim_containerd_last_error(client, reason, sizeof(reason));
+  CHECK(n == (int)strlen("grpc status 13 (INTERNAL)"));
+  CHECK(strcmp(reason, "grpc status 13 (INTERNAL)") == 0);
+
+  /* The same connection survives a daemon-returned status (only transport
+   * errors reset it), and the next successful RPC clears the retained
+   * status — so a later STRIM_CTRD_ERR_RPC always reflects the LAST RPC. */
+  rc = strim_containerd_get_image(client, "docker.io/library/ffmpeg:latest",
+                                  &img);
+  CHECK(rc == 0 && img != NULL);
+  n = strim_containerd_last_error(client, reason, sizeof(reason));
+  CHECK(n == 0);
+  CHECK(served == 2);
+
+  strim_containerd_close(client);
+  pthread_join(th, NULL);
+  close(lfd);
+  unlink(path);
+}
+
 int main(void) {
   test_h2c_selftest();
   test_unary_rpc();
@@ -1791,9 +2186,12 @@ int main(void) {
   test_oci_spec_builder();
   test_chain_id();
   test_lifecycle_start();
+  test_image_config_case_insensitive();
   test_lifecycle_stop();
   test_force_delete();
   test_concurrent_client();
+  test_unary_flow_control_credit();
+  test_grpc_status_error();
 
   if (failures == 0) {
     printf("containerd lane tests: OK\n");

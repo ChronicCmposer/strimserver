@@ -102,6 +102,26 @@ static void logmsg(const char *fmt, ...) {
     pthread_mutex_unlock(&g_log_lock);
 }
 
+/* Log an RPC failure in the "could not <verb> %s <object>: %d" family. When
+ * the failure is STRIM_CTRD_ERR_RPC and the client retains a daemon gRPC
+ * status, append it so operators see WHY the daemon rejected the RPC (e.g. a
+ * shim/runc error on Tasks/Create):
+ *
+ *   could not create scale-and-egress task: -9 (grpc status 13 (INTERNAL))
+ */
+static void log_rpc_failure(const char *fmt, const char *stage, int rc,
+                            strim_containerd_client *client) {
+    char reason[96];
+    if (rc == STRIM_CTRD_ERR_RPC && client != NULL &&
+        strim_containerd_last_error(client, reason, sizeof reason) > 0) {
+        char full[256];
+        snprintf(full, sizeof full, "%s (%%s)", fmt);
+        logmsg(full, stage, rc, reason);
+    } else {
+        logmsg(fmt, stage, rc);
+    }
+}
+
 /* =========================================================================
  * Config (envspec.go: Config + EnvVar)
  * ========================================================================= */
@@ -1183,8 +1203,9 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
         return 0;
     }
     if (rc != 0) {
-        logmsg("could not load %s container for deletion: %d",
-               strim_stage_name_to_string(ops->stage), rc);
+        log_rpc_failure("could not load %s container for deletion: %d",
+                        strim_stage_name_to_string(ops->stage), rc,
+                        ops->client);
         return rc;
     }
 
@@ -1198,14 +1219,16 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
                strim_stage_name_to_string(ops->stage));
         rc = strim_containerd_delete_container(container, 1);
         if (rc != 0) {
-            logmsg("could not delete %s container: %d",
-                   strim_stage_name_to_string(ops->stage), rc);
+            log_rpc_failure("could not delete %s container: %d",
+                            strim_stage_name_to_string(ops->stage), rc,
+                            ops->client);
         }
         return rc == 0 ? 0 : rc;
     }
     if (rc != 0) {
-        logmsg("could not load %s task for deletion: %d",
-               strim_stage_name_to_string(ops->stage), rc);
+        log_rpc_failure("could not load %s task for deletion: %d",
+                        strim_stage_name_to_string(ops->stage), rc,
+                        ops->client);
         return rc;
     }
 
@@ -1241,8 +1264,9 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
         /* Go: Kill error (non-NotFound) → return; the exit subscription is
          * abandoned. Join the waiter so we never leak a thread. */
         pthread_join(waiter_tid, NULL);
-        logmsg("could not signal %s task: %d",
-               strim_stage_name_to_string(ops->stage), rc);
+        log_rpc_failure("could not signal %s task: %d",
+                        strim_stage_name_to_string(ops->stage), rc,
+                        ops->client);
         return rc;
     }
 
@@ -1258,8 +1282,9 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
                strim_stage_name_to_string(ops->stage), w.exit_code);
         rc = strim_containerd_task_delete(task, 0);
         if (rc != 0) {
-            logmsg("could not delete %s task after graceful exit: %d",
-                   strim_stage_name_to_string(ops->stage), rc);
+            log_rpc_failure("could not delete %s task after graceful exit: %d",
+                            strim_stage_name_to_string(ops->stage), rc,
+                            ops->client);
             return rc;
         }
     } else if (w.rc == STRIM_CTRD_ERR_TIMEOUT) {
@@ -1267,8 +1292,9 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
                strim_stage_name_to_string(ops->stage));
         rc = strim_containerd_task_delete(task, 1);
         if (rc != 0) {
-            logmsg("could not force-delete %s task: %d",
-                   strim_stage_name_to_string(ops->stage), rc);
+            log_rpc_failure("could not force-delete %s task: %d",
+                            strim_stage_name_to_string(ops->stage), rc,
+                            ops->client);
             return rc;
         }
     } else if (w.rc == STRIM_CTRD_ERR_NOTFOUND) {
@@ -1286,8 +1312,9 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
 
     rc = strim_containerd_delete_container(container, 1);
     if (rc != 0) {
-        logmsg("could not delete %s container: %d",
-               strim_stage_name_to_string(ops->stage), rc);
+        log_rpc_failure("could not delete %s container: %d",
+                        strim_stage_name_to_string(ops->stage), rc,
+                        ops->client);
         return rc;
     }
     logmsg("%s container deleted", strim_stage_name_to_string(ops->stage));
@@ -1411,8 +1438,9 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
                                         ops->snapshot_id, ops->image_name,
                                         &spec, &container);
     if (rc != 0) {
-        logmsg("could not create %s container: %d",
-               strim_stage_name_to_string(ops->stage), rc);
+        log_rpc_failure("could not create %s container: %d",
+                        strim_stage_name_to_string(ops->stage), rc,
+                        ops->client);
         return rc;
     }
 
@@ -1422,8 +1450,9 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
 
     rc = strim_containerd_new_task(container, ops->logfile, &task);
     if (rc != 0) {
-        logmsg("could not create %s task: %d",
-               strim_stage_name_to_string(ops->stage), rc);
+        log_rpc_failure("could not create %s task: %d",
+                        strim_stage_name_to_string(ops->stage), rc,
+                        ops->client);
         return rc;
     }
 
@@ -1433,8 +1462,9 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
 
     rc = strim_containerd_task_start(task);
     if (rc != 0) {
-        logmsg("could not start %s task: %d",
-               strim_stage_name_to_string(ops->stage), rc);
+        log_rpc_failure("could not start %s task: %d",
+                        strim_stage_name_to_string(ops->stage), rc,
+                        ops->client);
         return rc;
     }
     return 0;
