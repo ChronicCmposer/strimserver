@@ -8,7 +8,37 @@ module(
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "rules_shell", version = "0.8.0")
-bazel_dep(name = "rules_cc", version = "0.1.1")
+# rules_cc is pinned to 0.2.17 (not the historical 0.1.1): hermetic_cc_toolchain
+# 4.3.0 requires >= 0.2.14, and bzlmod's max-version selection already resolves
+# 0.2.17 in practice. Declaring it keeps --check_direct_dependencies happy.
+bazel_dep(name = "rules_cc", version = "0.2.17")
+
+# --- Hermetic musl C toolchain (Wave 0-A) ----------------------------------
+# The new C controller layer (//core/controller/c) is built statically against
+# musl with the Uber hermetic_cc_toolchain (zig cc 0.15.2). Registration is
+# OPT-IN via --config=amd64 / --config=arm64 in .bazelrc, which pass
+# --extra_toolchains (explicit requests always win resolution): default builds
+# keep the pre-existing clang/glibc cross toolchain
+# (//tools/bazel/toolchains:cc_toolchain_for_linux_amd64, registered at the
+# bottom of this file) and the pure-Go controller.
+bazel_dep(name = "hermetic_cc_toolchain", version = "4.3.0")
+
+toolchains = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
+use_repo(toolchains, "zig_sdk")
+
+# The musl variants for both target arches (plain + libc-aware). The actual
+# register_toolchains(...) calls live at the BOTTOM of this file, AFTER the
+# pre-existing clang cross toolchain registration: Bazel tries registered
+# toolchains in registration order and the first compatible one wins, so the
+# clang toolchain must stay earlier to remain the DEFAULT. The zig toolchains
+# are selected only when --config=amd64 / --config=arm64 pass
+# --extra_toolchains (explicit requests always win resolution).
+
+# Vendored C libs, no BCR deps needed: wslay is NOT on the BCR (checked
+# 2026-09-23) and is vendored under third_party/wslay; yyjson is vendored
+# source and needs no dep. libmicrohttpd (third_party/libmicrohttpd, pinned
+# 1.0.10) and nanopb (core/controller/c/nanopb) are vendored in-tree, so their
+# previously-added BCR bazel_deps were removed.
 
 # --- Go controller -----------------------------------------------------------
 bazel_dep(name = "rules_go", version = "0.63.0")
@@ -660,3 +690,16 @@ use_repo(npm, "npm")
 # local_config_cc toolchain. No execution platform is registered here (see the
 # linux_x86_64_exec comment in .bazelrc).
 register_toolchains("//tools/bazel/toolchains:cc_toolchain_for_linux_amd64")
+
+# --- Wave 0-A: zig musl toolchain registration ----------------------------
+# Registered AFTER the clang cross toolchain above so it stays the DEFAULT for
+# linux/amd64 C targets. The zig musl toolchains are only ever SELECTED when a
+# build passes --config=amd64 / --config=arm64 (which add --extra_toolchains,
+# the highest-priority resolution input). See the comment near the
+# hermetic_cc_toolchain bazel_dep at the top of this file.
+register_toolchains(
+    "@zig_sdk//toolchain:linux_amd64_musl",
+    "@zig_sdk//toolchain:linux_arm64_musl",
+    "@zig_sdk//libc_aware/toolchain:linux_amd64_musl",
+    "@zig_sdk//libc_aware/toolchain:linux_arm64_musl",
+)

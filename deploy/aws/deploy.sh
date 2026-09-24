@@ -15,6 +15,14 @@ trap cleanup EXIT INT TERM
 : "${S3_BUCKET:=<S3_BUCKET>}"
 : "${TARGET_HOSTNAME:=strimserver}"
 
+# Which controller image is inside controller-container.tar. Every release
+# ships FOUR bundles (Go + C controllers x amd64 + arm64); the bundle the
+# operator selected is recorded here (set CONTROLLER_VARIANT when deploying a
+# C bundle: c-amd64 / c-arm64). Purely informational -- the import step below
+# is variant-agnostic (the image tar keeps the same name in every bundle).
+: "${CONTROLLER_VARIANT:=go-amd64}"
+printf "controller variant: %s\n" "$CONTROLLER_VARIANT"
+
 # metadata / diagnostics
 source /mnt/nvme/imdslib.sh 
 export PUBLIC_IP=$(get_public_ip)
@@ -58,12 +66,12 @@ fi
 # ------------------------------------------------------------------------------
 
 # NVIDIA GPU runtime: arch-aware (the DLAMI carries the driver + container
-# toolkit; on arm64 the assembly controller uses Option C - per-container task
-# options point the runc shim at nvidia-container-runtime for the GPU stages,
-# with the default runtime left unchanged; on amd64 the Go controller injects
-# CDI itself from /etc/cdi/nvidia.yaml). Runs BEFORE the containerd block below
-# so the single restart picks up any GPU wiring together with the root/state
-# config prepend.
+# toolkit). Both controllers -- the Go controller (CONTROLLER_VARIANT=go-*)
+# and the C controller (CONTROLLER_VARIANT=c-*, the musl-static Go-equivalent
+# port) -- inject CDI themselves from /etc/cdi/nvidia.yaml (the C controller
+# mirrors the Go cdi.WithCDIDevices behavior), so no runtime shim switch is
+# needed on either arch. Runs BEFORE the containerd block below so the single
+# restart picks up any GPU wiring together with the root/state config prepend.
 bash ./setup-gpu.sh
 rm -f /mnt/nvme/setup-gpu.sh
 
@@ -94,7 +102,7 @@ set +x
 printf "systemd service files installed!\n"
 
 # import images
-printf "importing images...\n"
+printf "importing images (%s)...\n" "$CONTROLLER_VARIANT"
 CONTAINERD_NAMESPACE="strimserver"
 set -x
 sudo ctr -n $CONTAINERD_NAMESPACE i import controller-container.tar

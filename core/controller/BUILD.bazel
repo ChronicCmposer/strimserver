@@ -311,10 +311,80 @@ sh_test(
 
 # Promotes oci_load's named "tarball" output group (the raw OCI tar; the
 # default output is a runnable `docker load`-style script) into a plain
-# filegroup so //:strimserver_deployment_tar can depend on it normally.
+# filegroup so the deployment bundles (//:strimserver_deployment_*) can depend
+# on it normally.
 filegroup(
     name = "controller_image_tar_file",
     srcs = [":controller_image_tarball"],
     output_group = "tarball",
     visibility = ["//visibility:public"],
+)
+
+# =============================================================================
+# C controller image (FROM scratch, NO shell/donors). Wave-4: the musl-static
+# C controller (//core/controller/c:strimserver-controller) is the ONLY file
+# in the image and IS the entrypoint -- no /entrypoint.sh, no /bin/sh, no
+# dash/libc6/ld-linux donors (the binary needs no loader or libc). The binary
+# is built by the hermetic zig musl toolchain under --config=amd64 /
+# --config=arm64 (or the //:c_controller_transition rules); its arch follows
+# the target platform, and oci_image stamps the matching architecture -- the
+# same pattern as :controller_image above.
+#
+# All targets here are `manual`: they pull the C binary into the graph, and a
+# plain `bazel build //...` (default clang/glibc toolchain) must not build it
+# (the -static glibc link would fail). The bundle graph reaches them only
+# through //:c_controller_transition, which injects the zig musl config.
+# =============================================================================
+
+pkg_files(
+    name = "controller_bin_c",
+    srcs = ["//core/controller/c:strimserver-controller"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+    renames = {"//core/controller/c:strimserver-controller": "strimserver-controller"},
+    tags = ["manual"],
+)
+
+pkg_tar(
+    name = "controller_c_files_tar",
+    srcs = [":controller_bin_c"],
+    tags = ["manual"],
+)
+
+oci_image(
+    name = "controller_image_c",
+    architecture = select({
+        "//tools/bazel:is_amd64_target": "amd64",
+        "//tools/bazel:is_arm64_target": "arm64",
+    }),
+    entrypoint = ["/strimserver-controller"],
+    os = "linux",
+    tars = [":controller_c_files_tar"],
+    tags = ["manual"],
+)
+
+oci_load(
+    name = "controller_image_c_tarball",
+    image = ":controller_image_c",
+    repo_tags = ["docker.io/library/strimserver-controller-c:latest"],
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "controller_image_c_tar_file",
+    srcs = [":controller_image_c_tarball"],
+    output_group = "tarball",
+    visibility = ["//visibility:public"],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "image_c_smoke_test",
+    srcs = ["image_c_smoke_test.sh"],
+    args = ["$(location :controller_c_files_tar)"] + select({
+        "//tools/bazel:is_amd64_target": ["amd64"],
+        "//tools/bazel:is_arm64_target": ["arm64"],
+    }),
+    data = [":controller_c_files_tar"],
+    tags = ["manual"],
 )

@@ -1,0 +1,33 @@
+# nanopb generator options for the minimal containerd API set (v1.12.0).
+#
+# STRATEGY (Wave 0-D, codegen contract):
+#   Unbounded fields (string, bytes, repeated, map) become dynamically
+#   allocated pointers (FT_POINTER) via `fallback_type`; the codecs and the
+#   nanopb runtime are compiled with PB_ENABLE_MALLOC, so pb_decode allocates
+#   and pb_release() frees. The C controller owns the allocator (libc malloc
+#   on a -static binary) and must pb_release() every decoded message.
+#
+#   Why fallback_type:FT_POINTER instead of `type:FT_POINTER`:
+#     `type` would force EVERY field (including fixed-size scalars like
+#     uint32 pid / int64 seconds / bool / enums and embedded messages like
+#     Timestamp) onto the heap, turning the generated structs into
+#     pointer-everything with poor ergonomics for the assembly-driven
+#     controller. `fallback_type` only kicks in where nanopb's static
+#     allocation cannot work -- exactly the fields that are unbounded:
+#       * string fields without max_size/max_length
+#       * bytes fields without max_size/fixed_length
+#       * repeated fields without max_count
+#       * map fields (implemented as repeated map-entry messages)
+#     and circular message dependencies (none here).
+#     Scalar/enum fields stay plain C values; message fields stay embedded.
+#     Unbounded fields become:
+#       string           -> char *            (allocated, NUL-terminated)
+#       bytes            -> pb_bytes_array_t * (allocated)
+#       repeated T       -> pb_size_t count; T *items (allocated array)
+#       map<K,V>         -> pb_size_t count; K_V_Entry *entries
+#   This matches the repo's "you own the allocator" decision for the
+#   containerd API: no size annotations are possible for arbitrary labels /
+#   annotations / Any payloads, and callbacks would force per-field plumbing
+#   in every controller RPC.
+
+* fallback_type:FT_POINTER

@@ -1,0 +1,153 @@
+# Wave 1 (containerd lane): the hand-rolled h2c containerd client.
+#
+# The containerd client contract is the top-level header
+# //core/controller/c:containerd_lib (containerd_client.h). This subpackage
+# adds the implementation:
+#
+#   h2c.c/.h + h2c_huff.inc    HTTP/2 prior-knowledge + gRPC framing layer
+#   containerd_client.c        the containerd_client.h contract
+#   oci_spec.c/.h              OCI runtime-spec JSON builder (oci.GenerateSpec)
+#   snapshots.c/.h             Snapshots service (Prepare/Remove/Mounts),
+#                              hand-rolled protobuf (minipb.h)
+#   content.c/.h               Content service Read (hand-rolled protobuf)
+#   sha256.c/.h                image rootfs chain-ID digest
+#   cdi.c/.h(interface)        cdi.h implementation (yyjson)
+#   minipb.h                   protobuf wire helpers for the hand-rolled codecs
+#
+# Deps: the nanopb codecs (//core/controller/c:codecs), the interface
+# headers (//core/controller/c:containerd_lib -> :core_lib for spec.h/cdi.h),
+# the core lane's implementation (//core/controller/c/core:core_lib — the
+# production strim_default_unix_env / spec constructors / stage-argv helper),
+# and the vendored yyjson (//third_party/yyjson:yyjson). Static musl for both
+# arches (--config=amd64 / --config=arm64).
+#
+# Threading: the client serializes its shared-connection RPCs with a pthread
+# mutex (the Wave-1 controller drives ops on a 4-thread worker pool), so the
+# library carries -lpthread for its consumers.
+#
+# h2c_huff.inc is a #included table (not a compilation unit): it lives in
+# hdrs, never srcs.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+_MUSL_FEATURES = ["-supports_dynamic_linker"]
+
+_COMMON_COPTS = [
+    "-std=gnu11",
+    "-Wall",
+    "-Wextra",
+]
+
+_TARGET_COMPAT = select({
+    "//tools/bazel:is_amd64_target": [],
+    "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+    "//conditions:default": ["@platforms//cpu:aarch64"],
+})
+
+cc_library(
+    name = "containerd_lib",
+    tags = ["manual"],
+    srcs = [
+        "cdi.c",
+        "containerd_client.c",
+        "content.c",
+        "h2c.c",
+        "oci_spec.c",
+        "sha256.c",
+        "snapshots.c",
+    ],
+    hdrs = [
+        "cdi_internal.h",
+        "content.h",
+        "h2c.h",
+        "h2c_huff.inc",
+        "minipb.h",
+        "oci_spec.h",
+        "sha256.h",
+        "snapshots.h",
+    ],
+    copts = _COMMON_COPTS,
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    linkopts = ["-lpthread"],
+    target_compatible_with = _TARGET_COMPAT,
+    deps = [
+        "//core/controller/c:codecs",
+        "//core/controller/c:containerd_lib",
+        "//core/controller/c:core_lib",
+        "//core/controller/c/core:core_lib",
+        "//third_party/yyjson:yyjson",
+    ],
+)
+
+# Scratch tests (daemon-free): h2c framing + fake-server RPCs + event
+# pipeline + nanopb service round-trips + OCI spec builder + chain ID + the
+# Task-18 lifecycle sequences (start/stop/force-delete over a scripted fake
+# server) + the client's internal-mutex concurrency check.
+cc_test(
+    name = "containerd_client_test",
+    tags = ["manual"],
+    srcs = ["containerd_client_test.c"],
+    copts = _COMMON_COPTS,
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    linkopts = ["-static", "-pthread"],
+    target_compatible_with = _TARGET_COMPAT,
+    deps = [
+        ":containerd_lib",
+        "//core/controller/c:codecs",
+        "//core/controller/c:containerd_lib",
+        "//core/controller/c:core_lib",
+        "//core/controller/c/core:core_lib",
+    ],
+)
+
+# CDI fixture test: parse a nvidia.com/gpu=0 spec file and merge its
+# containerEdits. The core subpackage is required at link time because the
+# library's oci_spec.c references strim_default_unix_env (defined by the core
+# lane, never redefined by this package).
+cc_test(
+    name = "cdi_test",
+    tags = ["manual"],
+    srcs = ["cdi_test.c"],
+    copts = _COMMON_COPTS,
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    linkopts = ["-static", "-pthread"],
+    target_compatible_with = _TARGET_COMPAT,
+    deps = [
+        ":containerd_lib",
+        "//core/controller/c:codecs",
+        "//core/controller/c:core_lib",
+        "//core/controller/c/core:core_lib",
+    ],
+)
+
+# Live-daemon smoke test (Wave 3): proves the lazy-connect contract against a
+# bogus socket (always runs, no daemon required) and, when a real containerd
+# daemon is reachable (env CONTAINERD_SOCKET or the default socket), exercises
+# connect + a minimal GetImage round-trip. NO image pulls and NO container
+# create/start/kill/wait/delete cycle: the project's rootless-daemon CI
+# environments cannot pull images (uid/gid unmappable in the user namespace),
+# so a connect + round-trip RPC is the whole verification. Without a reachable
+# daemon it reports SKIPPED and exits 0, so CI without containerd stays green
+# (modeled on //core/controller/alternate/c:cc_grpc_test).
+cc_test(
+    name = "containerd_smoke_test",
+    tags = ["manual"],
+    srcs = ["containerd_smoke_test.c"],
+    copts = _COMMON_COPTS,
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    linkopts = ["-static", "-pthread"],
+    target_compatible_with = _TARGET_COMPAT,
+    deps = [
+        ":containerd_lib",
+        "//core/controller/c:codecs",
+        "//core/controller/c:containerd_lib",
+        "//core/controller/c:core_lib",
+        "//core/controller/c/core:core_lib",
+    ],
+)

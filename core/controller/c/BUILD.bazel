@@ -1,0 +1,463 @@
+# Wave 0-A foundation: the C controller layer package skeleton.
+#
+# This is the INTERFACE + aggregate package. The five headers below are the
+# contract every lane codes against (controller.h, containerd_client.h,
+# spec.h, http_server.h, cdi.h). The IMPLEMENTATIONS live in the per-lane
+# subpackages so Wave-1 lanes never contend on this BUILD file:
+#
+#   //core/controller/c/core:core_lib           (core/ controller state machine)
+#   //core/controller/c/containerd:containerd_lib (containerd client)
+#   //core/controller/c/http:http_lib             (HTTP/websocket server)
+#
+# Structure (no include cycles):
+#   - The top-level :core_lib / :containerd_lib / :http_lib own the interface
+#     headers and expose them with includes = ["."] (consumers write
+#     `#include "controller.h"`).
+#   - Each subpackage's :*_lib depends on the matching top-level lib for the
+#     headers and adds the implementation .c sources (Wave 1).
+#   - The binary links the three top-level libs AND the three subpackage libs.
+#
+# Targets are `manual` like the alternate asm/c packages: they build only on
+# explicit request (bazel build //core/controller/c:strimserver-controller or
+# with --config=amd64/--config=arm64) and are excluded from `bazel build //...`
+# wildcards, so the default Go controller and other agents' builds are
+# untouched. The binary itself is a placeholder main() until Wave 2.
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
+load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("//tools/bazel:deb_file.bzl", "deb_file")
+
+package(default_visibility = ["//visibility:public"])
+
+# Static musl build for both target arches (via --config=amd64 / --config=arm64
+# in .bazelrc, which select the zig musl toolchains). -supports_dynamic_linker
+# + linkstatic=True force fully static binaries; zig cc's default UBSan is
+# disabled in those configs (-fno-sanitize=undefined).
+_MUSL_FEATURES = ["-supports_dynamic_linker"]
+
+# Both target arches build (--config=amd64 / --config=arm64, zig musl);
+# mirrors the subpackages: amd64 target has no constraint, arm64 requires
+# aarch64, any third platform is arm64-only.
+_TARGET_COMPAT = select({
+    "//tools/bazel:is_amd64_target": [],
+    "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+    "//conditions:default": ["@platforms//cpu:aarch64"],
+})
+
+cc_library(
+    name = "core_lib",
+    tags = ["manual"],
+    hdrs = [
+        "cdi.h",
+        "controller.h",
+        "spec.h",
+    ],
+    includes = ["."],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    target_compatible_with = _TARGET_COMPAT,
+)
+
+cc_library(
+    name = "containerd_lib",
+    tags = ["manual"],
+    hdrs = ["containerd_client.h"],
+    includes = ["."],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    target_compatible_with = _TARGET_COMPAT,
+    # containerd_client.h includes spec.h from :core_lib.
+    deps = [":core_lib"],
+)
+
+cc_library(
+    name = "http_lib",
+    tags = ["manual"],
+    hdrs = ["http_server.h"],
+    includes = ["."],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    target_compatible_with = _TARGET_COMPAT,
+)
+
+# The controller binary (Wave 2 integration lane). main.c is the only source
+# living in THIS package; it wires the three Wave-1 implementation libs (core
+# state machine, containerd client, HTTP/websocket server) plus the nanopb
+# codecs into the final `strimserver-controller`. It IS the image entrypoint
+# (no /entrypoint.sh, no /bin/sh): main() sources /strimserver.env when
+# present, then runs the Go run() lifecycle.
+#
+# main.c directly uses the yyjson API (the /event + /control body parsers) and
+# the nanopb codec types transitively via the containerd lib; the explicit
+# codecs + yyjson deps keep that contract local to the binary.
+#
+# Links fully static for both target arches (--config=amd64 / --config=arm64,
+# zig musl): -supports_dynamic_linker + linkstatic=True force static; the
+# -static linkopt makes it explicit. -lpthread (controller worker pool +
+# client mutexes + the stop-path waiter thread), -lm/-ldl (defensive; musl
+# folds them into libc and the archives are no-ops when unused).
+cc_binary(
+    name = "strimserver-controller",
+    tags = ["manual"],
+    srcs = ["main.c"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+        # main.c includes the HTTP lane's private contract header
+        # (core/controller/c/http/internal.h — STRIM_HTTP_ERR_BADJSON +
+        # strim_http_ws_send). http_lib exports it via hdrs + includes = ["."]
+        # (the includes attr is what actually puts core/controller/c/http on
+        # the quote include path, ahead of libmicrohttpd's same-named
+        # src/microhttpd/internal.h).
+    ],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    target_compatible_with = _TARGET_COMPAT,
+    linkopts = [
+        "-static",
+        "-lpthread",
+        "-lm",
+        "-ldl",
+    ],
+    deps = [
+        ":codecs",
+        ":containerd_lib",
+        ":core_lib",
+        ":http_lib",
+        "//core/controller/c/containerd:containerd_lib",
+        "//core/controller/c/core:core_lib",
+        "//core/controller/c/http:http_lib",
+        "//third_party/yyjson:yyjson",
+    ],
+)
+
+# ===========================================================================
+# Wave 0-D: nanopb containerd codecs (generator harness + committed codecs)
+# ===========================================================================
+# The containerd lane (//core/controller/c/containerd, Wave 1) speaks
+# containerd's gRPC API over the hand-rolled h2c client. This block is the
+# protobuf codec half of that lane: nanopb 0.4.9.2 codecs for the minimal
+# containerd API set (Images Get, Containers Create/Get/Delete, Tasks
+# Create/Start/Kill/Delete/Wait, Events Subscribe, plus the types/* and
+# google/protobuf well-known-type protos they import), generated by the
+# nanopb generator and COMMITTED as arch-independent C under gen/.
+#
+# Strategy (nanopb.options): `* fallback_type:FT_POINTER` + PB_ENABLE_MALLOC.
+# Every unbounded field (string / bytes / repeated / map<string,string> /
+# map<string,Any>) becomes a dynamically allocated pointer; the codecs and
+# runtime are compiled with PB_ENABLE_MALLOC so pb_decode() allocates and
+# pb_release() frees. Scalar and message fields stay static/embedded (no
+# pointer-per-int overhead). The C controller owns the allocator.
+#
+# Why nanopb (vs the alternate protobuf-c lane in third_party):
+#   - zlib license, no protobuf runtime library, tiny single-file runtime.
+#   - Native proto3 `optional` support (containerd images.proto uses it) --
+#     no protoc plugin feature patch needed.
+#   - Committed codecs keep codegen off the build path: both arches compile
+#     the committed gen/ sources directly; the generator toolchain is only
+#     needed for explicit regeneration (bazel run //core/controller/c:write_codecs).
+#
+# Codegen: //core/controller/c:codegen runs the VENDORED nanopb 0.4.9.2
+# generator binaries (nanopb/generator-bin/{protoc,protoc-gen-nanopb}, the
+# x86-64 PyInstaller builds from the pinned release tarball that bundle
+# protoc 29 + the generator). They run natively on x86_64 exec hosts and
+# under the repo's patched qemu-x86_64 on any other exec host, with the
+# amd64 glibc loader/libs supplied hermetically via qemu's -L sysroot (same
+# pattern as core/BUILD.bazel's cross-strip genrule). The generator is
+# vendored in-tree because the @nanopb bzlmod module's BUILD.bazel currently
+# fails to load in this repo (@protobuf//:protobuf.bzl has no
+# py_proto_library) -- see the Wave 0-D report; Wave 0-A owns that dep.
+#
+# The genrule outputs go to generated/codecgen/ (NOT gen/) so the committed
+# gen/ files are never shadowed by bazel-bin, and write_source_files copies
+# them back into gen/. Regenerate after bumping the nanopb or containerd-api
+# pins:
+#   bazel run //core/controller/c:write_codecs
+# The genrule is deterministic (pinned generator binaries + pinned protos),
+# so committed gen/ == regenerated byte-for-byte.
+
+# Files the generator is asked to produce, relative to their proto root.
+# google/protobuf/*.proto resolve from the vendored WKT include dir
+# (nanopb/generator-bin/grpc_tools/_proto); the containerd files from proto/.
+NANOPB_PROTOS = [
+    "google/protobuf/any.proto",
+    "google/protobuf/timestamp.proto",
+    "google/protobuf/empty.proto",
+    "google/protobuf/field_mask.proto",
+    "services/containers/v1/containers.proto",
+    "services/tasks/v1/tasks.proto",
+    "services/images/v1/images.proto",
+    "services/events/v1/events.proto",
+    "types/event.proto",
+    "types/mount.proto",
+    "types/descriptor.proto",
+    "types/task/task.proto",
+    "types/metrics.proto",
+    # Generated only because types/event.pb.h and events/task.pb.h #include
+    # it (nanopb emits an include for every import). It carries only the two
+    # fieldpath custom-option extensions and compiles to a tiny stub.
+    "types/fieldpath.proto",
+    "events/task.proto",
+]
+
+NANOPB_CODEC_PAIRS = [
+    (p[: -len(".proto")] + ".pb.c", p[: -len(".proto")] + ".pb.h")
+    for p in NANOPB_PROTOS
+]
+
+# The containerd proto sources copied from the pinned containerd api v1.12.0
+# tree (the WKT protos come from the vendored nanopb include dir).
+CONTAINERD_PROTOS = [
+    "services/containers/v1/containers.proto",
+    "services/tasks/v1/tasks.proto",
+    "services/images/v1/images.proto",
+    "services/events/v1/events.proto",
+    "types/event.proto",
+    "types/mount.proto",
+    "types/descriptor.proto",
+    "types/task/task.proto",
+    "types/metrics.proto",
+    "types/fieldpath.proto",
+    "events/task.proto",
+]
+
+# ---------------------------------------------------------------------------
+# Vendored nanopb generator tooling + the qemu/sysroot pieces needed to run
+# the x86-64 generator binaries on non-x86_64 exec hosts.
+# ---------------------------------------------------------------------------
+filegroup(
+    name = "nanopb_wkt_protos",
+    srcs = glob(["nanopb/generator-bin/grpc_tools/_proto/**/*.proto"]),
+)
+
+# The PyInstaller bootloader bundle (libpython3.8, stdlib, protobuf runtime)
+# that the vendored protoc / protoc-gen-nanopb binaries load relative to
+# their own path. Must be in the genrule's sandbox next to the binaries.
+filegroup(
+    name = "nanopb_generator_internal",
+    srcs = glob(["nanopb/generator-bin/_internal/**"]),
+)
+
+filegroup(
+    name = "nanopb_generator_proto",
+    srcs = glob(["nanopb/generator-bin/proto/**"]),
+)
+
+alias(
+    name = "codegen_qemu_tool",
+    actual = select({
+        "//tools/bazel:is_x86_64_exec": ":codegen_qemu_placeholder",
+        "//conditions:default": "@qemu_x86_64_patched//:qemu-x86_64",
+    }),
+)
+
+genrule(
+    name = "codegen_qemu_placeholder",
+    outs = ["qemu-x86_64.placeholder"],
+    cmd = "touch $@",
+)
+
+# The amd64 runtime closure the PyInstaller protoc/protoc-gen-nanopb need
+# (NEEDED: libdl/libz/libpthread/libc, plus libm for the bundled libpython).
+# Always the /amd64:data variants: the generator binaries are x86-64
+# regardless of the target platform.
+deb_file(
+    name = "codegen_ld_linux_amd64",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+)
+
+deb_file(
+    name = "codegen_libc_amd64",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libc.so.6",
+)
+
+deb_file(
+    name = "codegen_libdl_amd64",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libdl.so.2",
+)
+
+deb_file(
+    name = "codegen_libpthread_amd64",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libpthread.so.0",
+)
+
+deb_file(
+    name = "codegen_libm_amd64",
+    data = "@trixie//libc6/amd64:data",
+    path = "usr/lib/x86_64-linux-gnu/libm.so.6",
+)
+
+deb_file(
+    name = "codegen_libz_amd64",
+    data = "@trixie//zlib1g/amd64:data",
+    # The versioned member (libz.so.1 in the deb is a symlink; deb_file's
+    # tar extraction cannot resolve it). Same path core/BUILD.bazel uses.
+    path = "usr/lib/x86_64-linux-gnu/libz.so.1.3.1",
+)
+
+# ---------------------------------------------------------------------------
+# Codegen genrule: pinned protoc 29 + nanopb plugin over the pinned protos.
+# ---------------------------------------------------------------------------
+genrule(
+    name = "codegen",
+    srcs = [
+        ":nanopb_wkt_protos",
+        "nanopb/generator-bin/grpc_tools/_proto/google/protobuf/any.proto",
+        "proto/nanopb.options",
+    ] + ["proto/" + p for p in CONTAINERD_PROTOS],
+    outs = ["generated/codecgen/" + f for pair in NANOPB_CODEC_PAIRS for f in pair],
+    cmd = """
+set -eu
+OUT=$$(dirname $$(dirname $$(dirname $(location :generated/codecgen/google/protobuf/any.pb.h))))
+PROTO_ROOT=$$(dirname $$(dirname $$(dirname $$(dirname $(location :proto/services/containers/v1/containers.proto)))))
+WKT_ROOT=$$(dirname $$(dirname $$(dirname $$(dirname $(location :nanopb/generator-bin/grpc_tools/_proto/google/protobuf/any.proto)))))
+PROTOC=$(location :nanopb/generator-bin/protoc)
+PLUGIN=$(location :nanopb/generator-bin/protoc-gen-nanopb)
+mkdir -p $$OUT
+host="$$(uname -m)"
+case "$$host" in
+  x86_64)
+    "$$PROTOC" -I $$PROTO_ROOT -I $$WKT_ROOT --plugin=protoc-gen-nanopb=$$PLUGIN \\
+        --nanopb_out=-f,$$PROTO_ROOT/nanopb.options:$$OUT """ + " ".join(NANOPB_PROTOS) + """
+    ;;
+  *)
+    qemu="$(location :codegen_qemu_tool)"
+    sysroot="$$(mktemp -d)"
+    trap 'rm -rf "$$sysroot"' EXIT
+    mkdir -p "$$sysroot/lib64" "$$sysroot/lib/x86_64-linux-gnu" "$$sysroot/lib" "$$sysroot/usr/lib"
+    cp $(location :codegen_ld_linux_amd64) "$$sysroot/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+    ln -s ../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "$$sysroot/lib64/ld-linux-x86-64.so.2"
+    cp $(location :codegen_libc_amd64) "$$sysroot/lib/x86_64-linux-gnu/libc.so.6"
+    cp $(location :codegen_libdl_amd64) "$$sysroot/lib/x86_64-linux-gnu/libdl.so.2"
+    cp $(location :codegen_libpthread_amd64) "$$sysroot/lib/x86_64-linux-gnu/libpthread.so.0"
+    cp $(location :codegen_libm_amd64) "$$sysroot/lib/x86_64-linux-gnu/libm.so.6"
+    cp $(location :codegen_libz_amd64) "$$sysroot/lib/x86_64-linux-gnu/libz.so.1"
+    for f in libc.so.6 libdl.so.2 libpthread.so.0 libm.so.6 libz.so.1; do
+      ln -s ../x86_64-linux-gnu/"$$f" "$$sysroot/lib/$$f"
+      ln -s ../x86_64-linux-gnu/"$$f" "$$sysroot/usr/lib/$$f"
+    done
+    ld="$$sysroot/lib64/ld-linux-x86-64.so.2"
+    QEMU_LD_PREFIX="$$sysroot" QEMU_LD_LIBRARY_PATH="$$sysroot/lib/x86_64-linux-gnu" \\
+        "$$qemu" -E LD_LIBRARY_PATH="$$sysroot/lib/x86_64-linux-gnu" -L "$$sysroot" \\
+        "$$ld" --library-path "$$sysroot/lib/x86_64-linux-gnu" \\
+        "$$PROTOC" -I $$PROTO_ROOT -I $$WKT_ROOT --plugin=protoc-gen-nanopb=$$PLUGIN \\
+        --nanopb_out=-f,$$PROTO_ROOT/nanopb.options:$$OUT """ + " ".join(NANOPB_PROTOS) + """
+    ;;
+esac
+""",
+    tags = ["manual"],
+    tools = [
+        ":codegen_qemu_tool",
+        ":codegen_ld_linux_amd64",
+        ":codegen_libc_amd64",
+        ":codegen_libdl_amd64",
+        ":codegen_libpthread_amd64",
+        ":codegen_libm_amd64",
+        ":codegen_libz_amd64",
+        ":nanopb_generator_internal",
+        ":nanopb_generator_proto",
+        "nanopb/generator-bin/protoc",
+        "nanopb/generator-bin/protoc-gen-nanopb",
+    ],
+)
+
+# Regenerate + commit the codecs: copies the bazel-bin outputs under
+# generated/codecgen/ back into the committed gen/ tree.
+write_source_files(
+    name = "write_codecs",
+    diff_test = False,
+    files = {
+        "gen/%s" % f: "//core/controller/c:generated/codecgen/%s" % f
+        for pair in NANOPB_CODEC_PAIRS
+        for f in pair
+    },
+    tags = ["manual"],
+)
+
+# ---------------------------------------------------------------------------
+# Committed codecs + vendored nanopb runtime -> cc_library
+# ---------------------------------------------------------------------------
+# Both arches compile the COMMITTED gen/ sources directly (they are
+# arch-independent C); the codegen genrule never runs on the build path.
+cc_library(
+    name = "nanopb_runtime",
+    tags = ["manual"],
+    srcs = [
+        "nanopb/pb_common.c",
+        "nanopb/pb_decode.c",
+        "nanopb/pb_encode.c",
+    ],
+    hdrs = [
+        "nanopb/pb.h",
+        "nanopb/pb_common.h",
+        "nanopb/pb_decode.h",
+        "nanopb/pb_encode.h",
+    ],
+    includes = ["nanopb"],
+    defines = ["PB_ENABLE_MALLOC=1"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    target_compatible_with = _TARGET_COMPAT,
+)
+
+cc_library(
+    name = "codecs",
+    tags = ["manual"],
+    srcs = ["gen/%s" % f for pair in NANOPB_CODEC_PAIRS for f in pair],
+    hdrs = ["gen/%s" % f for pair in NANOPB_CODEC_PAIRS for f in pair],
+    includes = ["gen"],
+    defines = ["PB_ENABLE_MALLOC=1"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    target_compatible_with = _TARGET_COMPAT,
+    deps = [":nanopb_runtime"],
+)
+
+# Round-trip test: encode/decode a Container with a labels map + an Any, and
+# a TaskStart event envelope (map + Any round-trip, plus Any re-decode).
+cc_test(
+    name = "codecs_roundtrip_test",
+    tags = ["manual"],
+    srcs = ["nanopb_codecs_roundtrip_test.c"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    linkopts = ["-static"],
+    target_compatible_with = _TARGET_COMPAT,
+    deps = [":codecs"],
+)

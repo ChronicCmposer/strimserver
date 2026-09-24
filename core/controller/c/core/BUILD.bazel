@@ -1,0 +1,84 @@
+# Wave 1 core lane: controller state machine + OCI spec construction.
+#
+# Implements the committed interface contract (//core/controller/c:core_lib —
+# controller.h, spec.h, cdi.h) with the two .c sources below:
+#   controller.c  the action-queue state machine, worker pool, wire enums
+#   spec.c        OCI spec construction (layout, mount lists, stage argv)
+#
+# Both arches compile (--config=amd64 / --config=arm64, zig musl). The
+# controller uses pthreads (mutex/condvar queue + worker pool), so the
+# library carries -lpthread for its consumers (the top-level binary and the
+# Wave-3 tests). Tests are `manual` like the rest of the C layer: they build
+# on explicit request and are excluded from `bazel build //...` wildcards.
+#
+# target_compatible_with mirrors the alternate/c packages: amd64 target has
+# no constraint, arm64 target requires aarch64, any third platform is
+# arm64-only (matching the pre-amd64-port behavior).
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+_TARGET_COMPAT = select({
+    "//tools/bazel:is_amd64_target": [],
+    "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+    "//conditions:default": ["@platforms//cpu:aarch64"],
+})
+
+_MUSL_FEATURES = ["-supports_dynamic_linker"]
+
+cc_library(
+    name = "core_lib",
+    tags = ["manual"],
+    srcs = [
+        "controller.c",
+        "spec.c",
+    ],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    linkopts = ["-lpthread"],
+    target_compatible_with = _TARGET_COMPAT,
+    deps = ["//core/controller/c:core_lib"],
+)
+
+# State-machine regression suite (ports core/controller/controller_test.go +
+# the inflight-timeout retry + the queue/submit surface).
+cc_test(
+    name = "controller_test",
+    tags = ["manual"],
+    srcs = ["controller_test.c"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    linkopts = ["-static", "-lpthread"],
+    target_compatible_with = _TARGET_COMPAT,
+    deps = [":core_lib"],
+)
+
+# OCI spec construction suite (ports container_factory_test.go's mount/spec
+# cases: ffmpeg/mediamtx mounts, toOCIMounts flags, layout, defaultUnixEnv,
+# added capability, stage argv).
+cc_test(
+    name = "spec_test",
+    tags = ["manual"],
+    srcs = ["spec_test.c"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    linkopts = ["-static", "-lpthread"],
+    target_compatible_with = _TARGET_COMPAT,
+    deps = [":core_lib"],
+)

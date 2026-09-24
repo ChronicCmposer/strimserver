@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # `bazel run //:release` -- replaces `make release GIT_TAG=v1.0.0`.
-# Uploads BOTH architecture bundles (+ checksums) and the Stream Deck plugin
-# bundles to the tagged GitHub release, all built by the one invocation.
-# Requires the GitHub CLI (`gh auth login`) and a pushed tag.
+# Uploads the FOUR deployment bundles (Go + C, amd64 + arm64) with their
+# checksums and the Stream Deck plugin bundles to the tagged GitHub release,
+# all built by the one invocation. Requires the GitHub CLI (`gh auth login`)
+# and a pushed tag.
 set -euo pipefail
 
-tar="$1"
-tar_arm64="$2"
-sha256="$3"
-sha256_arm64="$4"
-streamdeck="$5"
-streamdeck_gz="$6"
+go_tar_amd64="$1"
+go_tar_arm64="$2"
+c_tar_amd64="$3"
+c_tar_arm64="$4"
+go_sha256_amd64="$5"
+go_sha256_arm64="$6"
+c_sha256_amd64="$7"
+c_sha256_arm64="$8"
+streamdeck="$9"
+streamdeck_gz="${10}"
 
 git_tag="${GIT_TAG:-}"
 if [ -z "$git_tag" ] && [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
@@ -22,10 +27,14 @@ if [ -z "$git_tag" ]; then
    exit 1
 fi
 
-echo "Packaged (amd64): $tar"
-echo "Packaged (arm64): $tar_arm64"
-echo "SHA-256 (amd64): $sha256"
-echo "SHA-256 (arm64): $sha256_arm64"
+echo "Go bundle (amd64): $go_tar_amd64"
+echo "Go bundle (arm64): $go_tar_arm64"
+echo "C bundle (amd64): $c_tar_amd64"
+echo "C bundle (arm64): $c_tar_arm64"
+echo "SHA-256 (go amd64): $go_sha256_amd64"
+echo "SHA-256 (go arm64): $go_sha256_arm64"
+echo "SHA-256 (c amd64): $c_sha256_amd64"
+echo "SHA-256 (c arm64): $c_sha256_arm64"
 echo "Stream Deck plugin: $streamdeck"
 echo "Stream Deck plugin (tar.gz): $streamdeck_gz"
 
@@ -34,4 +43,7 @@ if ! gh release view "$git_tag" >/dev/null 2>&1; then
    gh release create "$git_tag" --title "$git_tag" --generate-notes
 fi
 
-gh release upload "$git_tag" "$tar" "$tar_arm64" "$sha256" "$sha256_arm64" "$streamdeck" "$streamdeck_gz" --clobber
+gh release upload "$git_tag" \
+   "$go_tar_amd64" "$go_tar_arm64" "$c_tar_amd64" "$c_tar_arm64" \
+   "$go_sha256_amd64" "$go_sha256_arm64" "$c_sha256_amd64" "$c_sha256_arm64" \
+   "$streamdeck" "$streamdeck_gz" --clobber

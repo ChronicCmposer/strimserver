@@ -8,7 +8,7 @@ S3_BUCKET ?=s3://<bucket-name>
 
 .DEFAULT_GOAL := package
 
-.PHONY: prepare generate check-generated controller test-controller package package-arm64 release \
+.PHONY: prepare generate check-generated controller test-controller package package-arm64 package-all release \
 	bump-version check-no-twitch-key check-deps check-deps-json \
 	check-ffmpeg-dist-deps check-openssh-dist-deps \
 	publish-all publish-strimserver publish-iperf3 publish-streamdeck publish-ffmpeg-dist publish-openssh-dist
@@ -51,12 +51,17 @@ package:
 package-arm64:
 	bazel build //:package_arm64
 
-# Attach the bundle + checksum to an existing tag's GitHub Release.
+# ALL FOUR deployment bundles (+ checksums): Go + C controllers, amd64 +
+# arm64. Equivalent to `bazel build //:package_all` (a single analysis pass
+# produces all four).
+package-all:
+	bazel build //:package_all
+
+# Attach the bundles + checksums to an existing tag's GitHub Release.
 # Requires the GitHub CLI (`gh auth login`).
 # NOTE: the release/publish targets wrap the Bazel targets, which now produce
-# BOTH the amd64 bundle (strimserver-deployment.tar) and the arm64 bundle
-# (strimserver-deployment-arm64.tar) in one invocation -- no Makefile logic
-# change was needed.
+# ALL FOUR bundles (strimserver-deployment-{go,c}-{amd64,arm64}.tar, each with
+# its .sha256) in one invocation -- no Makefile logic change was needed.
 GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null)
 release:
 	GIT_TAG=$(GIT_TAG) bazel run --action_env=GIT_TAG //:release
@@ -70,12 +75,11 @@ bump-version:
 	fi
 	bazel run //:bump_version -- "$(LEVEL)"
 
-# Publish everything to S3 in one bazel run: BOTH strimserver deployment tars
-# (amd64 strimserver-deployment.tar + arm64 strimserver-deployment-arm64.tar,
-# each with its .sha256), the Stream Deck plugin bundle (.zip + .tar.gz), and
-# the iperf3 bundle. Requires AWS credentials and S3_BUCKET. Runs a single
-# bazel target rather than the individual publish-* targets (one
-# server/analysis pass).
+# Publish everything to S3 in one bazel run: ALL FOUR strimserver deployment
+# tars (Go + C, amd64 + arm64, each with its .sha256), the Stream Deck plugin
+# bundle (.zip + .tar.gz), and the iperf3 bundle. Requires AWS credentials and
+# S3_BUCKET. Runs a single bazel target rather than the individual publish-*
+# targets (one server/analysis pass).
 publish-all:
 	GIT_TAG=$(GIT_TAG) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG //:publish_all
 
@@ -83,7 +87,8 @@ publish-strimserver:
 # The offline fallback clip is bundled directly from MODULE.bazel's
 # s3_http_file(offline_segment_dist); regenerate + republish a new clip via
 # tools/brb-screen/publish.sh.
-# Also uploads the Stream Deck plugin bundle (strimserver-streamdeck-plugin.zip
+# Also uploads ALL FOUR deployment tars (strimserver-deployment-{go,c}-{amd64,arm64}.tar
+# + .sha256) and the Stream Deck plugin bundle (strimserver-streamdeck-plugin.zip
 # and .tar.gz).
 	GIT_TAG=$(GIT_TAG) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG //:publish_strimserver
 

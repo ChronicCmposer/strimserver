@@ -42,7 +42,7 @@ def resolve_source():
       1. DEPLOYMENT_SRC -- s3://..., https://..., http://..., or a local path
       2. legacy $S3_BUCKET/$DEPLOYMENT
     """
-    deployment = os.environ.get("DEPLOYMENT", "strimserver-deployment.tar")
+    deployment = os.environ.get("DEPLOYMENT", "strimserver-deployment-go-amd64.tar")
     src = os.environ.get("DEPLOYMENT_SRC", "").strip()
     if not src:
         bucket = os.environ.get("S3_BUCKET", "").strip()

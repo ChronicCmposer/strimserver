@@ -26,3 +26,27 @@ test --test_summary=terse
 common --noenable_workspace
 
 build --disk_cache=~/.cache/strimserver-bazel-cache
+
+# =============================================================================
+# Wave 0-A: hermetic musl C toolchain (zig cc) — see MODULE.bazel
+# =============================================================================
+# zig cc writes its cache to ~/.cache/zig; the sandbox must expose the host
+# /home for that. --enable_platform_specific_config is what makes the
+# build:linux section below apply on linux exec platforms.
+common --enable_platform_specific_config
+build:linux --sandbox_add_mount_pair=/home
+
+# Opt-in musl C builds for both target arches. NOT the default: a plain
+# `bazel build` keeps --platforms=//tools/bazel:linux_amd64 and the existing
+# clang/glibc toolchain (the pure-Go controller needs no C toolchain at all).
+# zig cc enables UBSan by default; -fno-sanitize=undefined turns it off for
+# these hermetic builds.
+build:amd64 --platforms=@zig_sdk//platform:linux_amd64
+build:amd64 --extra_toolchains=@zig_sdk//toolchain:linux_amd64_musl
+build:amd64 --copt=-fno-sanitize=undefined
+build:amd64 --linkopt=-fno-sanitize=undefined
+
+build:arm64 --platforms=@zig_sdk//platform:linux_arm64
+build:arm64 --extra_toolchains=@zig_sdk//toolchain:linux_arm64_musl
+build:arm64 --copt=-fno-sanitize=undefined
+build:arm64 --linkopt=-fno-sanitize=undefined

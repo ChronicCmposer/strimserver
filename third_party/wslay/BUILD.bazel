@@ -1,0 +1,80 @@
+# Vendored wslay v1.1.1 (MIT), static, dual-arch, no TLS.
+#
+# wslay (https://github.com/tatsuhiro-t/wslay) provides RFC 6455 WebSocket
+# framing only — the HTTP/1.1 Upgrade handshake is the application's job
+# (here: libmicrohttpd with MHD_ALLOW_UPGRADE hands the accepted socket to
+# wslay). The four library sources + headers are committed byte-for-byte from
+# the upstream 1.1.1 release tarball (lib/). Note: the task brief mentioned
+# "wslay.c"; the 1.1.1 tree actually ships wslay_net.c (socket helper) plus
+# wslay_frame.c, wslay_event.c, wslay_queue.c — wslay_net.c is the fourth
+# compiled source.
+#
+# config.h is committed (same pattern as libmicrohttpd's MHD_config.h and
+# libwebsockets' lwsgen/): upstream's autotools configure generates it; the
+# sources gate on HAVE_ARPA_INET_H / HAVE_NETINET_IN_H (both present on
+# glibc) and WORDS_BIGENDIAN (undefined: both target arches are
+# little-endian). It is pulled in via `#include <config.h>` guarded by
+# HAVE_CONFIG_H, defined on the compile command line.
+#
+# Static-only + dual-arch: same pattern as //third_party/yyjson and
+# //third_party/libmicrohttpd. No TLS, no pthread, no libm — the library is
+# plain C (stdint/string/assert only), so the smoke test links with -static
+# alone.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "wslay",
+    srcs = [
+        "lib/wslay_event.c",
+        "lib/wslay_frame.c",
+        "lib/wslay_net.c",
+        "lib/wslay_queue.c",
+        "config.h",
+    ] + glob(["lib/*.h"]),
+    hdrs = [
+        "lib/includes/wslay/wslay.h",
+        "lib/includes/wslay/wslayver.h",
+    ],
+    includes = [
+        # config.h (included as <config.h> via HAVE_CONFIG_H).
+        ".",
+        # The lib/*.h internal headers quoted by the sources.
+        "lib",
+        # Consumers get `#include <wslay/wslay.h>`.
+        "lib/includes",
+    ],
+    # Static-only (same rationale as //third_party/libmicrohttpd).
+    features = ["-supports_dynamic_linker"],
+    copts = [
+        # Pull in the committed config.h (upstream autotools build passes
+        # -DHAVE_CONFIG_H on the command line).
+        "-DHAVE_CONFIG_H=1",
+        # wslay is portable C99; gnu11 matches the repo's other vendored C
+        # and the amd64 clang cross-toolchain's conly_flags.
+        "-std=gnu11",
+    ],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
+)
+
+# Scratch smoke test: wslay event-API server + client echo over a socketpair
+# (text message client -> server -> client, no HTTP handshake needed).
+cc_test(
+    name = "wslay_smoke_test",
+    srcs = ["wslay_smoke_test.c"],
+    # Static-only: same rationale as //third_party/libmicrohttpd:mhd_smoke_test.
+    linkstatic = True,
+    linkopts = ["-static"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
+    deps = [":wslay"],
+)

@@ -86,9 +86,9 @@ Parameters:
     Default: ""
     Description: >
       Optional S3 bucket name (no s3:// prefix) holding
-      strimserver-deployment.tar. If set, the instance role is granted read
-      access. Leave empty when deploying via an https:// release asset or a
-      local file (see DEPLOYMENT_SRC).
+      the deployment tars (e.g. strimserver-deployment-go-amd64.tar). If set,
+      the instance role is granted read access. Leave empty when deploying via
+      an https:// release asset or a local file (see DEPLOYMENT_SRC).
 
   EnableSessionManager:
     Type: String

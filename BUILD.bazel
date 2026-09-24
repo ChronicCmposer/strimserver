@@ -3,6 +3,7 @@
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files", "strip_prefix")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("//:c_controller_transition.bzl", "c_controller_transition")
 load("//tools/bazel:platform_transition.bzl", "platform_transition")
 
 # --- Offline fallback segment --------------------------------------------
@@ -13,10 +14,11 @@ load("//tools/bazel:platform_transition.bzl", "platform_transition")
 # codecs that cannot run in the Bazel graph).
 
 # --- No-Twitch-key gate ---------------------------------------------------
-# Gates :strimserver_deployment_tar (used by :package and :release) but NOT
-# :publish_strimserver, matching the Makefile exactly (verified: `package`'s
-# recipe calls check-no-twitch-key explicitly; `publish-strimserver` depends
-# only on the tar target, which never invoked the check itself).
+# Gates the CHECKED deployment tars (strimserver_deployment_tar_{go,c}_*,
+# used by :package*, :package_all and :release) but NOT the publish targets,
+# matching the Makefile exactly (verified: `package`'s recipe calls
+# check-no-twitch-key explicitly; `publish-*` depends only on the unchecked
+# tars, which never invoked the check itself).
 genrule(
     name = "check_no_twitch_key",
     srcs = ["//core:strimserver.env"],
@@ -26,7 +28,7 @@ key="$$(set -a; . $(location //core:strimserver.env); set +a; printf '%s' "$$TWI
 if [ -n "$$key" ]; then
   echo "ERROR: TWITCH_STREAM_KEY is set in core/strimserver.env." >&2
   echo "Redistributable bundles must ship an EMPTY key (injected at deploy time)." >&2
-  echo "Empty it for :strimserver_deployment_tar / :release, or use" >&2
+  echo "Empty it for :strimserver_deployment_tar_go_amd64 / :release, or use" >&2
   echo ":publish_strimserver for a private, single-tenant build that bakes your own key." >&2
   exit 1
 fi
@@ -92,6 +94,27 @@ pkg_files(
     strip_prefix = strip_prefix.files_only(),
 )
 
+# The controller-container.tar member is the ONE bundle member that differs
+# per language: the Go controller image (:controller_image_tar_file, the
+# long-standing default) or the C controller image (:controller_image_c_tar_file,
+# the musl-static port). Both land at the same controller-container.tar name so
+# the on-box deploy flow is identical for every bundle.
+pkg_files(
+    name = "bundle_images_c",
+    srcs = [
+        "//core:ffmpeg_image_tar_file",
+        "//core:mediamtx_image_tar_file",
+        "//core/controller:controller_image_c_tar_file",
+    ],
+    renames = {
+        "//core:ffmpeg_image_tar_file": "ffmpeg-container.tar",
+        "//core:mediamtx_image_tar_file": "mediamtx-container.tar",
+        "//core/controller:controller_image_c_tar_file": "controller-container.tar",
+    },
+    strip_prefix = strip_prefix.files_only(),
+    tags = ["manual"],
+)
+
 # The offline clip is bundled straight from the external repo so the deployed
 # filename stays strimserver-offline-2160p60.mp4 (s3_http_file's
 # downloaded_file_name pin).
@@ -128,8 +151,30 @@ pkg_files(
     strip_prefix = strip_prefix.files_only(),
 )
 
+# --- 4-way deployment bundle matrix -----------------------------------------
+# Every release produces FOUR bundles -- the Go controller and the C
+# controller, each for amd64 and arm64 -- under fully-explicit names:
+#   strimserver-deployment-go-amd64.tar   (+ .sha256)
+#   strimserver-deployment-go-arm64.tar   (+ .sha256)
+#   strimserver-deployment-c-amd64.tar    (+ .sha256)
+#   strimserver-deployment-c-arm64.tar    (+ .sha256)
+# The Go bundles reuse the original (pre-dual-arch) tar graph, renamed to the
+# explicit go-<arch> scheme; the C bundles swap in the C controller image
+# (:bundle_images_c) and are rebuilt under the zig musl configs via
+# //:c_controller_transition (which ALSO injects the zig toolchain flags --
+# toolchain selection comes from --extra_toolchains, a command-line option a
+# plain platform transition cannot set).
+#
+# Arch handling stays entirely inside Bazel: one `bazel build //:package_all`
+# (or one `bazel run //:release` / //:publish_all) produces all four from a
+# single analysis pass. The Go arm64 bundle goes through
+# //tools/bazel:platform_transition (unchanged behavior); the C bundles go
+# through //:c_controller_transition. The C graph is `manual`-tagged: it pulls
+# the C controller into the graph, and a plain `bazel build //...` (default
+# clang/glibc toolchain) must never build it.
+
 pkg_tar(
-    name = "_strimserver_deployment_tar_unchecked",
+    name = "_strimserver_deployment_go_tar_unchecked",
     srcs = [
         ":bundle_images",
         ":bundle_offline_segment",
@@ -137,193 +182,329 @@ pkg_tar(
         ":bundle_exec_scripts",
         ":bundle_scripts",
     ],
-    out = "strimserver-deployment.unchecked.tar",
+    out = "strimserver-deployment-go-amd64.unchecked.tar",
 )
 
 genrule(
-    name = "strimserver_deployment_tar",
+    name = "strimserver_deployment_tar_go_amd64",
     srcs = [
-        ":_strimserver_deployment_tar_unchecked",
+        ":_strimserver_deployment_go_tar_unchecked",
         ":check_no_twitch_key",
     ],
-    outs = ["strimserver-deployment.tar"],
-    cmd = "cp $(location :_strimserver_deployment_tar_unchecked) $@",
+    outs = ["strimserver-deployment-go-amd64.tar"],
+    cmd = "cp $(location :_strimserver_deployment_go_tar_unchecked) $@",
 )
 
 genrule(
-    name = "strimserver_deployment_sha256",
-    srcs = [":strimserver_deployment_tar"],
-    outs = ["strimserver-deployment.tar.sha256"],
-    cmd = "printf '%s  strimserver-deployment.tar\\n' " +
-          "\"$$(sha256sum $(location :strimserver_deployment_tar) | cut -d' ' -f1)\" > $@",
+    name = "strimserver_deployment_sha256_go_amd64",
+    srcs = [":strimserver_deployment_tar_go_amd64"],
+    outs = ["strimserver-deployment-go-amd64.tar.sha256"],
+    cmd = "printf '%s  strimserver-deployment-go-amd64.tar\\n' " +
+          "\"$$(sha256sum $(location :strimserver_deployment_tar_go_amd64) | cut -d' ' -f1)\" > $@",
 )
 
-# --- arm64 bundle (produced in the SAME invocation as the amd64 bundle) -------
-# The deployment tar graph is platform-selectable; the arm64 bundle is the same
-# unchecked pkg_tar rebuilt under //tools/bazel:linux_arm64 via a platform
-# transition, so one `bazel build` (or one `bazel run //:release` /
-# //:publish_all) produces BOTH tars from a single analysis pass. The arm64
-# outputs carry the -arm64 basename so the two bundles never collide on a
-# GitHub release or S3; the amd64 basename stays unsuffixed (byte-identical to
-# the pre-dual-arch artifacts).
+# --- Go arm64 bundle (the same graph rebuilt under //tools/bazel:linux_arm64)
+# via a platform transition, so one `bazel build` produces BOTH Go tars from a
+# single analysis pass. The transition output carries the -go-arm64 basename so
+# the four bundles never collide on a GitHub release, S3, or sh_binary runfiles.
 platform_transition(
-    name = "deployment_tar_arm64_transition",
-    target = ":_strimserver_deployment_tar_unchecked",
+    name = "deployment_go_arm64_transition",
+    target = ":_strimserver_deployment_go_tar_unchecked",
     # Distinct basename: the underlying pkg_tar keeps
-    # strimserver-deployment.unchecked.tar in BOTH configurations, so this
-    # symlink name is what keeps the amd64/arm64 tars from colliding in
+    # strimserver-deployment-go-amd64.unchecked.tar in BOTH configurations, so
+    # this symlink name is what keeps the amd64/arm64 tars from colliding in
     # sh_binary runfiles (publish targets pass both to the script).
-    out = "strimserver-deployment-arm64.unchecked.tar",
+    out = "strimserver-deployment-go-arm64.unchecked.tar",
 )
 
 genrule(
-    name = "strimserver_deployment_tar_arm64",
+    name = "strimserver_deployment_tar_go_arm64",
     srcs = [
-        ":deployment_tar_arm64_transition",
+        ":deployment_go_arm64_transition",
         ":check_no_twitch_key",
     ],
-    outs = ["strimserver-deployment-arm64.tar"],
-    cmd = "cp $(location :deployment_tar_arm64_transition) $@",
+    outs = ["strimserver-deployment-go-arm64.tar"],
+    cmd = "cp $(location :deployment_go_arm64_transition) $@",
 )
 
 genrule(
-    name = "strimserver_deployment_sha256_arm64",
-    srcs = [":strimserver_deployment_tar_arm64"],
-    outs = ["strimserver-deployment-arm64.tar.sha256"],
-    cmd = "printf '%s  strimserver-deployment-arm64.tar\\n' " +
-          "\"$$(sha256sum $(location :strimserver_deployment_tar_arm64) | cut -d' ' -f1)\" > $@",
+    name = "strimserver_deployment_sha256_go_arm64",
+    srcs = [":strimserver_deployment_tar_go_arm64"],
+    outs = ["strimserver-deployment-go-arm64.tar.sha256"],
+    cmd = "printf '%s  strimserver-deployment-go-arm64.tar\\n' " +
+          "\"$$(sha256sum $(location :strimserver_deployment_tar_go_arm64) | cut -d' ' -f1)\" > $@",
+)
+
+# --- C amd64 + arm64 bundles ------------------------------------------------
+# The C bundle graph is NEVER built in the top-level config: both variants are
+# reached only through //:c_controller_transition, which rebuilds the shared
+# pkg_tar under the zig musl amd64 / arm64 config. Both arch configs write the
+# C binary under the same exec-platform-named bazel-out directory (the Wave-2
+# arch quirk), so the packaging NEVER inspects output paths to tell the arches
+# apart: each image embeds whatever binary its configuration produced, and the
+# bundles are verified with `file` (see //core/controller:image_c_smoke_test).
+pkg_tar(
+    name = "_strimserver_deployment_c_tar_unchecked",
+    srcs = [
+        ":bundle_images_c",
+        ":bundle_offline_segment",
+        ":bundle_openssh_rpm",
+        ":bundle_exec_scripts",
+        ":bundle_scripts",
+    ],
+    out = "strimserver-deployment-c.unchecked.tar",
+    tags = ["manual"],
+)
+
+c_controller_transition(
+    name = "deployment_c_amd64_transition",
+    target = ":_strimserver_deployment_c_tar_unchecked",
+    to_arch = "amd64",
+    out = "strimserver-deployment-c-amd64.unchecked.tar",
+    tags = ["manual"],
+)
+
+c_controller_transition(
+    name = "deployment_c_arm64_transition",
+    target = ":_strimserver_deployment_c_tar_unchecked",
+    to_arch = "arm64",
+    out = "strimserver-deployment-c-arm64.unchecked.tar",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "strimserver_deployment_tar_c_amd64",
+    srcs = [
+        ":deployment_c_amd64_transition",
+        ":check_no_twitch_key",
+    ],
+    outs = ["strimserver-deployment-c-amd64.tar"],
+    cmd = "cp $(location :deployment_c_amd64_transition) $@",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "strimserver_deployment_sha256_c_amd64",
+    srcs = [":strimserver_deployment_tar_c_amd64"],
+    outs = ["strimserver-deployment-c-amd64.tar.sha256"],
+    cmd = "printf '%s  strimserver-deployment-c-amd64.tar\\n' " +
+          "\"$$(sha256sum $(location :strimserver_deployment_tar_c_amd64) | cut -d' ' -f1)\" > $@",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "strimserver_deployment_tar_c_arm64",
+    srcs = [
+        ":deployment_c_arm64_transition",
+        ":check_no_twitch_key",
+    ],
+    outs = ["strimserver-deployment-c-arm64.tar"],
+    cmd = "cp $(location :deployment_c_arm64_transition) $@",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "strimserver_deployment_sha256_c_arm64",
+    srcs = [":strimserver_deployment_tar_c_arm64"],
+    outs = ["strimserver-deployment-c-arm64.tar.sha256"],
+    cmd = "printf '%s  strimserver-deployment-c-arm64.tar\\n' " +
+          "\"$$(sha256sum $(location :strimserver_deployment_tar_c_arm64) | cut -d' ' -f1)\" > $@",
+    tags = ["manual"],
 )
 
 # The publish targets are deliberately UNGATED (they bake the operator's own
 # TWITCH_STREAM_KEY, so they must not run check_no_twitch_key). They upload the
-# same tars as :package/:release -- the gated genrules are byte-copies -- so
+# same tars as :package*/:release -- the gated genrules are byte-copies -- so
 # the publish data hashes the unchecked tars directly; the .sha256 contents
 # still name the published basenames.
 genrule(
-    name = "strimserver_deployment_sha256_unchecked",
-    srcs = [":_strimserver_deployment_tar_unchecked"],
-    outs = ["strimserver-deployment.unchecked.tar.sha256"],
-    cmd = "printf '%s  strimserver-deployment.tar\\n' " +
-          "\"$$(sha256sum $(location :_strimserver_deployment_tar_unchecked) | cut -d' ' -f1)\" > $@",
+    name = "strimserver_deployment_sha256_go_amd64_unchecked",
+    srcs = [":_strimserver_deployment_go_tar_unchecked"],
+    outs = ["strimserver-deployment-go-amd64.unchecked.tar.sha256"],
+    cmd = "printf '%s  strimserver-deployment-go-amd64.tar\\n' " +
+          "\"$$(sha256sum $(location :_strimserver_deployment_go_tar_unchecked) | cut -d' ' -f1)\" > $@",
 )
 
 genrule(
-    name = "strimserver_deployment_sha256_arm64_unchecked",
-    srcs = [":deployment_tar_arm64_transition"],
-    outs = ["strimserver-deployment-arm64.unchecked.tar.sha256"],
-    cmd = "printf '%s  strimserver-deployment-arm64.tar\\n' " +
-          "\"$$(sha256sum $(location :deployment_tar_arm64_transition) | cut -d' ' -f1)\" > $@",
+    name = "strimserver_deployment_sha256_go_arm64_unchecked",
+    srcs = [":deployment_go_arm64_transition"],
+    outs = ["strimserver-deployment-go-arm64.unchecked.tar.sha256"],
+    cmd = "printf '%s  strimserver-deployment-go-arm64.tar\\n' " +
+          "\"$$(sha256sum $(location :deployment_go_arm64_transition) | cut -d' ' -f1)\" > $@",
 )
 
-# `bazel build //:package` replaces `make package` (the Makefile's default goal).
+genrule(
+    name = "strimserver_deployment_sha256_c_amd64_unchecked",
+    srcs = [":deployment_c_amd64_transition"],
+    outs = ["strimserver-deployment-c-amd64.unchecked.tar.sha256"],
+    cmd = "printf '%s  strimserver-deployment-c-amd64.tar\\n' " +
+          "\"$$(sha256sum $(location :deployment_c_amd64_transition) | cut -d' ' -f1)\" > $@",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "strimserver_deployment_sha256_c_arm64_unchecked",
+    srcs = [":deployment_c_arm64_transition"],
+    outs = ["strimserver-deployment-c-arm64.unchecked.tar.sha256"],
+    cmd = "printf '%s  strimserver-deployment-c-arm64.tar\\n' " +
+          "\"$$(sha256sum $(location :deployment_c_arm64_transition) | cut -d' ' -f1)\" > $@",
+    tags = ["manual"],
+)
+
+# `bazel build //:package` replaces `make package` (the Makefile's default
+# goal): the Go amd64 bundle -- the long-standing default controller + arch.
 filegroup(
     name = "package",
     srcs = [
-        ":strimserver_deployment_sha256",
-        ":strimserver_deployment_tar",
+        ":strimserver_deployment_sha256_go_amd64",
+        ":strimserver_deployment_tar_go_amd64",
     ],
 )
 
-# `bazel build //:package_arm64` -- the arm64 bundle (+ checksum) alone.
+# `bazel build //:package_arm64` -- the Go arm64 bundle (+ checksum) alone.
 filegroup(
     name = "package_arm64",
     srcs = [
-        ":strimserver_deployment_sha256_arm64",
-        ":strimserver_deployment_tar_arm64",
+        ":strimserver_deployment_sha256_go_arm64",
+        ":strimserver_deployment_tar_go_arm64",
     ],
 )
 
-# `bazel run //:release` -- attaches BOTH architecture bundles (+ checksums)
+# `bazel build //:package_all` -- ALL FOUR bundles (+ checksums) from one
+# invocation: Go + C, amd64 + arm64. Manual: it pulls the C graph in, so a
+# plain `bazel build //...` must not pick it up (the C bundles need the zig
+# musl configs; the C controller must never build against the default glibc
+# toolchain). Explicit `bazel build //:package_all` works fine.
+filegroup(
+    name = "package_all",
+    srcs = [
+        ":strimserver_deployment_tar_go_amd64",
+        ":strimserver_deployment_tar_go_arm64",
+        ":strimserver_deployment_tar_c_amd64",
+        ":strimserver_deployment_tar_c_arm64",
+        ":strimserver_deployment_sha256_go_amd64",
+        ":strimserver_deployment_sha256_go_arm64",
+        ":strimserver_deployment_sha256_c_amd64",
+        ":strimserver_deployment_sha256_c_arm64",
+    ],
+    tags = ["manual"],
+)
+
+# `bazel run //:release` -- attaches the FOUR deployment bundles (+ checksums)
 # and the Stream Deck plugin bundles to the tagged GitHub release, all built in
-# this one invocation. Args map to $1..$6 in scripts/release.sh order:
-# $1=strimserver_deployment_tar, $2=strimserver_deployment_tar_arm64,
-# $3=strimserver_deployment_sha256, $4=strimserver_deployment_sha256_arm64,
-# $5=streamdeck_plugin_bundle (zip), $6=streamdeck_plugin_tar_gz.
+# this one invocation. Args map to $1..$10 in scripts/release.sh order:
+# $1..$4=strimserver_deployment_{go,c}_{amd64,arm64}_tar,
+# $5..$8=the four .sha256, $9=streamdeck_plugin_bundle (zip),
+# $10=streamdeck_plugin_tar_gz. Manual for the same reason as :package_all.
 sh_binary(
     name = "release",
     srcs = ["scripts/release.sh"],
     data = [
-        ":strimserver_deployment_tar",
-        ":strimserver_deployment_tar_arm64",
-        ":strimserver_deployment_sha256",
-        ":strimserver_deployment_sha256_arm64",
+        ":strimserver_deployment_tar_go_amd64",
+        ":strimserver_deployment_tar_go_arm64",
+        ":strimserver_deployment_tar_c_amd64",
+        ":strimserver_deployment_tar_c_arm64",
+        ":strimserver_deployment_sha256_go_amd64",
+        ":strimserver_deployment_sha256_go_arm64",
+        ":strimserver_deployment_sha256_c_amd64",
+        ":strimserver_deployment_sha256_c_arm64",
         "//tools/streamdeck-plugin:streamdeck_plugin_bundle",
         "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz",
     ],
     args = [
-        "$(rootpath :strimserver_deployment_tar)",
-        "$(rootpath :strimserver_deployment_tar_arm64)",
-        "$(rootpath :strimserver_deployment_sha256)",
-        "$(rootpath :strimserver_deployment_sha256_arm64)",
+        "$(rootpath :strimserver_deployment_tar_go_amd64)",
+        "$(rootpath :strimserver_deployment_tar_go_arm64)",
+        "$(rootpath :strimserver_deployment_tar_c_amd64)",
+        "$(rootpath :strimserver_deployment_tar_c_arm64)",
+        "$(rootpath :strimserver_deployment_sha256_go_amd64)",
+        "$(rootpath :strimserver_deployment_sha256_go_arm64)",
+        "$(rootpath :strimserver_deployment_sha256_c_amd64)",
+        "$(rootpath :strimserver_deployment_sha256_c_arm64)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_bundle)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz)",
     ],
+    tags = ["manual"],
 )
 
-# `bazel run //:publish_strimserver` -- uploads BOTH architecture bundles
+# `bazel run //:publish_strimserver` -- uploads the FOUR deployment bundles
 # (+ checksums, now published on S3) and the Stream Deck plugin bundles, all
 # built in this one invocation. Uses the UNCHECKED tars (and their hashes) so
 # the no-twitch-key-gate contract is unchanged: the gated genrules are
-# byte-copies, so the uploaded content is identical to :package/:release.
-# Args map to $1..$6 in scripts/publish_strimserver.sh order:
-# $1=_strimserver_deployment_tar_unchecked, $2=deployment_tar_arm64_transition,
-# $3=strimserver_deployment_sha256_unchecked,
-# $4=strimserver_deployment_sha256_arm64_unchecked,
-# $5=streamdeck_plugin_bundle (zip), $6=streamdeck_plugin_tar_gz.
+# byte-copies, so the uploaded content is identical to :package*/:release.
+# Args map to $1..$10 in scripts/publish_strimserver.sh order:
+# $1..$4=the four unchecked tars (go-amd64, go-arm64, c-amd64, c-arm64),
+# $5..$8=the four unchecked .sha256, $9=streamdeck_plugin_bundle (zip),
+# $10=streamdeck_plugin_tar_gz.
 sh_binary(
     name = "publish_strimserver",
     srcs = ["scripts/publish_strimserver.sh"],
     data = [
-        ":_strimserver_deployment_tar_unchecked",
-        ":deployment_tar_arm64_transition",
-        ":strimserver_deployment_sha256_unchecked",
-        ":strimserver_deployment_sha256_arm64_unchecked",
+        ":_strimserver_deployment_go_tar_unchecked",
+        ":deployment_go_arm64_transition",
+        ":deployment_c_amd64_transition",
+        ":deployment_c_arm64_transition",
+        ":strimserver_deployment_sha256_go_amd64_unchecked",
+        ":strimserver_deployment_sha256_go_arm64_unchecked",
+        ":strimserver_deployment_sha256_c_amd64_unchecked",
+        ":strimserver_deployment_sha256_c_arm64_unchecked",
         "//tools/streamdeck-plugin:streamdeck_plugin_bundle",
         "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz",
     ],
     args = [
-        "$(rootpath :_strimserver_deployment_tar_unchecked)",
-        "$(rootpath :deployment_tar_arm64_transition)",
-        "$(rootpath :strimserver_deployment_sha256_unchecked)",
-        "$(rootpath :strimserver_deployment_sha256_arm64_unchecked)",
+        "$(rootpath :_strimserver_deployment_go_tar_unchecked)",
+        "$(rootpath :deployment_go_arm64_transition)",
+        "$(rootpath :deployment_c_amd64_transition)",
+        "$(rootpath :deployment_c_arm64_transition)",
+        "$(rootpath :strimserver_deployment_sha256_go_amd64_unchecked)",
+        "$(rootpath :strimserver_deployment_sha256_go_arm64_unchecked)",
+        "$(rootpath :strimserver_deployment_sha256_c_amd64_unchecked)",
+        "$(rootpath :strimserver_deployment_sha256_c_arm64_unchecked)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_bundle)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz)",
     ],
+    tags = ["manual"],
 )
 
 # `bazel run //:publish_all` -- the one-shot "publish everything" path
-# (`make publish-all`): uploads ALL S3 artifacts -- BOTH strimserver deployment
-# tars (+ checksums), the Stream Deck plugin bundle (.zip + .tar.gz), and the
-# iperf3 bundle -- in a SINGLE bazel run (one server/analysis pass) rather than
-# the individual publish-* targets. As with publish_strimserver, the UNCHECKED
-# tars (+ hashes) keep the publish path free of the twitch-key gate. Args map
-# to $1..$7 in order: $1=_strimserver_deployment_tar_unchecked,
-# $2=deployment_tar_arm64_transition, $3=strimserver_deployment_sha256_unchecked,
-# $4=strimserver_deployment_sha256_arm64_unchecked,
-# $5=streamdeck_plugin_bundle (zip), $6=streamdeck_plugin_tar_gz,
-# $7=iperf3_deployment_tar. Uses the same S3 object keys as the individual
+# (`make publish-all`): uploads ALL S3 artifacts -- the FOUR strimserver
+# deployment tars (+ checksums), the Stream Deck plugin bundle (.zip +
+# .tar.gz), and the iperf3 bundle -- in a SINGLE bazel run (one server/analysis
+# pass). As with publish_strimserver, the UNCHECKED tars (+ hashes) keep the
+# publish path free of the twitch-key gate. Args map to $1..$11 in order:
+# $1..$4=the four unchecked tars, $5..$8=the four unchecked .sha256,
+# $9=streamdeck_plugin_bundle (zip), $10=streamdeck_plugin_tar_gz,
+# $11=iperf3_deployment_tar. Uses the same S3 object keys as the individual
 # targets (bucket root); see publish_all.sh.
 sh_binary(
     name = "publish_all",
     srcs = ["scripts/publish_all.sh"],
     data = [
-        ":_strimserver_deployment_tar_unchecked",
-        ":deployment_tar_arm64_transition",
-        ":strimserver_deployment_sha256_unchecked",
-        ":strimserver_deployment_sha256_arm64_unchecked",
+        ":_strimserver_deployment_go_tar_unchecked",
+        ":deployment_go_arm64_transition",
+        ":deployment_c_amd64_transition",
+        ":deployment_c_arm64_transition",
+        ":strimserver_deployment_sha256_go_amd64_unchecked",
+        ":strimserver_deployment_sha256_go_arm64_unchecked",
+        ":strimserver_deployment_sha256_c_amd64_unchecked",
+        ":strimserver_deployment_sha256_c_arm64_unchecked",
         "//tools/bandwidth-test:iperf3_deployment_tar",
         "//tools/streamdeck-plugin:streamdeck_plugin_bundle",
         "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz",
     ],
     args = [
-        "$(rootpath :_strimserver_deployment_tar_unchecked)",
-        "$(rootpath :deployment_tar_arm64_transition)",
-        "$(rootpath :strimserver_deployment_sha256_unchecked)",
-        "$(rootpath :strimserver_deployment_sha256_arm64_unchecked)",
+        "$(rootpath :_strimserver_deployment_go_tar_unchecked)",
+        "$(rootpath :deployment_go_arm64_transition)",
+        "$(rootpath :deployment_c_amd64_transition)",
+        "$(rootpath :deployment_c_arm64_transition)",
+        "$(rootpath :strimserver_deployment_sha256_go_amd64_unchecked)",
+        "$(rootpath :strimserver_deployment_sha256_go_arm64_unchecked)",
+        "$(rootpath :strimserver_deployment_sha256_c_amd64_unchecked)",
+        "$(rootpath :strimserver_deployment_sha256_c_arm64_unchecked)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_bundle)",
         "$(rootpath //tools/streamdeck-plugin:streamdeck_plugin_tar_gz)",
         "$(rootpath //tools/bandwidth-test:iperf3_deployment_tar)",
     ],
+    tags = ["manual"],
     visibility = ["//visibility:public"],
 )
 

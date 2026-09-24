@@ -1,0 +1,68 @@
+# Vendored yyjson v0.13.0 (MIT), single-file (amalgamated) distribution.
+#
+# The amalgamated yyjson.c + yyjson.h are committed here byte-for-byte from the
+# upstream 0.13.0 release tarball (which ships them under src/):
+#   url:    https://github.com/ibireme/yyjson/archive/refs/tags/0.13.0.tar.gz
+#   tag:    0.13.0 (release commit 6447536015f3d600f3d65323b10976103b337ca7,
+#           published 2026-09-08)
+#   tarball sha256: 34e0f62a2bc11ab20d601e8ca1cc2b2079503aa45119a19133d89d19b94a0fae
+#   yyjson.c sha256: d2d58ef0a3b2267862dc363832c4f3185fd375aea933d5d3419d1a940d6ece2e
+#   yyjson.h sha256: ef803cda5c06b8962face6dfa39c3284b3bcf3e73f4d7317664690cc779679ca
+#   LICENSE   sha256: 45e384d3d52c73cba3a64d6e6c25d47cd738cd8a55c30629e3201046eda62947
+#
+# yyjson is portable C11 (built standalone with -std=c11; -std=gnu11 is a
+# superset and matches the repo's amd64 clang cross-toolchain conly_flags), so
+# the cc_library below compiles for both linux_amd64 (via the registered clang
+# cross-toolchain) and linux_arm64 (via the native aarch64 toolchain). The
+# target_compatible_with select names both arches explicitly and keeps any
+# third platform arm64-only, matching the other dual-arch vendored C targets.
+#
+# Consumers get `#include "yyjson.h"` via includes = ["."].
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "yyjson",
+    srcs = ["yyjson.c"],
+    hdrs = ["yyjson.h"],
+    includes = ["."],
+    # Static-only (same pattern as //third_party/libwebsockets and
+    # //third_party/containerd-api): disable the .so so the amd64 clang
+    # toolchain doesn't try to link a shared object against the static-only
+    # @amd64_sysroot (it has no libgcc_s.so.1) and consumers never pick a
+    # hidden-visibility .so. The controller links this statically (-static).
+    features = ["-supports_dynamic_linker"],
+    # yyjson requires C11. The amd64 clang cross-toolchain already passes
+    # -std=gnu11 via its conly_flags; this makes the native arm64 toolchain
+    # match explicitly.
+    copts = ["-std=gnu11"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
+)
+
+# Parse + read + mutable-build + write + re-parse round trip.
+cc_test(
+    name = "yyjson_smoke_test",
+    srcs = ["yyjson_smoke_test.c"],
+    # Static-only (same pattern as
+    # //third_party/libwebsockets:lws_smoke_test and
+    # //third_party/containerd-api:codecs_roundtrip_test): the amd64 clang
+    # toolchain links against the static-only @amd64_sysroot, which has no
+    # dynamic libgcc_s.so.1, so the test links its deps' static archives
+    # instead of preferring .so outputs. yyjson pulls in no libm/libdl/
+    # libpthread symbols (verified: the static link succeeds with -static
+    # alone), so the linkopts are just -static.
+    linkstatic = True,
+    linkopts = ["-static"],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
+    deps = [":yyjson"],
+)

@@ -95,7 +95,7 @@ genrule(
 
 # --- Distributable bundle ---------------------------------------------------
 # The Stream Deck plugin ships as its own zip, published ALONGSIDE
-# strimserver-deployment.tar (never inside it). Everything already lives under
+# strimserver-deployment-go-amd64.tar (never inside it). Everything already lives under
 # the com.chroniccmposer.strimserver.sdPlugin/ directory -- generated
 # manifest (the :manifest genrule above), source imgs/**, and the :build outs
 # (bin/plugin.js + .map). rules_pkg 1.3.0's default strip_prefix is files_only()

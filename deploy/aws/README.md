@@ -3,10 +3,11 @@
 This runbook walks the staged cutover from the existing **amd64** deployment to
 the **arm64** (`g5g.2xlarge`) deployment, and is the reference for anyone
 re-deploying later. The build produces one self-contained deployment bundle per
-architecture; `deploy/aws/launch` picks an architecture-aware AMI from the
-instance type, so the operator's cutover decision is just **which bundle URL and
-instance type to point at**. Section 7 lists blockers that gate the production
-cutover — read it before any arm64 launch.
+controller language and architecture (the Go controller and the C controller,
+each for amd64 and arm64); `deploy/aws/launch` picks an architecture-aware AMI
+from the instance type, so the operator's cutover decision is just **which
+bundle URL and instance type to point at**. Section 7 lists blockers that gate
+the production cutover — read it before any arm64 launch.
 
 ## 1. Architecture overview
 
@@ -24,33 +25,37 @@ no loader/libs on a scratch image), landing at `/strimserver-controller`.
 The alternate assembly controller (`//core/controller/alternate/asm:controller_asm`)
 is an explicit/manual build — it is no longer bundled in the arm64 image.
 
-The deployment bundle is per-architecture: `--platforms` (or the arm64
-platform transition) selects the controller binary, the image architectures,
-and the multiarch lib paths (`lib/x86_64-linux-gnu` vs
-`lib/aarch64-linux-gnu`). **amd64 keeps the unsuffixed
-`strimserver-deployment.tar` (byte-identical to the pre-dual-arch assets);
-arm64 ships `strimserver-deployment-arm64.tar`** — the distinct basename
-avoids runfiles collisions and keeps the two bundles separate on one GitHub
-release / S3.
+The deployment bundle is per-controller and per-architecture: `--platforms`
+(or the arm64 platform transition) selects the controller binary, the image
+architectures, and the multiarch lib paths (`lib/x86_64-linux-gnu` vs
+`lib/aarch64-linux-gnu`). Every release publishes **four bundles under
+fully-explicit names — `strimserver-deployment-{go,c}-{amd64,arm64}.tar`**
+(the Go controller and the C controller, each for amd64 and arm64, all with
+`.sha256`) — the explicit basenames avoid runfiles collisions and keep all
+four bundles separate on one GitHub release / S3.
 
 ## 2. Building the bundle
 
 ```sh
-# Builds BOTH bundles (+ checksums) in ONE invocation:
-bazel build //:package //:package_arm64
-#   bazel-bin/strimserver-deployment.tar(.sha256)        amd64
-#   bazel-bin/strimserver-deployment-arm64.tar(.sha256)  arm64
+# Builds ALL FOUR bundles (+ checksums) in ONE invocation:
+bazel build //:package_all
+#   bazel-bin/strimserver-deployment-go-amd64.tar(.sha256)  Go amd64
+#   bazel-bin/strimserver-deployment-go-arm64.tar(.sha256)  Go arm64
+#   bazel-bin/strimserver-deployment-c-amd64.tar(.sha256)   C amd64
+#   bazel-bin/strimserver-deployment-c-arm64.tar(.sha256)   C arm64
 ```
 
-Or build each alone: `bazel build //:package` (amd64) /
-`bazel build //:package_arm64` (arm64); the arm64 path runs the same unchecked
-tar under `//tools/bazel:linux_arm64` via a platform transition
-(`tools/bazel/platform_transition.bzl`). Bundle builds refuse to run while
+Or build the Go bundles alone: `bazel build //:package` (Go amd64, the
+default) / `bazel build //:package_arm64` (Go arm64); the arm64 path runs the
+same unchecked tar under `//tools/bazel:linux_arm64` via a platform transition
+(`tools/bazel/platform_transition.bzl`). The C bundles are built only through
+`//:package_all` (they need the zig musl transition
+`//:c_controller_transition`). Bundle builds refuse to run while
 `TWITCH_STREAM_KEY` is set in `core/strimserver.env` — the key is injected at
 deploy time, never baked into the bundle.
 
 Publish to GitHub (requires `gh auth login` and a pushed tag); `//:release`
-uploads both tars and both `.sha256` assets:
+uploads all four tars and all four `.sha256` assets:
 
 ```sh
 GIT_TAG=v1.0.0 bazel run //:release
@@ -162,13 +167,13 @@ IP, offers `/etc/hosts` upsert + stale host-key scrub, polls SSH, and hands off
 to `setup_strimserver` (execve).
 
 `launch` also defaults the **unset** deployment vars on arm64 (amd64 is
-untouched): `DEPLOYMENT=strimserver-deployment-arm64.tar`, `DEPLOYMENT_SRC` to
-the latest arm64 GitHub release asset
-(`.../releases/latest/download/strimserver-deployment-arm64.tar`), and
-`DEPLOYMENT_SHA256` from the arm64 `.sha256` asset. Explicit operator values in
-`.env` always win. The legacy `$S3_BUCKET/$DEPLOYMENT` path still applies when
-`DEPLOYMENT_SRC` is unset and `S3_BUCKET` is configured — with `DEPLOYMENT`
-defaulting to the arm64 basename.
+untouched): `DEPLOYMENT=strimserver-deployment-go-arm64.tar` (the Go controller
+bundle), `DEPLOYMENT_SRC` to the latest arm64 Go GitHub release asset
+(`.../releases/latest/download/strimserver-deployment-go-arm64.tar`), and
+`DEPLOYMENT_SHA256` from the arm64 Go `.sha256` asset. Explicit operator
+values in `.env` always win. The legacy `$S3_BUCKET/$DEPLOYMENT` path still
+applies when `DEPLOYMENT_SRC` is unset and `S3_BUCKET` is configured — with
+`DEPLOYMENT` defaulting to the go-arm64 basename.
 
 ### 4.4 On-box setup (`setup_strimserver` → `deploy.sh`)
 

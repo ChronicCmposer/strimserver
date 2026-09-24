@@ -1,0 +1,71 @@
+# Wave 1 (http lane): HTTP/1.1 + WebSocket serving implementation.
+#
+# Implements the top-level contract //core/controller/c:http_lib (http_server.h)
+# with libmicrohttpd (external event-loop mode) + wslay (RFC 6455 framing).
+# The lane is JSON-agnostic transport: the controller lane owns all JSON
+# (see http_server.h callbacks — handle_event/handle_control receive raw
+# bodies and parse them; handle_status serializes; ws_send receives bytes).
+#
+# ws_crypto.{c,h} are SHA-1 + base64 for the RFC 6455 handshake accept
+# (MHD's no-TLS build and wslay do not provide them).
+#
+# http_server_test.c is the Wave-1 scratch regression suite (stub controller
+# + real sockets): it becomes part of the Wave-3 regression set.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "http_lib",
+    tags = ["manual"],
+    srcs = [
+        "http_server.c",
+        "ws_crypto.c",
+        "ws_crypto.h",
+    ],
+    hdrs = ["internal.h"],
+    includes = ["."],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = ["-supports_dynamic_linker"],
+    linkstatic = True,
+    deps = [
+        "//core/controller/c:http_lib",
+        "//third_party/libmicrohttpd:libmicrohttpd",
+        "//third_party/wslay:wslay",
+    ],
+)
+
+cc_test(
+    name = "http_lib_test",
+    tags = ["manual"],
+    srcs = ["http_server_test.c"],
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+    ],
+    features = ["-supports_dynamic_linker"],
+    linkstatic = True,
+    linkopts = [
+        "-lpthread",
+        "-static",
+    ],
+    target_compatible_with = select({
+        "//tools/bazel:is_amd64_target": [],
+        "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
+    deps = [
+        ":http_lib",
+        # For the controller.h types/macros only; the Core lane's enum<->string
+        # implementations are NOT linked yet (they land with core_lib in the
+        # parallel Wave 1 core lane).
+        "//core/controller/c:core_lib",
+        "//third_party/yyjson:yyjson",
+    ],
+)
