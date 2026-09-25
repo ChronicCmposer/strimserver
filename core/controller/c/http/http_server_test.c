@@ -564,6 +564,63 @@ static int resp_has_header(const char *resp, const char *name,
   return p != NULL && p < body_start;
 }
 
+/* Assert the raw response's Connection header is exactly one line whose
+ * trimmed value is exactly "Upgrade" (single token, no duplicate).
+ *
+ * MHD_create_response_for_upgrade() already emits "Connection: Upgrade";
+ * dispatch_subscribe() used to add its own copy, which MHD merged into
+ * "Connection: Upgrade, Upgrade" on the wire. This parses the raw bytes
+ * (resp_has_header is a substring match and would let that slip through)
+ * and returns 1 only for the exact single-token form: absent, duplicated
+ * (one line with two values or two header lines), or any other value all
+ * return 0. */
+static int resp_connection_is_upgrade(const char *resp) {
+  const char *body_start;
+  const char *p;
+  int found = 0;
+
+  body_start = strstr(resp, "\r\n\r\n");
+  if (body_start == NULL)
+    return 0;
+
+  p = resp;
+  while (p < body_start)
+  {
+    const char *line_end = strstr(p, "\r\n");
+    const char *colon;
+
+    if (line_end == NULL || line_end > body_start)
+      line_end = body_start;
+    if (line_end == p) /* skip the blank line (never reached normally) */
+    {
+      p = line_end + 2;
+      continue;
+    }
+
+    colon = memchr(p, ':', (size_t) (line_end - p));
+    if (colon != NULL && (size_t) (colon - p) == sizeof("Connection") - 1
+        && memcmp(p, "Connection", sizeof("Connection") - 1) == 0)
+    {
+      const char *val = colon + 1;
+      size_t val_len;
+
+      while (val < line_end && (*val == ' ' || *val == '\t'))
+        val++;
+      val_len = (size_t) (line_end - val);
+      while (val_len > 0
+             && (val[val_len - 1] == ' ' || val[val_len - 1] == '\t'))
+        val_len--;
+
+      found++;
+      if (val_len != sizeof("Upgrade") - 1
+          || memcmp(val, "Upgrade", sizeof("Upgrade") - 1) != 0)
+        return 0; /* present, but not exactly "Upgrade" */
+    }
+    p = line_end + 2;
+  }
+  return found == 1;
+}
+
 /* =========================================================================
  * WebSocket client (wslay client context over the upgraded socket)
  * ========================================================================= */
@@ -743,11 +800,24 @@ static int ws_client_open(struct ws_client_ctx *cl,
     goto fail;
 
   /* RFC 6455 example: this key yields exactly this accept value. */
-  if (resp_status(resp) != 101 || !resp_has_header(resp, "Sec-WebSocket-Accept",
-                                                   "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="))
   {
-    fprintf(stderr, "ws handshake response:\n%s\n", resp);
-    goto fail;
+    int before = failures;
+
+    CHECK(resp_status(resp) == 101, "ws handshake status (resp:\n%s\n)", resp);
+    /* MHD_create_response_for_upgrade already emits "Connection: Upgrade";
+     * dispatch_subscribe() must not add a second copy (the wire would read
+     * "Connection: Upgrade, Upgrade"). Assert the exact raw header. */
+    CHECK(resp_connection_is_upgrade(resp),
+          "ws handshake Connection header must be exactly one "
+          "\"Connection: Upgrade\" (resp:\n%s\n)", resp);
+    CHECK(resp_has_header(resp, "Sec-WebSocket-Accept",
+                          "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+          "ws handshake Sec-WebSocket-Accept (resp:\n%s\n)", resp);
+    if (failures != before)
+    {
+      fprintf(stderr, "ws handshake response:\n%s\n", resp);
+      goto fail;
+    }
   }
 
   memset(&wscb, 0, sizeof(wscb));

@@ -931,7 +931,9 @@ static enum MHD_Result dispatch_subscribe(struct strim_http_server *srv,
     if (resp == NULL)
       return MHD_NO;
     MHD_add_response_header(resp, "Upgrade", "websocket");
-    MHD_add_response_header(resp, MHD_HTTP_HEADER_CONNECTION, "Upgrade");
+    /* MHD_create_response_for_upgrade already sets "Connection: Upgrade";
+     * adding it again makes MHD emit "Connection: Upgrade, Upgrade", which
+     * strict clients like undici reject with close code 1006. */
     MHD_add_response_header(resp, "Sec-WebSocket-Accept", accept_buf);
     r = MHD_queue_response(connection, MHD_HTTP_SWITCHING_PROTOCOLS, resp);
     MHD_destroy_response(resp);
