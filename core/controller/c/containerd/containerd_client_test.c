@@ -464,9 +464,10 @@ struct script_arg {
 
 /* Largest gRPC message body a single scripted step frames in one DATA frame
  * (the frame buffer must hold the 5-byte gRPC header plus the body). The
- * flow-control test feeds 16 KiB responses, so the old 4 KiB stack buffer
- * overflowed. */
-#define SCRIPT_MAX_BODY (16 * 1024)
+ * flow-control test feeds 16 KiB responses (the old 4 KiB stack buffer
+ * overflowed) and the oversized-response tests feed ~17-20 KiB responses
+ * that echo a CDI-sized OCI spec / oversized image. */
+#define SCRIPT_MAX_BODY (32 * 1024)
 
 static void *scripted_server(void *arg) {
   struct script_arg *sa = (struct script_arg *)arg;
@@ -728,6 +729,135 @@ static void build_delete_task_resp(uint8_t *buf, size_t cap, size_t *len) {
   r.exit_status = 0;
   os = pb_ostream_from_buffer(buf, cap);
   CHECK(pb_encode(&os, containerd_services_tasks_v1_DeleteResponse_fields, &r));
+  *len = os.bytes_written;
+}
+
+/* =========================================================================
+ * Oversized-response fixtures (the v1.0.36 CDI createContainer-hook bug)
+ *
+ * After containerd v1.0.36's CDI createContainer hooks, a container's stored
+ * OCI spec grows to ~17.4 KB (55 CDI mounts + 4 device nodes + 6
+ * nvidia-cdi-hook hooks), so the Containers/Create RESPONSE — which echoes
+ * the full stored spec back as an Any — exceeds the client's old fixed
+ * 16 KiB buffer and h2c aborts with H2C_ERR_TOOBIG (folded to
+ * STRIM_CTRD_ERR_PROTO by map_grpc_err). The builders below reproduce a
+ * CDI-sized spec and the oversized responses that carry it.
+ * ========================================================================= */
+
+/* Build a large OCI spec JSON (the post-v1.0.36 nvidia CDI shape: a long
+ * bind-mount list plus a createContainer hook and device nodes), sized so a
+ * Containers/Create response echoing it exceeds 16 KiB. Returns a malloc'd
+ * NUL-terminated string with *out_len set, or NULL. */
+static char *build_large_spec_json(size_t *out_len) {
+  char *json;
+  size_t off = 0;
+  size_t cap = 32 * 1024;
+  int i;
+
+  *out_len = 0;
+  json = (char *)malloc(cap);
+  if (json == NULL)
+    return NULL;
+  off += (size_t)snprintf(
+      json + off, cap - off,
+      "{\"ociVersion\":\"1.0.2\",\"process\":{"
+      "\"args\":[\"/entrypoint.sh\"],\"cwd\":\"/\","
+      "\"env\":[\"PATH=/usr/bin\",\"NVIDIA_VISIBLE_DEVICES=all\"]},"
+      "\"root\":{\"path\":\"rootfs\"},\"mounts\":[");
+  for (i = 0; i < 160; i++) {
+    off += (size_t)snprintf(
+        json + off, cap - off,
+        "%s{\"destination\":\"/var/run/nvidia/device%d\","
+        "\"type\":\"bind\",\"source\":\"/dev/nvidia%d\","
+        "\"options\":[\"rbind\",\"ro\",\"nosuid\",\"nodev\"]}",
+        i ? "," : "", i, i);
+  }
+  off += (size_t)snprintf(
+      json + off, cap - off,
+      "],\"hooks\":{\"createContainer\":["
+      "{\"path\":\"/usr/bin/nvidia-cdi-hook\","
+      "\"args\":[\"nvidia-cdi-hook\",\"create-symlinks\","
+      "\"--link\",\"libcuda.so.1\"]}]},"
+      "\"linux\":{\"devices\":["
+      "{\"path\":\"/dev/nvidia0\",\"type\":\"c\","
+      "\"major\":195,\"minor\":0}]}}");
+  if (off >= cap) {
+    free(json);
+    return NULL;
+  }
+  *out_len = off;
+  return json;
+}
+
+/* Build a Containers/Create response that echoes a LARGE OCI spec back (the
+ * real daemon's Create response carries the full stored container spec as an
+ * Any). The encoded response exceeds 16 KiB — the old new_container_locked
+ * buffer — so h2c aborted the read with H2C_ERR_TOOBIG even though the
+ * daemon accepted the create. */
+static void build_create_container_resp_large(uint8_t *buf, size_t cap,
+                                              size_t *len) {
+  containerd_services_containers_v1_CreateContainerResponse r =
+      containerd_services_containers_v1_CreateContainerResponse_init_zero;
+  pb_ostream_t os;
+  pb_bytes_array_t *spec;
+  char *json;
+  size_t json_len = 0;
+
+  json = build_large_spec_json(&json_len);
+  CHECK(json != NULL && json_len > 16384);
+  if (json == NULL) {
+    *len = 0;
+    return;
+  }
+  spec = (pb_bytes_array_t *)malloc(PB_BYTES_ARRAY_T_ALLOCSIZE(json_len));
+  CHECK(spec != NULL);
+  if (spec == NULL) {
+    free(json);
+    *len = 0;
+    return;
+  }
+  spec->size = (pb_size_t)json_len;
+  memcpy(spec->bytes, json, json_len);
+  free(json);
+
+  r.has_container = true;
+  r.container.id = (char *)"ctr-1";
+  r.container.has_spec = true;
+  r.container.spec.type_url =
+      (char *)"types.containerd.io/opencontainers/runtime-spec/1/Spec";
+  r.container.spec.value = spec;
+  os = pb_ostream_from_buffer(buf, cap);
+  CHECK(pb_encode(
+      &os, containerd_services_containers_v1_CreateContainerResponse_fields,
+      &r));
+  *len = os.bytes_written;
+  free(spec);
+}
+
+/* Build a GetImageResponse whose image NAME alone exceeds 16 KiB, so the
+ * encoded response overruns the client's 16 KiB GetImage buffer and h2c
+ * aborts with H2C_ERR_TOOBIG. */
+static void build_image_get_resp_large(uint8_t *buf, size_t cap, size_t *len) {
+  containerd_services_images_v1_GetImageResponse r =
+      containerd_services_images_v1_GetImageResponse_init_zero;
+  pb_ostream_t os;
+  static char long_name[17001];
+  size_t i;
+
+  for (i = 0; i + 1 < sizeof(long_name); i++)
+    long_name[i] = (char)('a' + (i % 26));
+  long_name[sizeof(long_name) - 1] = '\0';
+
+  r.has_image = true;
+  r.image.name = long_name;
+  r.image.has_target = true;
+  r.image.target.digest = (char *)"sha256:manifest";
+  r.image.target.media_type =
+      (char *)"application/vnd.oci.image.manifest.v1+json";
+  r.image.target.size = 300;
+  os = pb_ostream_from_buffer(buf, cap);
+  CHECK(pb_encode(&os, containerd_services_images_v1_GetImageResponse_fields,
+                  &r));
   *len = os.bytes_written;
 }
 
@@ -2293,6 +2423,186 @@ static void test_grpc_status_error(void) {
   unlink(path);
 }
 
+/* =========================================================================
+ * Test 14: Containers/Create with an OVERSIZED response (the v1.0.36 CDI
+ * createContainer-hook bug). The daemon's Create response echoes the full
+ * stored OCI spec as an Any; after CDI hooks it is ~17-18 KiB, over the
+ * client's old fixed 16 KiB buffer, so h2c aborted with H2C_ERR_TOOBIG and
+ * the create folded to STRIM_CTRD_ERR_PROTO (-6) every 5 s — even though
+ * the daemon accepted the create. The fix enlarged the response buffer to
+ * 64 KiB; this test drives the full new-container sequence against a fake
+ * daemon that returns a CDI-sized Create response and asserts success.
+ * ========================================================================= */
+static void test_new_container_large_spec(void) {
+  char path[128];
+  int lfd = temp_listen(path, sizeof(path));
+  uint8_t image_resp[512], create_ctr_resp[32768];
+  uint8_t read_manifest[512], read_config[512];
+  size_t image_len, create_ctr_len, read_manifest_len, read_config_len;
+  const uint8_t *manifest_msgs[1], *config_msgs[1];
+  uint32_t manifest_lens[1], config_lens[1];
+  struct script_arg sa;
+  struct fstep script[5];
+  pthread_t th;
+  strim_containerd_client *client = NULL;
+  strim_container *ctr = NULL;
+  strim_spec spec;
+  strim_mount mounts[1];
+  int rc;
+
+  CHECK(lfd >= 0);
+  if (lfd < 0)
+    return;
+
+  build_image_get_resp(image_resp, sizeof(image_resp), &image_len);
+  build_create_container_resp_large(create_ctr_resp,
+                                    sizeof(create_ctr_resp),
+                                    &create_ctr_len);
+  /* The fixture must actually overrun the OLD 16 KiB client buffer: that is
+   * the bug this test guards against. */
+  CHECK(create_ctr_len > 16384);
+  build_read_resp(read_manifest, sizeof(read_manifest), &read_manifest_len,
+                  MANIFEST_JSON, strlen(MANIFEST_JSON));
+  build_read_resp(read_config, sizeof(read_config), &read_config_len,
+                  CONFIG_JSON, strlen(CONFIG_JSON));
+
+  manifest_msgs[0] = read_manifest;
+  manifest_lens[0] = (uint32_t)read_manifest_len;
+  config_msgs[0] = read_config;
+  config_lens[0] = (uint32_t)read_config_len;
+
+  memset(script, 0, sizeof(script));
+  script[0].kind = FS_UNARY;
+  script[0].body = image_resp;
+  script[0].body_len = (uint32_t)image_len;
+  script[1].kind = FS_STREAM; /* Content/Read: the image manifest */
+  script[1].msgs = manifest_msgs;
+  script[1].n_msgs = 1;
+  script[1].msg_lens = manifest_lens;
+  script[2].kind = FS_STREAM; /* Content/Read: the image config */
+  script[2].msgs = config_msgs;
+  script[2].n_msgs = 1;
+  script[2].msg_lens = config_lens;
+  script[3].kind = FS_UNARY; /* Snapshots/Prepare (body ignored) */
+  script[3].body = NULL;
+  script[3].body_len = 0;
+  script[4].kind = FS_UNARY; /* Containers/Create — OVERSIZED response */
+  script[4].body = create_ctr_resp;
+  script[4].body_len = (uint32_t)create_ctr_len;
+
+  memset(&sa, 0, sizeof(sa));
+  sa.listener_fd = lfd;
+  sa.script = script;
+  sa.n_steps = sizeof(script) / sizeof(script[0]);
+  pthread_create(&th, NULL, scripted_server, &sa);
+
+  rc = strim_containerd_connect(path, "strimserver", &client);
+  CHECK(rc == 0 && client != NULL);
+  if (rc != 0)
+    return;
+
+  /* The OCI spec (no CDI resolution in this test). */
+  memset(&spec, 0, sizeof(spec));
+  mounts[0].source = "/mnt/nvme/config/strimserver.env";
+  mounts[0].destination = "/strimserver.env";
+  mounts[0].read_write = false;
+  spec.mounts = mounts;
+  spec.n_mounts = 1;
+  spec.host_network = true;
+
+  /* The CDI-sized Create response must decode: with the old 16 KiB buffer
+   * h2c aborted TOOBIG and this folded to STRIM_CTRD_ERR_PROTO (-6) even
+   * though the fake daemon accepted the create. */
+  rc = strim_containerd_new_container(client, "ctr-1", "snap-ctr-1",
+                                      "docker.io/library/ffmpeg:latest",
+                                      &spec, &ctr);
+  CHECK(rc == 0 && ctr != NULL);
+
+  strim_containerd_close(client);
+  pthread_join(th, NULL);
+  close(lfd);
+  unlink(path);
+}
+
+/* =========================================================================
+ * Test 15: an H2C_ERR_TOOBIG response tears down + redials the shared
+ * connection instead of wedging it. The h2c abort path does NOT credit the
+ * flow-control windows the oversized message consumed, so a retained
+ * connection would stall every later RPC (-4 timeout) — the production -4
+ * cascade after the -6 Create. transport_is_dead must treat TOOBIG as a
+ * transport death: this test drives a GetImage whose response exceeds the
+ * client's 16 KiB GetImage buffer (TOOBIG -> STRIM_CTRD_ERR_PROTO + reset),
+ * then a second GetImage which must redial on a FRESH connection and
+ * succeed.
+ * ========================================================================= */
+static void test_toobig_resets_shared_conn(void) {
+  char path[128];
+  int lfd = temp_listen(path, sizeof(path));
+  uint8_t image_resp[512], big_image_resp[32768];
+  size_t image_len, big_image_len;
+  struct script_arg sa;
+  struct fstep script[2];
+  pthread_t th;
+  strim_containerd_client *client = NULL;
+  strim_image *img = NULL;
+  int served = 0;
+  int rc;
+
+  CHECK(lfd >= 0);
+  if (lfd < 0)
+    return;
+
+  build_image_get_resp(image_resp, sizeof(image_resp), &image_len);
+  build_image_get_resp_large(big_image_resp, sizeof(big_image_resp),
+                             &big_image_len);
+  /* The oversized GetImage response must actually overrun the client's 16
+   * KiB GetImage buffer — the TOOBIG trigger. */
+  CHECK(big_image_len > 16384);
+
+  memset(script, 0, sizeof(script));
+  script[0].kind = FS_UNARY; /* step 0: oversized GetImage -> TOOBIG */
+  script[0].body = big_image_resp;
+  script[0].body_len = (uint32_t)big_image_len;
+  script[1].kind = FS_NEWCONN; /* step 1: served on the REDIALED connection */
+  script[1].body = image_resp;
+  script[1].body_len = (uint32_t)image_len;
+
+  memset(&sa, 0, sizeof(sa));
+  sa.listener_fd = lfd;
+  sa.script = script;
+  sa.n_steps = sizeof(script) / sizeof(script[0]);
+  sa.request_count = &served;
+  pthread_create(&th, NULL, scripted_server, &sa);
+
+  rc = strim_containerd_connect(path, "strimserver", &client);
+  CHECK(rc == 0 && client != NULL);
+  if (rc != 0)
+    return;
+
+  /* The oversized GetImage response overruns the client's 16 KiB buffer:
+   * h2c aborts TOOBIG (-6) and the client maps it to STRIM_CTRD_ERR_PROTO.
+   * With the transport_is_dead fix, the TOOBIG is a transport death: the
+   * shared connection is discarded so the next RPC redials. */
+  rc = strim_containerd_get_image(client, "docker.io/library/ffmpeg:latest",
+                                  &img);
+  CHECK(rc == STRIM_CTRD_ERR_PROTO);
+
+  /* The second RPC must reach the server on a FRESH connection (FS_NEWCONN)
+   * and succeed. Without the fix, the wedged connection would be reused, the
+   * server would wait forever on accept(), and this RPC would time out (-4)
+   * — the production cascade that blocked even loading the container to
+   * delete it. */
+  rc = strim_containerd_get_image(client, "docker.io/library/ffmpeg:latest",
+                                  &img);
+  CHECK(rc == 0 && img != NULL);
+  CHECK(served == 2);
+
+  strim_containerd_close(client);
+  pthread_join(th, NULL);
+  close(lfd);
+  unlink(path);
+}
+
 int main(void) {
   test_h2c_selftest();
   test_unary_rpc();
@@ -2311,6 +2621,8 @@ int main(void) {
   test_concurrent_client();
   test_unary_flow_control_credit();
   test_grpc_status_error();
+  test_new_container_large_spec();
+  test_toobig_resets_shared_conn();
 
   if (failures == 0) {
     printf("containerd lane tests: OK\n");

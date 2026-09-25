@@ -38,7 +38,7 @@
  * connection is established by the first RPC (shared_conn_locked) and is
  * re-established by the next RPC whenever a transport-level failure tears it
  * down (shared_conn_reset_locked on H2C_ERR_IO / GOAWAY / PROTO / NOCONN /
- * CLOSED / NOSTREAM). Consequences, identical to Go:
+ * CLOSED / NOSTREAM / TOOBIG). Consequences, identical to Go:
  *
  *   - A containerd daemon that is down at boot is NOT fatal: connect returns
  *     a valid client, the first RPC fails with STRIM_CTRD_ERR_CONNECT, and
@@ -297,9 +297,13 @@ static int map_grpc_err(int rc) {
  * ========================================================================= */
 
 /* Whether a negative h2c error means the shared connection is unusable and
- * must be rebuilt (the gRPC-go TRANSIENT_FAILURE case). Timeouts and local
- * buffer limits leave the connection healthy and are deliberately NOT
- * resets. */
+ * must be rebuilt (the gRPC-go TRANSIENT_FAILURE case). Timeouts leave the
+ * connection healthy and are deliberately NOT resets. H2C_ERR_TOOBIG IS a
+ * reset: the h2c abort path marks the stream done WITHOUT crediting the
+ * flow-control windows the oversized message consumed, so the shared
+ * connection is left short on receive credit and later RPCs would stall
+ * (the -4 timeout cascade); tearing it down forces the next RPC to redial
+ * with fresh windows. */
 static int transport_is_dead(int rc) {
   switch (rc) {
   case H2C_ERR_IO:
@@ -308,6 +312,7 @@ static int transport_is_dead(int rc) {
   case H2C_ERR_NOSTREAM:
   case H2C_ERR_NOCONN:
   case H2C_ERR_CLOSED:
+  case H2C_ERR_TOOBIG:
     return 1;
   default:
     return 0;
@@ -986,7 +991,12 @@ static int new_container_locked(strim_containerd_client *client,
       containerd_services_containers_v1_CreateContainerResponse_init_zero;
   uint8_t *req_buf = NULL;
   size_t req_len = 0;
-  uint8_t resp_buf[16384];
+  /* The response carries the container's full OCI spec Any (JSON), so give
+   * the decode a generous fixed buffer. After v1.0.36's CDI createContainer
+   * hooks the stored spec reaches ~17.4 KB (55 CDI mounts + device nodes +
+   * nvidia-cdi-hook hooks); a 16 KiB buffer made h2c abort the read with
+   * H2C_ERR_TOOBIG even though the daemon accepted the create. */
+  uint8_t resp_buf[65536];
   uint32_t resp_len = 0;
   strim_image *image = NULL;
   char *config_digest = NULL;
