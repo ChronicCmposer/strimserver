@@ -141,7 +141,15 @@ else
    # unchanged (behavior-preserving; no --set-as-default).
    printf "generating the CDI device spec for the controllers...\n"
    sudo mkdir -p /var/run/cdi /etc/cdi
+   # Remove stale YAML (and any old JSON) from the dynamic dir first: the Go
+   # CDI cache hard-fails when the same device appears in both nvidia.yaml and
+   # nvidia.json in the same directory ("unresolvable CDI devices"). We ship
+   # JSON only (canonical CDI format; both the C and Go controllers read it).
+   sudo rm -f /var/run/cdi/nvidia.yaml /var/run/cdi/nvidia.yml /var/run/cdi/nvidia.json
    sudo nvidia-ctk cdi generate --format=json --output=/var/run/cdi/nvidia.json
+   # Same hygiene for the /etc/cdi copy: a stale YAML beside the JSON we copy
+   # would be a same-dir duplicate conflict for host-side Go CDI tooling.
+   sudo rm -f /etc/cdi/nvidia.yaml /etc/cdi/nvidia.yml
    sudo cp /var/run/cdi/nvidia.json /etc/cdi/nvidia.json
    sudo systemctl enable --now nvidia-persistenced
 fi

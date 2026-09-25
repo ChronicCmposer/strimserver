@@ -305,7 +305,12 @@ static int parse_edits(yyjson_val *obj, cdi_edits *out) {
         cdi_edits_free(out);
         return -1;
       }
-      out->n_hooks = n;
+      /* Compact write index: hooks WITHOUT a createContainer array (e.g. the
+       * nvidia-ctk JSON "hookName" form, which containerd's pkg/cdi treats as
+       * an unknown field and skips) contribute NO hook — do not count or
+       * copy them, or the merged edit set carries a zeroed hook whose NULL
+       * path strdup()s into a segfault (cdi.c:628). */
+      out->n_hooks = 0;
       for (i = 0; i < n; i++) {
         yyjson_val *h = yyjson_arr_get(v, i);
         yyjson_val *cc;
@@ -325,8 +330,8 @@ static int parse_edits(yyjson_val *obj, cdi_edits *out) {
             cdi_edits_free(out);
             return -1;
           }
-          out->hooks[i].path = dup_val_str(yyjson_obj_get(one, "path"));
-          if (out->hooks[i].path == NULL) {
+          out->hooks[out->n_hooks].path = dup_val_str(yyjson_obj_get(one, "path"));
+          if (out->hooks[out->n_hooks].path == NULL) {
             cdi_edits_free(out);
             return -1;
           }
@@ -334,15 +339,16 @@ static int parse_edits(yyjson_val *obj, cdi_edits *out) {
           if (yyjson_is_arr(args)) {
             size_t an = yyjson_arr_size(args);
             size_t j;
-            out->hooks[i].args = (char **)calloc(an, sizeof(char *));
-            if (out->hooks[i].args == NULL) {
+            out->hooks[out->n_hooks].args = (char **)calloc(an, sizeof(char *));
+            if (out->hooks[out->n_hooks].args == NULL) {
               cdi_edits_free(out);
               return -1;
             }
-            out->hooks[i].n_args = an;
+            out->hooks[out->n_hooks].n_args = an;
             for (j = 0; j < an; j++) {
-              out->hooks[i].args[j] = dup_val_str(yyjson_arr_get(args, j));
-              if (out->hooks[i].args[j] == NULL) {
+              out->hooks[out->n_hooks].args[j] =
+                  dup_val_str(yyjson_arr_get(args, j));
+              if (out->hooks[out->n_hooks].args[j] == NULL) {
                 cdi_edits_free(out);
                 return -1;
               }
@@ -352,15 +358,16 @@ static int parse_edits(yyjson_val *obj, cdi_edits *out) {
           if (yyjson_is_arr(env)) {
             size_t en = yyjson_arr_size(env);
             size_t j;
-            out->hooks[i].env = (char **)calloc(en, sizeof(char *));
-            if (out->hooks[i].env == NULL) {
+            out->hooks[out->n_hooks].env = (char **)calloc(en, sizeof(char *));
+            if (out->hooks[out->n_hooks].env == NULL) {
               cdi_edits_free(out);
               return -1;
             }
-            out->hooks[i].n_env = en;
+            out->hooks[out->n_hooks].n_env = en;
             for (j = 0; j < en; j++) {
-              out->hooks[i].env[j] = dup_val_str(yyjson_arr_get(env, j));
-              if (out->hooks[i].env[j] == NULL) {
+              out->hooks[out->n_hooks].env[j] =
+                  dup_val_str(yyjson_arr_get(env, j));
+              if (out->hooks[out->n_hooks].env[j] == NULL) {
                 cdi_edits_free(out);
                 return -1;
               }
@@ -368,7 +375,8 @@ static int parse_edits(yyjson_val *obj, cdi_edits *out) {
           }
           timeout = yyjson_obj_get(one, "timeout");
           if (yyjson_is_int(timeout))
-            out->hooks[i].timeout = (int32_t)yyjson_get_int(timeout);
+            out->hooks[out->n_hooks].timeout = (int32_t)yyjson_get_int(timeout);
+          out->n_hooks++;
         }
       }
     }

@@ -67,6 +67,39 @@ static const char FIXTURE[] =
     "  ]"
     "}";
 
+/* Regression fixture for the nvidia-ctk `--format=json` hook form. Real
+ * nvidia-container-toolkit output emits hooks as {"hookName": ..., "path": ...,
+ * "args": ...} with NO createContainer array; containerd's pkg/cdi treats
+ * hookName as an unknown field and skips the hook. Mix two hookName-only hooks
+ * with one createContainer hook so the parsed hook count must be 1. */
+static const char HOOKNAME_FIXTURE[] =
+    "{"
+    "  \"cdiVersion\": \"0.5.0\","
+    "  \"kind\": \"nvidia.com/gpu\","
+    "  \"containerEdits\": {"
+    "    \"env\": [\"NVIDIA_VISIBLE_DEVICES=0\"],"
+    "    \"hooks\": ["
+    "      {\"hookName\": \"create-container\","
+    "       \"path\": \"/usr/bin/nvidia-container-cli\","
+    "       \"args\": [\"nvidia-container-cli\", \"configure\"],"
+    "       \"env\": [\"PATH=/usr/bin\"]},"
+    "      {\"hookName\": \"create-runtime\","
+    "       \"path\": \"/usr/bin/nvidia-container-runtime-hook\","
+    "       \"args\": [\"nvidia-container-runtime-hook\"],"
+    "       \"env\": [\"PATH=/usr/bin\"]},"
+    "      {\"createContainer\": ["
+    "        {\"path\": \"/usr/bin/real-hook\","
+    "         \"args\": [\"real-hook\", \"--device=all\"],"
+    "         \"timeout\": 30}"
+    "      ]}"
+    "    ]"
+    "  },"
+    "  \"devices\": ["
+    "    {\"name\": \"0\","
+    "     \"containerEdits\": {\"env\": [\"NVIDIA_VISIBLE_DEVICES=0\"]}}"
+    "  ]"
+    "}";
+
 int main(void) {
   char dir[] = "/tmp/strim-cdi-test-XXXXXX";
   char path[256];
@@ -162,6 +195,51 @@ int main(void) {
     CHECK(strim_cdi_ref_parse("nvidia.com/gpu=99", &other) == 0);
     CHECK(strim_cdi_resolve(&other, &n_devices) == STRIM_CDI_ERR_NOTFOUND);
     CHECK(strim_cdi_merge_edits(&spec) == STRIM_CDI_ERR_BADARG);
+  }
+
+  /* --- regression: nvidia-ctk "hookName"-form hooks (no createContainer) ---
+   * Real nvidia-ctk `cdi generate --format=json` emits hooks as
+   * {"hookName": ..., "path": ..., "args": ...}; containerd's pkg/cdi treats
+   * hookName as unknown and skips the hook. Pre-fix, parse_edits counted
+   * every hook (out->n_hooks = n) while parsing only createContainer hooks,
+   * so the index carried zeroed hooks (path=NULL) that strim_cdi_resolve's
+   * deep copy strdup(NULL)ed into a SIGSEGV (cdi.c:628). Resolve below is
+   * that crash path: it must survive, and the hook count must reflect only
+   * the one createContainer hook. */
+  {
+    char hdir[] = "/tmp/strim-cdi-hookname-XXXXXX";
+    char hpath[256];
+    strim_cdi_ref href;
+    strim_spec hspec;
+    const strim_cdi_edit_set *hedits = NULL;
+    FILE *hf;
+
+    CHECK(mkdtemp(hdir) != NULL);
+    snprintf(hpath, sizeof(hpath), "%s/nvidia.json", hdir);
+    hf = fopen(hpath, "w");
+    CHECK(hf != NULL);
+    if (hf != NULL) {
+      fwrite(HOOKNAME_FIXTURE, 1, strlen(HOOKNAME_FIXTURE), hf);
+      fclose(hf);
+    }
+
+    CHECK(strim_cdi_test_scan_dir(hdir) == 0);
+    CHECK(strim_cdi_ref_parse("nvidia.com/gpu=0", &href) == 0);
+    /* The pre-fix segfault happened here (deep copy -> strdup(NULL)). */
+    CHECK(strim_cdi_resolve(&href, NULL) == 0);
+    memset(&hspec, 0, sizeof(hspec));
+    CHECK(strim_cdi_merge_edits(&hspec) == 0);
+    CHECK(strim_cdi_get_pending_edits(&hedits) == 0);
+    CHECK(hedits != NULL);
+    /* hookName-only hooks are skipped; only createContainer counts. */
+    CHECK(hedits->oci.n_hooks == 1);
+    CHECK(strcmp(hedits->oci.hooks[0].path, "/usr/bin/real-hook") == 0);
+    CHECK(hedits->oci.hooks[0].n_args == 2);
+    CHECK(strcmp(hedits->oci.hooks[0].args[1], "--device=all") == 0);
+    CHECK(hedits->oci.hooks[0].timeout == 30);
+
+    unlink(hpath);
+    rmdir(hdir);
   }
 
   /* cleanup */
