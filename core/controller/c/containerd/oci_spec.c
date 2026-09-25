@@ -661,7 +661,29 @@ static void emit_linux(struct jbuf *b, const strim_spec *spec,
   jb_raw(b, ",\"cgroupsPath\":");
   jb_quoted(b, cgpath);
 
-  jb_raw(b, ",\"resources\":{\"devices\":[{\"allow\":false,\"access\":\"rwm\"}]}");
+  /* Device-cgroup rules: the base deny-all FIRST, then one allow rule per
+   * CDI character-device node. cgroup v2 installs this array as a device
+   * eBPF program with last-match-wins semantics, so the allows MUST follow
+   * the deny-all (a trailing deny-all vetoes them — the deployed bug).
+   * Go's cdi.WithCDIDevices appends the allows after the deny-all; mirror it.
+   * Nodes without a valid char-device identity (major/minor < 0 or a type
+   * other than "c") get no allow rule — linux.devices still carries them. */
+  jb_raw(b, ",\"resources\":{\"devices\":[{\"allow\":false,\"access\":\"rwm\"}");
+  if (cdi != NULL) {
+    for (i = 0; i < cdi->n_devices; i++) {
+      const struct strim_oci_cdi_device *d = &cdi->devices[i];
+      if (d->major < 0 || d->minor < 0)
+        continue;
+      if (d->type != NULL && strcmp(d->type, "c") != 0)
+        continue;
+      jb_raw(b, ",{\"allow\":true,\"type\":\"c\",\"major\":");
+      jb_i64(b, d->major);
+      jb_raw(b, ",\"minor\":");
+      jb_i64(b, d->minor);
+      jb_raw(b, ",\"access\":\"rwm\"}");
+    }
+  }
+  jb_raw(b, "]}");
 
   jb_raw(b, ",\"namespaces\":[");
   {

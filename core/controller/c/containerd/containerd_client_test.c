@@ -54,6 +54,8 @@
 #include "sha256.h"
 #include "minipb.h"
 
+#include <yyjson.h>
+
 #include <pb.h>
 #include <pb_decode.h>
 #include <pb_encode.h>
@@ -1710,6 +1712,180 @@ static void test_oci_spec_cdi_hooks_and_env_dedup(void) {
 }
 
 /* =========================================================================
+ * Test 6c: CDI device nodes emit matching allow rules in resources.devices
+ * AFTER the base deny-all. cgroup v2 installs the array as a device eBPF
+ * program with last-match-wins semantics, so a deny-all-only spec (the
+ * deployed bug) made open(/dev/nvidia0) fail with EPERM and the egress
+ * ffmpeg container exit 187 — the allows MUST follow the deny, exactly like
+ * Go's cdi.WithCDIDevices. Nodes without a valid char-device identity
+ * (major/minor < 0 or type != "c") get NO allow rule; linux.devices still
+ * carries every node.
+ * ========================================================================= */
+static void test_oci_spec_cdi_device_cgroup_rules(void) {
+  strim_spec spec;
+  strim_oci_image_config image;
+  strim_oci_cdi_edits cdi;
+  strim_oci_cdi_device devices[8];
+  char *json = NULL;
+  size_t json_len = 0;
+  yyjson_doc *doc = NULL;
+  yyjson_val *root, *linux_obj, *resources, *devices_arr, *rule,
+      *linux_devices;
+  size_t i;
+  int rc;
+  /* The nvidia char devices (the deployed set) in emission order. */
+  static const struct {
+    int64_t major;
+    int64_t minor;
+  } EXPECTED_ALLOWS[] = {{195, 0}, {195, 255}, {237, 0}, {237, 1}, {1, 3}};
+
+  memset(&spec, 0, sizeof(spec));
+  spec.host_network = true;
+
+  static const char *img_entrypoint[] = {"/entrypoint"};
+  static const char *img_cmd[] = {"--flag"};
+  memset(&image, 0, sizeof(image));
+  image.entrypoint = img_entrypoint;
+  image.n_entrypoint = 1;
+  image.cmd = img_cmd;
+  image.n_cmd = 1;
+  image.working_dir = "/";
+  image.user = NULL; /* root */
+
+  /* Four nvidia nodes + one NULL-type node (defaults to "c", like cdi.c)
+   * must get allow rules; a negative-major node, a negative-minor node and
+   * a block node must NOT. */
+  memset(devices, 0, sizeof(devices));
+  devices[0].path = "/dev/nvidia0";
+  devices[0].type = "c";
+  devices[0].major = 195;
+  devices[0].minor = 0;
+  devices[1].path = "/dev/nvidiactl";
+  devices[1].type = "c";
+  devices[1].major = 195;
+  devices[1].minor = 255;
+  devices[2].path = "/dev/nvidia-uvm";
+  devices[2].type = "c";
+  devices[2].major = 237;
+  devices[2].minor = 0;
+  devices[3].path = "/dev/nvidia-uvm-tools";
+  devices[3].type = "c";
+  devices[3].major = 237;
+  devices[3].minor = 1;
+  devices[4].path = "/dev/bad-negative-major";
+  devices[4].type = "c";
+  devices[4].major = -1;
+  devices[4].minor = 0;
+  devices[5].path = "/dev/bad-negative-minor";
+  devices[5].type = "c";
+  devices[5].major = 195;
+  devices[5].minor = -1;
+  devices[6].path = "/dev/sda";
+  devices[6].type = "b";
+  devices[6].major = 8;
+  devices[6].minor = 0;
+  devices[7].path = "/dev/nulltype";
+  devices[7].type = NULL;
+  devices[7].major = 1;
+  devices[7].minor = 3;
+
+  memset(&cdi, 0, sizeof(cdi));
+  cdi.devices = devices;
+  cdi.n_devices = sizeof(devices) / sizeof(devices[0]);
+
+  rc = strim_oci_build_spec(&spec, &image, "strimserver", "scale-and-egress",
+                            &cdi, &json, &json_len);
+  CHECK(rc == 0 && json != NULL);
+  if (rc != 0 || json == NULL)
+    return;
+
+  /* The deny-all must be the FIRST element of the devices array (raw text),
+   * before any allow rule. */
+  CHECK(strstr(json, "\"resources\":{\"devices\":[{\"allow\":false,\"access\":\"rwm\"}") != NULL);
+
+  /* The emitted JSON must parse — well-formed, and navigable. */
+  doc = yyjson_read(json, json_len, 0);
+  CHECK(doc != NULL);
+  if (doc == NULL) {
+    free(json);
+    return;
+  }
+  root = yyjson_doc_get_root(doc);
+  linux_obj = yyjson_obj_get(root, "linux");
+  CHECK(linux_obj != NULL);
+  resources = yyjson_obj_get(linux_obj, "resources");
+  CHECK(resources != NULL);
+  devices_arr = yyjson_obj_get(resources, "devices");
+  CHECK(devices_arr != NULL);
+  /* deny-all + 5 valid char nodes; the negative-major/minor and block nodes
+   * are skipped. */
+  CHECK(yyjson_arr_size(devices_arr) == 1 + 5);
+  if (yyjson_arr_size(devices_arr) == 1 + 5) {
+    /* [0]: the deny-all first, with the access string and no device identity. */
+    rule = yyjson_arr_get(devices_arr, 0);
+    CHECK(rule != NULL);
+    CHECK(yyjson_get_bool(yyjson_obj_get(rule, "allow")) == false);
+    CHECK(yyjson_get_str(yyjson_obj_get(rule, "access")) != NULL &&
+          strcmp(yyjson_get_str(yyjson_obj_get(rule, "access")), "rwm") == 0);
+    CHECK(yyjson_obj_get(rule, "type") == NULL);
+    CHECK(yyjson_obj_get(rule, "major") == NULL);
+    CHECK(yyjson_obj_get(rule, "minor") == NULL);
+
+    /* [1..5]: one allow rule per valid char node, in device order. */
+    for (i = 0; i < sizeof(EXPECTED_ALLOWS) / sizeof(EXPECTED_ALLOWS[0]); i++) {
+      rule = yyjson_arr_get(devices_arr, 1 + i);
+      CHECK(rule != NULL);
+      CHECK(yyjson_get_bool(yyjson_obj_get(rule, "allow")) == true);
+      CHECK(yyjson_get_str(yyjson_obj_get(rule, "type")) != NULL &&
+            strcmp(yyjson_get_str(yyjson_obj_get(rule, "type")), "c") == 0);
+      CHECK(yyjson_get_sint(yyjson_obj_get(rule, "major")) == EXPECTED_ALLOWS[i].major);
+      CHECK(yyjson_get_sint(yyjson_obj_get(rule, "minor")) == EXPECTED_ALLOWS[i].minor);
+      CHECK(yyjson_get_str(yyjson_obj_get(rule, "access")) != NULL &&
+            strcmp(yyjson_get_str(yyjson_obj_get(rule, "access")), "rwm") == 0);
+    }
+  }
+
+  /* linux.devices still carries ALL nodes (emission unchanged). */
+  linux_devices = yyjson_obj_get(linux_obj, "devices");
+  CHECK(linux_devices != NULL);
+  CHECK(yyjson_arr_size(linux_devices) == 8);
+  for (i = 0; i < 8; i++) {
+    rule = yyjson_arr_get(linux_devices, i);
+    CHECK(rule != NULL &&
+          yyjson_get_str(yyjson_obj_get(rule, "path")) != NULL);
+  }
+
+  yyjson_doc_free(doc);
+  free(json);
+
+  /* No-CDI baseline: the array is still just the deny-all. */
+  {
+    char *json2 = NULL;
+    size_t json2_len = 0;
+    yyjson_doc *doc2 = NULL;
+    yyjson_val *arr2 = NULL;
+    rc = strim_oci_build_spec(&spec, &image, "strimserver", "scale-and-egress",
+                              NULL, &json2, &json2_len);
+    CHECK(rc == 0 && json2 != NULL);
+    if (rc != 0 || json2 == NULL)
+      return;
+    doc2 = yyjson_read(json2, json2_len, 0);
+    CHECK(doc2 != NULL);
+    if (doc2 != NULL) {
+      yyjson_val *linux2 = yyjson_obj_get(yyjson_doc_get_root(doc2), "linux");
+      yyjson_val *resources2 =
+          linux2 != NULL ? yyjson_obj_get(linux2, "resources") : NULL;
+      arr2 = resources2 != NULL ? yyjson_obj_get(resources2, "devices") : NULL;
+      CHECK(arr2 != NULL && yyjson_arr_size(arr2) == 1);
+      CHECK(arr2 != NULL &&
+            yyjson_get_bool(yyjson_obj_get(yyjson_arr_get(arr2, 0), "allow")) == false);
+      yyjson_doc_free(doc2);
+    }
+    free(json2);
+  }
+}
+
+/* =========================================================================
  * Test 7: image rootfs chain ID (identity.ChainID vectors)
  * ========================================================================= */
 static void test_chain_id(void) {
@@ -2613,6 +2789,7 @@ int main(void) {
   test_service_roundtrips();
   test_oci_spec_builder();
   test_oci_spec_cdi_hooks_and_env_dedup();
+  test_oci_spec_cdi_device_cgroup_rules();
   test_chain_id();
   test_lifecycle_start();
   test_image_config_case_insensitive();
