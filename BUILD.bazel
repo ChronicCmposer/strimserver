@@ -3,7 +3,7 @@
 load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files", "strip_prefix")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
-load("//:c_controller_transition.bzl", "c_controller_transition")
+load("//tools/bazel:c_controller_transition.bzl", "c_controller_transition")
 load("//tools/bazel:platform_transition.bzl", "platform_transition")
 
 # --- Offline fallback segment --------------------------------------------
