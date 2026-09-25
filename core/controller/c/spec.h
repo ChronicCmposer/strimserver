@@ -48,8 +48,10 @@ extern "C" {
  * ========================================================================= */
 
 /* Bounds for the fixed-size mount lists / arrays (fixed-arity design; the
- * project images mount 4 (ffmpeg) or 6 (mediamtx) paths). */
-#define STRIM_SPEC_MAX_MOUNTS      8
+ * project images mount 4 (ffmpeg) or 6 (mediamtx) paths; CDI merges add the
+ * device spec's mounts, so the bound also covers a full CDI edit set such as
+ * the nvidia spec's 55 spec-level mounts). */
+#define STRIM_SPEC_MAX_MOUNTS      256
 #define STRIM_SPEC_MAX_ARGS        16
 #define STRIM_SPEC_MAX_ENV         64
 #define STRIM_SPEC_MAX_CAPS        32
