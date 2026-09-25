@@ -68,10 +68,12 @@ fi
 # NVIDIA GPU runtime: arch-aware (the DLAMI carries the driver + container
 # toolkit). Both controllers -- the Go controller (CONTROLLER_VARIANT=go-*)
 # and the C controller (CONTROLLER_VARIANT=c-*, the musl-static Go-equivalent
-# port) -- inject CDI themselves from /etc/cdi/nvidia.yaml (the C controller
-# mirrors the Go cdi.WithCDIDevices behavior), so no runtime shim switch is
-# needed on either arch. Runs BEFORE the containerd block below so the single
-# restart picks up any GPU wiring together with the root/state config prepend.
+# port) -- inject CDI themselves from JSON specs in the bind-mounted
+# /var/run/cdi (setup-gpu.sh generates /var/run/cdi/nvidia.json there; the C
+# controller mirrors the Go cdi.WithCDIDevices behavior), so no runtime shim
+# switch is needed on either arch. Runs BEFORE the containerd block below so
+# the single restart picks up any GPU wiring together with the root/state
+# config prepend.
 bash ./setup-gpu.sh
 rm -f /mnt/nvme/setup-gpu.sh
 

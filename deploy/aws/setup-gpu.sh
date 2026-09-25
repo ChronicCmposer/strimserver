@@ -22,8 +22,8 @@
 # the toolkit package - there is no separate nvidia-container-runtime package),
 # and containerd 2.x. The amd64 path keeps the existing x86_64 DLAMI behavior.
 #
-# Option C (arm64) vs Go-CDI (amd64)
-# ----------------------------------
+# Option C (arm64) vs CDI injection (amd64)
+# -----------------------------------------
 # The assembly controller (arm64) creates containers on the RAW containerd
 # API, where CDI annotation emission and containerd's default_runtime_name are
 # INERT (CRI-only). Its GPU stages (normalize / scale-and-egress /
@@ -36,10 +36,11 @@
 # containerd default runtime is deliberately left UNCHANGED and no CDI files
 # are generated: /usr/bin/nvidia-container-runtime just has to exist.
 #
-# The Go controller (amd64) injects CDI itself (cdi.WithCDIDevices reads the
-# host's /etc/cdi/nvidia.yaml and adds the devices/mounts to the OCI spec), so
-# the amd64 branch generates that file; the default runtime is also left
-# unchanged (behavior-preserving).
+# The controllers (amd64) inject CDI themselves (the Go controller via
+# cdi.WithCDIDevices, the C controller via its JSON-only CDI scanner), reading
+# JSON specs from the bind-mounted /var/run/cdi (strimserver.service mounts
+# /var/run/cdi into the controller container), so the amd64 branch generates
+# that spec; the default runtime is also left unchanged (behavior-preserving).
 #
 # Ordering note
 # -------------
@@ -132,12 +133,16 @@ if [[ "$ARCH" == "arm64" ]]; then
    # assembly controller. The default runtime stays plain runc.
    sudo systemctl enable --now nvidia-persistenced
 else
-   # amd64: the Go controller injects CDI itself (cdi.WithCDIDevices reads the
-   # host's CDI spec), so generate /etc/cdi/nvidia.yaml. The default runtime is
-   # deliberately left unchanged (behavior-preserving; no --set-as-default).
-   printf "generating the CDI device spec for the Go controller...\n"
-   sudo mkdir -p /etc/cdi
-   sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+   # amd64: the controllers inject CDI themselves (the Go controller via
+   # cdi.WithCDIDevices, the C controller via its JSON-only CDI scanner), so
+   # generate a JSON spec into /var/run/cdi, the directory bind-mounted into
+   # the controller container (strimserver.service). A copy is also kept in
+   # /etc/cdi for host-side tooling. The default runtime is deliberately left
+   # unchanged (behavior-preserving; no --set-as-default).
+   printf "generating the CDI device spec for the controllers...\n"
+   sudo mkdir -p /var/run/cdi /etc/cdi
+   sudo nvidia-ctk cdi generate --format=json --output=/var/run/cdi/nvidia.json
+   sudo cp /var/run/cdi/nvidia.json /etc/cdi/nvidia.json
    sudo systemctl enable --now nvidia-persistenced
 fi
 printf "NVIDIA runtime wiring done!\n"
