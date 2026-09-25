@@ -1462,6 +1462,124 @@ static void test_oci_spec_builder(void) {
 }
 
 /* =========================================================================
+ * Test 6b: CDI createContainer hooks flow into the emitted OCI spec, and
+ * the emit-time env dedup drops a CDI env var whose key the base/image env
+ * already sets (the production gap: NVIDIA_VISIBLE_DEVICES=all reaches the
+ * builder via image->env — NOT spec->process.env — so the merge-time dedup
+ * in strim_cdi_merge_edits never fires for it).
+ * ========================================================================= */
+static void test_oci_spec_cdi_hooks_and_env_dedup(void) {
+  strim_spec spec;
+  strim_oci_image_config image;
+  strim_oci_cdi_edits cdi;
+  strim_oci_cdi_hook hook;
+  char *json = NULL;
+  size_t json_len = 0;
+  const char *p;
+  int nvd_count = 0;
+  int rc;
+
+  memset(&spec, 0, sizeof(spec));
+  spec.host_network = true;
+
+  /* Production shape: the base NVIDIA_VISIBLE_DEVICES=all arrives via the
+   * IMAGE config env (containerd_client.c parse_image_config -> ic.cfg), not
+   * spec.process.env — the controller's factory spec (main.c
+   * stage_start_op) only sets capabilities/args/mounts. */
+  static const char *img_env[] = {"NVIDIA_VISIBLE_DEVICES=all",
+                                  "PATH=/usr/bin"};
+  static const char *img_entrypoint[] = {"/entrypoint"};
+  static const char *img_cmd[] = {"--flag"};
+  memset(&image, 0, sizeof(image));
+  image.env = img_env;
+  image.n_env = 2;
+  image.entrypoint = img_entrypoint;
+  image.n_entrypoint = 1;
+  image.cmd = img_cmd;
+  image.n_cmd = 1;
+  image.working_dir = "/";
+  image.user = NULL; /* root */
+
+  /* The resolved CDI edit set (strim_cdi_get_pending_edits view): the nvidia
+   * spec's containerEdits append NVIDIA_VISIBLE_DEVICES=void plus the
+   * nvidia-cdi-hook create-symlinks createContainer hook. */
+  static const char *cdi_env[] = {"NVIDIA_VISIBLE_DEVICES=void",
+                                  "NVIDIA_DRIVER_CAPABILITIES=compute,utility,video"};
+  static const char *hook_args[] = {"nvidia-cdi-hook", "create-symlinks",
+                                    "--link", "libcuda.so.1"};
+  static const char *hook_env[] = {"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu"};
+  memset(&cdi, 0, sizeof(cdi));
+  cdi.env = cdi_env;
+  cdi.n_env = 2;
+  memset(&hook, 0, sizeof(hook));
+  hook.path = "/usr/bin/nvidia-cdi-hook";
+  hook.args = hook_args;
+  hook.n_args = 4;
+  hook.env = hook_env;
+  hook.n_env = 1;
+  hook.timeout = 30;
+  cdi.hooks = &hook;
+  cdi.n_hooks = 1;
+
+  rc = strim_oci_build_spec(&spec, &image, "strimserver", "scale-and-egress",
+                            &cdi, &json, &json_len);
+  CHECK(rc == 0 && json != NULL);
+  if (rc != 0 || json == NULL)
+    return;
+
+  /* Hooks: the top-level "hooks" object with a createContainer array carrying
+   * the CDI hook (path/args/env/timeout) — never "hooks":null. */
+  CHECK(strstr(json, "\"hooks\":{\"createContainer\":[") != NULL);
+  CHECK(strstr(json, "\"path\":\"/usr/bin/nvidia-cdi-hook\"") != NULL);
+  CHECK(strstr(json, "\"create-symlinks\"") != NULL);
+  CHECK(strstr(json, "\"--link\"") != NULL);
+  CHECK(strstr(json, "\"libcuda.so.1\"") != NULL);
+  CHECK(strstr(json, "\"LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu\"") != NULL);
+  CHECK(strstr(json, "\"timeout\":30") != NULL);
+  CHECK(strstr(json, "\"hooks\":null") == NULL);
+
+  /* Emit-time env dedup: the base/image NVIDIA_VISIBLE_DEVICES=all wins; the
+   * CDI =void is dropped, so the key appears exactly once in the env array. */
+  CHECK(strstr(json, "NVIDIA_VISIBLE_DEVICES=all") != NULL);
+  CHECK(strstr(json, "NVIDIA_VISIBLE_DEVICES=void") == NULL);
+  for (p = json; (p = strstr(p, "NVIDIA_VISIBLE_DEVICES")) != NULL;
+       p += strlen("NVIDIA_VISIBLE_DEVICES"))
+    nvd_count++;
+  CHECK(nvd_count == 1);
+
+  free(json);
+
+  /* Intra-CDI duplicates must survive the emit-time dedup (the cdi_test
+   * contract: spec-level + device-level env edits with the same key are both
+   * appended — the dedup only guards the base/image env, never within the
+   * CDI set itself). */
+  {
+    char *json2 = NULL;
+    size_t json2_len = 0;
+    static const char *img_env2[] = {"PATH=/usr/bin"};
+    static const char *cdi_dup_env[] = {"NVIDIA_VISIBLE_DEVICES=0",
+                                        "NVIDIA_VISIBLE_DEVICES=1"};
+    strim_oci_image_config image2;
+    strim_oci_cdi_edits cdi2;
+    memset(&image2, 0, sizeof(image2));
+    image2.env = img_env2;
+    image2.n_env = 1;
+    image2.working_dir = "/";
+    memset(&cdi2, 0, sizeof(cdi2));
+    cdi2.env = cdi_dup_env;
+    cdi2.n_env = 2;
+    rc = strim_oci_build_spec(&spec, &image2, "strimserver", "scale-and-egress",
+                              &cdi2, &json2, &json2_len);
+    CHECK(rc == 0 && json2 != NULL);
+    if (rc == 0 && json2 != NULL) {
+      CHECK(strstr(json2, "\"NVIDIA_VISIBLE_DEVICES=0\"") != NULL);
+      CHECK(strstr(json2, "\"NVIDIA_VISIBLE_DEVICES=1\"") != NULL);
+      free(json2);
+    }
+  }
+}
+
+/* =========================================================================
  * Test 7: image rootfs chain ID (identity.ChainID vectors)
  * ========================================================================= */
 static void test_chain_id(void) {
@@ -2184,6 +2302,7 @@ int main(void) {
   test_event_pipeline();
   test_service_roundtrips();
   test_oci_spec_builder();
+  test_oci_spec_cdi_hooks_and_env_dedup();
   test_chain_id();
   test_lifecycle_start();
   test_image_config_case_insensitive();

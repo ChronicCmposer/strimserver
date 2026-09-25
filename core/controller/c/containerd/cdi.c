@@ -14,7 +14,10 @@
  * strim_containerd_new_container then applies the full edit set to the OCI
  * spec via strim_cdi_get_pending_edits + strim_oci_build_spec — exactly
  * where containerd applies CDI edits (the OCI spec, not an intermediate
- * struct).
+ * struct). The merge also dedupes the CDI env against the base/factory spec
+ * env: a CDI env var whose key the base spec already sets (e.g. the image
+ * env's NVIDIA_VISIBLE_DEVICES=all vs the nvidia spec's =void) is dropped —
+ * the base value wins.
  *
  * The module keeps a single index + one pending edit set; the controller is
  * single-threaded (one-time resolve per boot), so a plain flag guards state.
@@ -180,6 +183,68 @@ static char *dup_val_str(yyjson_val *v) {
   }
 }
 
+/* Parse ONE hook object ("path"/"args"/"env"/"timeout") into *dst. Returns 0
+ * on success, or -1 (after releasing any partial allocation) when the hook has
+ * no path or an allocation fails — the caller then fails the whole edit set. */
+static int parse_hook_object(yyjson_val *h, cdi_hook *dst) {
+  yyjson_val *args;
+  yyjson_val *env;
+  yyjson_val *timeout;
+  size_t i;
+
+  memset(dst, 0, sizeof(*dst));
+
+  dst->path = dup_val_str(yyjson_obj_get(h, "path"));
+  if (dst->path == NULL)
+    return -1;
+
+  args = yyjson_obj_get(h, "args");
+  if (yyjson_is_arr(args)) {
+    size_t an = yyjson_arr_size(args);
+    size_t j;
+    dst->args = (char **)calloc(an, sizeof(char *));
+    if (dst->args == NULL)
+      goto fail;
+    dst->n_args = an;
+    for (j = 0; j < an; j++) {
+      dst->args[j] = dup_val_str(yyjson_arr_get(args, j));
+      if (dst->args[j] == NULL)
+        goto fail;
+    }
+  }
+
+  env = yyjson_obj_get(h, "env");
+  if (yyjson_is_arr(env)) {
+    size_t en = yyjson_arr_size(env);
+    size_t j;
+    dst->env = (char **)calloc(en, sizeof(char *));
+    if (dst->env == NULL)
+      goto fail;
+    dst->n_env = en;
+    for (j = 0; j < en; j++) {
+      dst->env[j] = dup_val_str(yyjson_arr_get(env, j));
+      if (dst->env[j] == NULL)
+        goto fail;
+    }
+  }
+
+  timeout = yyjson_obj_get(h, "timeout");
+  if (yyjson_is_int(timeout))
+    dst->timeout = (int32_t)yyjson_get_int(timeout);
+  return 0;
+
+fail:
+  free(dst->path);
+  for (i = 0; i < dst->n_args; i++)
+    free(dst->args[i]);
+  free(dst->args);
+  for (i = 0; i < dst->n_env; i++)
+    free(dst->env[i]);
+  free(dst->env);
+  memset(dst, 0, sizeof(*dst));
+  return -1;
+}
+
 static int parse_edits(yyjson_val *obj, cdi_edits *out) {
   yyjson_val *v;
 
@@ -300,83 +365,75 @@ static int parse_edits(yyjson_val *obj, cdi_edits *out) {
     size_t n = yyjson_arr_size(v);
     size_t i;
     if (n > 0) {
-      out->hooks = (cdi_hook *)calloc(n, sizeof(cdi_hook));
-      if (out->hooks == NULL) {
-        cdi_edits_free(out);
-        return -1;
-      }
-      /* Compact write index: hooks WITHOUT a createContainer array (e.g. the
-       * nvidia-ctk JSON "hookName" form, which containerd's pkg/cdi treats as
-       * an unknown field and skips) contribute NO hook — do not count or
-       * copy them, or the merged edit set carries a zeroed hook whose NULL
-       * path strdup()s into a segfault (cdi.c:628). */
-      out->n_hooks = 0;
+      size_t n_hooks = 0; /* createContainer hooks this array yields */
+      /* Pass 1 — count. containerEdits.hooks is a flat list of Hook objects,
+       * each naming its OCI hook with "hookName" (containerd's pkg/cdi
+       * container-edits.go maps "createContainer" into
+       * spec.Hooks.CreateContainer — nvidia-ctk `cdi generate --format=json`
+       * emits exactly this form). The legacy per-name form
+       * {"createContainer": [Hook, ...]} is honored too. Any other hookName
+       * (prestart, poststop, ...) is skipped — the controller only uses
+       * createContainer, matching the OCI emit side. */
       for (i = 0; i < n; i++) {
         yyjson_val *h = yyjson_arr_get(v, i);
+        yyjson_val *hook_name;
         yyjson_val *cc;
         if (!yyjson_is_obj(h)) {
           cdi_edits_free(out);
           return -1;
         }
-        /* Only createContainer hooks are honored (the controller's CDI
-         * usage — nvidia — uses createContainer). */
-        cc = yyjson_obj_get(h, "createContainer");
-        if (yyjson_is_arr(cc) && yyjson_arr_size(cc) > 0) {
-          yyjson_val *one = yyjson_arr_get(cc, 0);
-          yyjson_val *args;
-          yyjson_val *env;
-          yyjson_val *timeout;
-          if (!yyjson_is_obj(one)) {
-            cdi_edits_free(out);
-            return -1;
-          }
-          out->hooks[out->n_hooks].path = dup_val_str(yyjson_obj_get(one, "path"));
-          if (out->hooks[out->n_hooks].path == NULL) {
-            cdi_edits_free(out);
-            return -1;
-          }
-          args = yyjson_obj_get(one, "args");
-          if (yyjson_is_arr(args)) {
-            size_t an = yyjson_arr_size(args);
-            size_t j;
-            out->hooks[out->n_hooks].args = (char **)calloc(an, sizeof(char *));
-            if (out->hooks[out->n_hooks].args == NULL) {
+        hook_name = yyjson_obj_get(h, "hookName");
+        if (yyjson_is_str(hook_name) &&
+            strcmp(yyjson_get_str(hook_name), "createContainer") == 0) {
+          n_hooks++;
+        } else {
+          cc = yyjson_obj_get(h, "createContainer");
+          if (yyjson_is_arr(cc))
+            n_hooks += yyjson_arr_size(cc);
+        }
+      }
+      if (n_hooks > 0) {
+        /* Compact write index: count ONLY the hooks that parse successfully
+         * (a zeroed/NULL-path hook must never enter the set — its path
+         * strdup(NULL)s into a segfault in strim_cdi_resolve's deep copy,
+         * pending_append_edits). */
+        out->hooks = (cdi_hook *)calloc(n_hooks, sizeof(cdi_hook));
+        if (out->hooks == NULL) {
+          cdi_edits_free(out);
+          return -1;
+        }
+        /* Pass 2 — parse each createContainer hook into
+         * out->hooks[out->n_hooks], never beyond the n_hooks allocation. */
+        out->n_hooks = 0;
+        for (i = 0; i < n; i++) {
+          yyjson_val *h = yyjson_arr_get(v, i);
+          yyjson_val *hook_name = yyjson_obj_get(h, "hookName");
+          if (yyjson_is_str(hook_name) &&
+              strcmp(yyjson_get_str(hook_name), "createContainer") == 0) {
+            if (parse_hook_object(h, &out->hooks[out->n_hooks]) < 0) {
               cdi_edits_free(out);
               return -1;
             }
-            out->hooks[out->n_hooks].n_args = an;
-            for (j = 0; j < an; j++) {
-              out->hooks[out->n_hooks].args[j] =
-                  dup_val_str(yyjson_arr_get(args, j));
-              if (out->hooks[out->n_hooks].args[j] == NULL) {
-                cdi_edits_free(out);
-                return -1;
+            out->n_hooks++;
+          } else {
+            yyjson_val *cc = yyjson_obj_get(h, "createContainer");
+            if (yyjson_is_arr(cc)) {
+              size_t an = yyjson_arr_size(cc);
+              size_t j;
+              for (j = 0; j < an; j++) {
+                yyjson_val *one = yyjson_arr_get(cc, j);
+                if (!yyjson_is_obj(one)) {
+                  cdi_edits_free(out);
+                  return -1;
+                }
+                if (parse_hook_object(one, &out->hooks[out->n_hooks]) < 0) {
+                  cdi_edits_free(out);
+                  return -1;
+                }
+                out->n_hooks++;
               }
             }
           }
-          env = yyjson_obj_get(one, "env");
-          if (yyjson_is_arr(env)) {
-            size_t en = yyjson_arr_size(env);
-            size_t j;
-            out->hooks[out->n_hooks].env = (char **)calloc(en, sizeof(char *));
-            if (out->hooks[out->n_hooks].env == NULL) {
-              cdi_edits_free(out);
-              return -1;
-            }
-            out->hooks[out->n_hooks].n_env = en;
-            for (j = 0; j < en; j++) {
-              out->hooks[out->n_hooks].env[j] =
-                  dup_val_str(yyjson_arr_get(env, j));
-              if (out->hooks[out->n_hooks].env[j] == NULL) {
-                cdi_edits_free(out);
-                return -1;
-              }
-            }
-          }
-          timeout = yyjson_obj_get(one, "timeout");
-          if (yyjson_is_int(timeout))
-            out->hooks[out->n_hooks].timeout = (int32_t)yyjson_get_int(timeout);
-          out->n_hooks++;
         }
       }
     }
@@ -550,6 +607,45 @@ static int scan_dir(const char *dir) {
 /* =========================================================================
  * Deep-copy one edit set into g_pending (merged).
  * ========================================================================= */
+
+/* Length of the key of an "K=V" env entry (the whole string when no '='). */
+static size_t env_key_len(const char *entry) {
+  const char *eq = strchr(entry, '=');
+  return (eq != NULL) ? (size_t)(eq - entry) : strlen(entry);
+}
+
+/* True when an env entry with the same key already appears in the list. */
+static int env_has_key(const char *const *env, size_t n_env,
+                       const char *entry) {
+  size_t key_len = env_key_len(entry);
+  size_t i;
+  for (i = 0; i < n_env; i++) {
+    if (env_key_len(env[i]) == key_len && memcmp(env[i], entry, key_len) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+/* Drop pending CDI env vars whose key the base spec env already sets (e.g.
+ * the ffmpeg image env's NVIDIA_VISIBLE_DEVICES=all vs the nvidia CDI spec's
+ * NVIDIA_VISIBLE_DEVICES=void). The base value wins — the CDI duplicate is
+ * freed and compacted away so the OCI builder never appends it. */
+static void pending_drop_env_duplicates(const char *const *base_env,
+                                        size_t n_base_env) {
+  size_t i;
+  size_t keep = 0;
+  if (base_env == NULL || n_base_env == 0)
+    return;
+  for (i = 0; i < g_pending.n_env; i++) {
+    if (env_has_key(base_env, n_base_env, g_pending.env[i])) {
+      free(g_pending.env[i]);
+      g_pending.env[i] = NULL;
+      continue;
+    }
+    g_pending.env[keep++] = g_pending.env[i];
+  }
+  g_pending.n_env = keep;
+}
 
 static int pending_append_edits(const cdi_edits *src) {
   size_t i;
@@ -822,6 +918,9 @@ int strim_cdi_merge_edits(strim_spec *spec) {
     return STRIM_CDI_ERR_PARSE;
   if (g_pending.n_devices + g_pending.n_hooks > STRIM_CDI_MAX_DEVICES)
     return STRIM_CDI_ERR_PARSE;
+  /* A CDI env var must never override a key the base/factory spec env already
+   * sets (the base value wins; the CDI duplicate is dropped). */
+  pending_drop_env_duplicates(spec->process.env, spec->process.n_env);
   return 0;
 }
 

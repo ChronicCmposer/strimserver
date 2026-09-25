@@ -425,6 +425,24 @@ static void resolve_user(const strim_oci_image_config *image,
  * Spec assembly
  * ========================================================================= */
 
+/* Length of the key of an "K=V" env entry (the whole string when no '='). */
+static size_t env_key_len(const char *entry) {
+  const char *eq = strchr(entry, '=');
+  return (eq != NULL) ? (size_t)(eq - entry) : strlen(entry);
+}
+
+/* True when an env entry with the same key already appears in the list. */
+static int env_has_key(const char *const *env, size_t n_env,
+                       const char *entry) {
+  size_t key_len = env_key_len(entry);
+  size_t i;
+  for (i = 0; i < n_env; i++) {
+    if (env_key_len(env[i]) == key_len && memcmp(env[i], entry, key_len) == 0)
+      return 1;
+  }
+  return 0;
+}
+
 static void emit_process(struct jbuf *b, const strim_spec *spec,
                          const strim_oci_image_config *image,
                          const strim_oci_cdi_edits *cdi) {
@@ -450,12 +468,17 @@ static void emit_process(struct jbuf *b, const strim_spec *spec,
       n_env++;
   }
 
-  /* Merge the base env with the CDI edits (applyEdits appends). */
+  /* Merge the base env with the CDI edits (applyEdits appends). A CDI env
+   * var whose key the base env already sets (e.g. the image env's
+   * NVIDIA_VISIBLE_DEVICES=all vs the nvidia CDI spec's =void) is dropped —
+   * the base value wins. Duplicates INSIDE the CDI set (spec-level +
+   * device-level edits) are preserved, matching strim_cdi_merge_edits. */
   for (i = 0; i < n_env && n_env_all < STRIM_SPEC_MAX_ENV; i++)
     env_all[n_env_all++] = env[i];
   if (cdi != NULL && cdi->env != NULL)
     for (i = 0; i < cdi->n_env && n_env_all < STRIM_SPEC_MAX_ENV; i++)
-      env_all[n_env_all++] = cdi->env[i];
+      if (!env_has_key(env, n_env, cdi->env[i]))
+        env_all[n_env_all++] = cdi->env[i];
   env = env_all;
   n_env = n_env_all;
 
@@ -694,33 +717,53 @@ static void emit_linux(struct jbuf *b, const strim_spec *spec,
   jb_ch(b, '}');
 }
 
-static void emit_hooks(struct jbuf *b, const strim_oci_cdi_edits *cdi) {
+/* Emit one OCI hook object {"path", "args"[], "env"[], "timeout"} with the
+ * optional fields elided (Go json.Marshal field-elision). */
+static void emit_hook_object(struct jbuf *b, const char *path,
+                             const char *const *args, size_t n_args,
+                             const char *const *env, size_t n_env,
+                             int32_t timeout) {
+  jb_raw(b, "{\"path\":");
+  jb_quoted(b, path);
+  if (args != NULL && n_args > 0) {
+    jb_raw(b, ",\"args\":");
+    jb_str_array(b, args, n_args);
+  }
+  if (env != NULL && n_env > 0) {
+    jb_raw(b, ",\"env\":");
+    jb_str_array(b, env, n_env);
+  }
+  if (timeout != 0) {
+    jb_raw(b, ",\"timeout\":");
+    jb_i64(b, timeout);
+  }
+  jb_ch(b, '}');
+}
+
+/* Emit the top-level "hooks" section. The createContainer array carries the
+ * strim spec's own hooks first, then the CDI edit set's hooks (the same
+ * base-then-append merge the env/mounts use); either list may be empty. */
+static void emit_hooks(struct jbuf *b, const strim_spec *spec,
+                       const strim_oci_cdi_edits *cdi) {
   size_t i;
-  if (cdi == NULL || cdi->n_hooks == 0)
+  size_t n_cdi = (cdi != NULL) ? cdi->n_hooks : 0;
+  if (spec->n_hooks == 0 && n_cdi == 0)
     return;
   jb_raw(b, ",\"hooks\":{");
   jb_raw(b, "\"createContainer\":[");
-  for (i = 0; i < cdi->n_hooks; i++) {
-    const struct strim_oci_cdi_hook *h = &cdi->hooks[i];
-    size_t j;
+  for (i = 0; i < spec->n_hooks; i++) {
     if (i)
       jb_ch(b, ',');
-    jb_raw(b, "{\"path\":");
-    jb_quoted(b, h->path);
-    if (h->args != NULL && h->n_args > 0) {
-      jb_raw(b, ",\"args\":");
-      jb_str_array(b, h->args, h->n_args);
-    }
-    if (h->env != NULL && h->n_env > 0) {
-      jb_raw(b, ",\"env\":");
-      jb_str_array(b, h->env, h->n_env);
-    }
-    if (h->timeout != 0) {
-      jb_raw(b, ",\"timeout\":");
-      jb_i64(b, h->timeout);
-    }
-    jb_ch(b, '}');
-    (void)j;
+    emit_hook_object(b, spec->hooks[i].path, spec->hooks[i].args,
+                     spec->hooks[i].n_args, spec->hooks[i].env,
+                     spec->hooks[i].n_env, spec->hooks[i].timeout);
+  }
+  for (i = 0; i < n_cdi; i++) {
+    if (spec->n_hooks + i)
+      jb_ch(b, ',');
+    emit_hook_object(b, cdi->hooks[i].path, cdi->hooks[i].args,
+                     cdi->hooks[i].n_args, cdi->hooks[i].env,
+                     cdi->hooks[i].n_env, cdi->hooks[i].timeout);
   }
   jb_raw(b, "]}");
 }
@@ -750,7 +793,7 @@ int strim_oci_build_spec(const strim_spec *spec,
   jb_ch(&b, ',');
 
   emit_linux(&b, spec, namespace_, container_id, cdi);
-  emit_hooks(&b, cdi);
+  emit_hooks(&b, spec, cdi);
   jb_ch(&b, '}');
   jb_ch(&b, '\0');
 

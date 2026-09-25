@@ -55,6 +55,9 @@ extern "C" {
 #define STRIM_SPEC_MAX_ARGS        16
 #define STRIM_SPEC_MAX_ENV         64
 #define STRIM_SPEC_MAX_CAPS        32
+#define STRIM_SPEC_MAX_HOOKS       32    /* createContainer hooks (a full CDI
+                                          * edit set is bounded by
+                                          * STRIM_CDI_MAX_DEVICES).            */
 
 /* Error codes (negative; returned by the mount-list / stage-argv
  * constructors). Wave 1 (core lane) additive addition. */
@@ -101,6 +104,22 @@ typedef struct strim_mount {
     bool        read_write;   /* true -> {"rbind","rw"}; false -> {"rbind","ro"} */
 } strim_mount;
 
+/* One OCI createContainer hook (runtime-spec "hooks" section): an executable
+ * run inside the container at create time. The NVIDIA CDI spec relies on
+ * these (e.g. "nvidia-cdi-hook create-symlinks") to create libcuda.so.1 in
+ * the container. Becomes the OCI hook object {"path", "args"[], "env"[],
+ * "timeout"}. The CDI lane (cdi.c) exposes the resolved createContainer hooks
+ * through strim_spec.hooks so the OCI builder emits them alongside the CDI
+ * edit set's own hooks. */
+typedef struct strim_hook {
+    const char *path;         /* absolute path to the hook executable          */
+    const char *const *args;  /* argv after argv[0]; NULL = no args            */
+    size_t             n_args;
+    const char *const *env;   /* "K=V" additions; NULL = inherit runtime env   */
+    size_t             n_env;
+    int32_t            timeout; /* seconds; 0 = omit (OCI "timeout" is int)    */
+} strim_hook;
+
 /* Process spec. env/args/capabilities are NULL-terminated arrays; cwd NULL
  * means the image WorkingDir (Go WithImageConfig). */
 typedef struct strim_process {
@@ -125,6 +144,9 @@ typedef struct strim_spec {
     const char    *cgroups_path; /* "/<namespace>/<container-id>" (NULL = the
                                   * implementation derives it from the
                                   * container id + namespace).                */
+    const strim_hook *hooks;     /* createContainer hooks (STRIM_SPEC_MAX_HOOKS
+                                  * entries, n_hooks); NULL = none.            */
+    size_t         n_hooks;
 } strim_spec;
 
 /* =========================================================================

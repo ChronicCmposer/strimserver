@@ -69,9 +69,12 @@ static const char FIXTURE[] =
 
 /* Regression fixture for the nvidia-ctk `--format=json` hook form. Real
  * nvidia-container-toolkit output emits hooks as {"hookName": ..., "path": ...,
- * "args": ...} with NO createContainer array; containerd's pkg/cdi treats
- * hookName as an unknown field and skips the hook. Mix two hookName-only hooks
- * with one createContainer hook so the parsed hook count must be 1. */
+ * "args": ...} with NO createContainer array; containerd's pkg/cdi
+ * (container-edits.go) maps hookName "createContainer" into the OCI spec's
+ * createContainer array, so the parser must honor the same form. Mix a
+ * hookName-form createContainer hook with one createContainer-array hook and
+ * a non-createContainer hookName (prestart) that must be skipped, so the
+ * parsed hook count must be 2. */
 static const char HOOKNAME_FIXTURE[] =
     "{"
     "  \"cdiVersion\": \"0.5.0\","
@@ -79,19 +82,21 @@ static const char HOOKNAME_FIXTURE[] =
     "  \"containerEdits\": {"
     "    \"env\": [\"NVIDIA_VISIBLE_DEVICES=0\"],"
     "    \"hooks\": ["
-    "      {\"hookName\": \"create-container\","
-    "       \"path\": \"/usr/bin/nvidia-container-cli\","
-    "       \"args\": [\"nvidia-container-cli\", \"configure\"],"
-    "       \"env\": [\"PATH=/usr/bin\"]},"
-    "      {\"hookName\": \"create-runtime\","
-    "       \"path\": \"/usr/bin/nvidia-container-runtime-hook\","
-    "       \"args\": [\"nvidia-container-runtime-hook\"],"
-    "       \"env\": [\"PATH=/usr/bin\"]},"
+    "      {\"hookName\": \"createContainer\","
+    "       \"path\": \"/usr/bin/nvidia-cdi-hook\","
+    "       \"args\": [\"nvidia-cdi-hook\", \"create-symlinks\", \"--link\","
+    "                  \"libcuda.so.595.91.07::/usr/lib64/libcuda.so.1\"],"
+    "       \"env\": [\"NVIDIA_CTK_DEBUG=false\"],"
+    "       \"timeout\": 30},"
     "      {\"createContainer\": ["
-    "        {\"path\": \"/usr/bin/real-hook\","
-    "         \"args\": [\"real-hook\", \"--device=all\"],"
+    "        {\"path\": \"/usr/bin/array-hook\","
+    "         \"args\": [\"array-hook\", \"--device=all\"],"
     "         \"timeout\": 30}"
-    "      ]}"
+    "      ]},"
+    "      {\"hookName\": \"prestart\","
+    "       \"path\": \"/usr/bin/skipped-hook\","
+    "       \"args\": [\"skipped-hook\"],"
+    "       \"env\": [\"PATH=/usr/bin\"]}"
     "    ]"
     "  },"
     "  \"devices\": ["
@@ -197,15 +202,18 @@ int main(void) {
     CHECK(strim_cdi_merge_edits(&spec) == STRIM_CDI_ERR_BADARG);
   }
 
-  /* --- regression: nvidia-ctk "hookName"-form hooks (no createContainer) ---
-   * Real nvidia-ctk `cdi generate --format=json` emits hooks as
-   * {"hookName": ..., "path": ..., "args": ...}; containerd's pkg/cdi treats
-   * hookName as unknown and skips the hook. Pre-fix, parse_edits counted
-   * every hook (out->n_hooks = n) while parsing only createContainer hooks,
-   * so the index carried zeroed hooks (path=NULL) that strim_cdi_resolve's
-   * deep copy strdup(NULL)ed into a SIGSEGV (cdi.c:628). Resolve below is
-   * that crash path: it must survive, and the hook count must reflect only
-   * the one createContainer hook. */
+  /* --- regression: nvidia-ctk "hookName"-form hooks (real --format=json) ---
+   * Real nvidia-ctk `cdi generate --format=json` emits hooks in the CDI
+   * hookName form ({"hookName":"createContainer","path":...,"args":...}).
+   * containerd's pkg/cdi (container-edits.go) maps hookName "createContainer"
+   * into spec.Hooks.CreateContainer, so the parser must produce the same
+   * cdi_hook entries from that form. Pre-fix, parse_edits skipped every
+   * hookName hook AND (before the v1.0.34 fix) counted them with a NULL path,
+   * which strim_cdi_resolve's deep copy strdup(NULL)ed into a SIGSEGV
+   * (cdi.c:678). Resolve below is that crash path: it must survive, the
+   * hookName-form createContainer hook must parse with its own path/args/env/
+   * timeout, the array-form hook must still parse, and the non-createContainer
+   * hookName (prestart) must be skipped (not counted). */
   {
     char hdir[] = "/tmp/strim-cdi-hookname-XXXXXX";
     char hpath[256];
@@ -231,12 +239,26 @@ int main(void) {
     CHECK(strim_cdi_merge_edits(&hspec) == 0);
     CHECK(strim_cdi_get_pending_edits(&hedits) == 0);
     CHECK(hedits != NULL);
-    /* hookName-only hooks are skipped; only createContainer counts. */
-    CHECK(hedits->oci.n_hooks == 1);
-    CHECK(strcmp(hedits->oci.hooks[0].path, "/usr/bin/real-hook") == 0);
-    CHECK(hedits->oci.hooks[0].n_args == 2);
-    CHECK(strcmp(hedits->oci.hooks[0].args[1], "--device=all") == 0);
+    /* Both createContainer hooks (hookName-form and array-form) count; the
+     * non-createContainer hookName (prestart) is skipped. */
+    CHECK(hedits->oci.n_hooks == 2);
+    /* hook[0]: the hookName-form createContainer hook (first in the fixture
+     * array), parsed from the SAME object's path/args/env/timeout. */
+    CHECK(strcmp(hedits->oci.hooks[0].path, "/usr/bin/nvidia-cdi-hook") == 0);
+    CHECK(hedits->oci.hooks[0].n_args == 4);
+    CHECK(strcmp(hedits->oci.hooks[0].args[0], "nvidia-cdi-hook") == 0);
+    CHECK(strcmp(hedits->oci.hooks[0].args[1], "create-symlinks") == 0);
+    CHECK(strcmp(hedits->oci.hooks[0].args[2], "--link") == 0);
+    CHECK(strcmp(hedits->oci.hooks[0].args[3],
+                 "libcuda.so.595.91.07::/usr/lib64/libcuda.so.1") == 0);
+    CHECK(hedits->oci.hooks[0].n_env == 1);
+    CHECK(strcmp(hedits->oci.hooks[0].env[0], "NVIDIA_CTK_DEBUG=false") == 0);
     CHECK(hedits->oci.hooks[0].timeout == 30);
+    /* hook[1]: the createContainer-array hook still parses. */
+    CHECK(strcmp(hedits->oci.hooks[1].path, "/usr/bin/array-hook") == 0);
+    CHECK(hedits->oci.hooks[1].n_args == 2);
+    CHECK(strcmp(hedits->oci.hooks[1].args[1], "--device=all") == 0);
+    CHECK(hedits->oci.hooks[1].timeout == 30);
 
     unlink(hpath);
     rmdir(hdir);
