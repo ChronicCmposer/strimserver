@@ -90,9 +90,13 @@ class StatusStream {
          if (!this.#closedByUs) this.#scheduleReconnect();
       });
 
-      ws.addEventListener("error", () => {
+      ws.addEventListener("error", (ev: Event) => {
+         // undici WebSocket error events carry the reason in `ev.message` (e.g.
+         // "connect ECONNREFUSED ...:4000" or "getaddrinfo ENOTFOUND strimserver").
+         // Log at INFO so the reconnect-loop reason is visible in the plugin logs.
+         const reason = (ev as { message?: string }).message ?? "unknown";
+         streamDeck.logger.info(`status-stream: socket error: ${reason}`);
          // 'close' fires after 'error'; let the close handler drive reconnect.
-         streamDeck.logger.debug("status-stream: socket error");
       });
    }
 
