@@ -84,17 +84,23 @@ class StatusStream {
          for (const h of this.#statusHandlers) h(status);
       });
 
-      ws.addEventListener("close", () => {
+      ws.addEventListener("close", (ev: CloseEvent) => {
+         // Diagnostic only: 1006 = abnormal closure with no close frame, so the
+         // real cause surfaces in the preceding 'error' event. Reconnect logic
+         // below is unchanged.
+         streamDeck.logger.info(`status-stream: socket closed: code=${ev.code} reason=${ev.reason}`);
          this.#ws = null;
          this.#setConnected(false);
          if (!this.#closedByUs) this.#scheduleReconnect();
       });
 
       ws.addEventListener("error", (ev: Event) => {
-         // undici WebSocket error events carry the reason in `ev.message` (e.g.
-         // "connect ECONNREFUSED ...:4000" or "getaddrinfo ENOTFOUND strimserver").
-         // Log at INFO so the reconnect-loop reason is visible in the plugin logs.
-         const reason = (ev as { message?: string }).message ?? "unknown";
+         // undici dispatches an ErrorEvent; the underlying exception lives in
+         // `.error` (e.g. `TypeError: connect ECONNREFUSED ...:4000`), while
+         // `.message` defaults to "". Log the cause at INFO so the reconnect
+         // loop's failure reason is visible in the plugin logs.
+         const e = ev as unknown as { error?: { code?: string; message?: string }; message?: string };
+         const reason = e?.error?.message || e?.error?.code || e?.message || "unknown";
          streamDeck.logger.info(`status-stream: socket error: ${reason}`);
          // 'close' fires after 'error'; let the close handler drive reconnect.
       });
