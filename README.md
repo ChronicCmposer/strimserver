@@ -45,7 +45,7 @@ all managed by the controller:
 | Image | Source target | Role |
 | --- | --- | --- |
 | `strimserver-controller-go:latest` | `core/controller/BUILD.bazel` (rules_oci from `debian:trixie` snapshot apt packages via the `@trixie` apt extension in `MODULE.bazel`) | Go control plane: drives containerd, reconciles stages, serves the HTTP/WebSocket API |
-| `mediamtx:latest` | `core/BUILD.bazel` (rules_oci from `@mediamtx_dist` + `debian:trixie` snapshot apt packages) | MediaMTX media server: SRT ingest, RTSP routing, Unix MPEG-TS source, recording |
+| `mediamtx:latest` | `core/BUILD.bazel` (rules_oci from `@mediamtx_dist` + the static musl `/entrypoint` binary) | MediaMTX media server: SRT ingest, RTSP routing, Unix MPEG-TS source, recording |
 | `ffmpeg:latest` | `core/BUILD.bazel` (rules_oci from the pinned `@ffmpeg_dist` S3 artifact, `s3_http_archive`) | FFmpeg + NVIDIA HW accel; the same image backs both ffmpeg stages |
 
 Each bundle carries exactly one controller image — the Go default
@@ -59,12 +59,15 @@ container whose desired/actual state it reconciles:
 - `normalize` — the `ffmpeg` image running `transcode.sh normalize`.
 - `scale_and_egress` — the `ffmpeg` image running `transcode.sh scale_and_egress`.
 
-Both runtime images for the media plane are built `FROM
-scratch` (busybox + a minimal set of copied shared
-libraries); Debian and the CUDA toolchain appear only in
-intermediate build stages. NVIDIA driver libraries and the
-GPU are injected into the ffmpeg stages at runtime via CDI
-(`nvidia.com/gpu`), not baked into the image.
+The media-plane images are built `FROM scratch`. The ffmpeg
+image ships busybox plus a minimal set of copied shared
+libraries; the mediamtx image is fully static — the
+mediamtx binary and a static musl C `/entrypoint` binary,
+with no busybox, glibc (loader, libc set, or nsswitch.conf),
+nice, envsubst, or CA certs. Debian and the CUDA toolchain
+appear only in intermediate build stages. NVIDIA driver
+libraries and the GPU are injected into the ffmpeg stages at
+runtime via CDI (`nvidia.com/gpu`), not baked into the image.
 
 ### NVIDIA GPU access via CDI
 
@@ -92,7 +95,7 @@ The controller listens on `CONTROLLER_HTTP_PORT` (default
 
 - `POST /event` — path-readiness events
   (`ingress0`/`normalized` becoming `ready`/`not-ready`),
-  posted by MediaMTX hooks through `notify.sh`.
+  posted by MediaMTX hooks through the `notify` binary.
 - `POST /control` — start/stop commands for controllable
   components (currently `scale_and_egress`).
 - `GET /status` — current paths and per-stage desired/actual
@@ -147,8 +150,11 @@ gracefully on shutdown.
   MediaMTX, with 10-second recording parts, one-hour
   segments, 50 MB max part size, and no automatic deletion
   by default.
-- Runtime configuration rendering with `envsubst` from
-  `core/mediamtx.yaml.template` and `core/strimserver.env`.
+- Runtime configuration rendering by the static `/entrypoint`
+  binary: it renders `/mediamtx.yaml` from
+  `core/mediamtx.yaml.template` and `core/strimserver.env`,
+  applies `MEDIAMTX_NICE` via `setpriority`, and execs
+  mediamtx.
 - containerd runtime: the controller container runs with
   host networking and `CAP_SYS_ADMIN`; the stage containers
   it creates run with host networking, `CAP_SYS_NICE`,
@@ -202,7 +208,7 @@ gracefully on shutdown.
 | Go toolchain | `go 1.26.4` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
 | [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.21.0`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
 | `libfdk-aac` | `libfdk-aac2t64` (Debian trixie package from `@trixie`) | AAC encode support through FFmpeg (`libfdk-aac.so.2` in the ffmpeg image) |
-| busybox / `gettext-base` (`envsubst`) | Debian trixie packages from `@trixie` | Shell + tools for the scratch runtime images and MediaMTX template rendering |
+| busybox / `gettext-base` (`envsubst`) | Debian trixie packages from `@trixie` | Shell + tools for the scratch ffmpeg runtime image |
 | iperf3 | `3.19.1-r1` `.apk` (`@iperf3_apk` http_file) on alpine `3.23.3` (digest-pinned `@alpine_linux_amd64` oci.pull) | Optional bandwidth-test image |
 | Node.js | `24.13.0` (from `tools/streamdeck-plugin/.nvmrc` via rules_nodejs `node_version_from_nvmrc`) | Stream Deck plugin build |
 
@@ -600,7 +606,7 @@ The deployment bundle contains:
 - `strimserver-offline-2160p60.mp4`
 - `deploy.sh`, `fish-deploy.sh`, `imdslib.sh`, `prompt_login.fish`
 - `strimserver.service` — the per-bundle systemd unit generated from `deploy/aws/strimserver.service.template`, carrying the bundle's controller image and container name
-- `strimserver.env`, `mediamtx.yaml.template`, `transcode.sh`, `notify.sh`
+- `strimserver.env`, `mediamtx.yaml.template`, `transcode.sh`, `notify` (the static `notify` binary, bind-mounted into the mediamtx container at `/mnt/nvme/bin/notify`)
 - `openssh-experimental.rpm` (always included; from the pinned `@openssh_dist` artifact)
 
 Other useful targets:

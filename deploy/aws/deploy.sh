@@ -37,10 +37,10 @@ mkdir -p /mnt/nvme/bin
 mv /mnt/nvme/strimserver.env /mnt/nvme/config/strimserver.env
 mv /mnt/nvme/mediamtx.yaml.template /mnt/nvme/config/mediamtx.yaml.template
 mv /mnt/nvme/transcode.sh /mnt/nvme/bin/transcode.sh
-mv /mnt/nvme/notify.sh /mnt/nvme/bin/notify.sh
+mv /mnt/nvme/notify /mnt/nvme/bin/notify
 
 chmod +x /mnt/nvme/bin/transcode.sh
-chmod +x /mnt/nvme/bin/notify.sh
+chmod +x /mnt/nvme/bin/notify
 
 # --- inject Twitch stream key ------
 ENV_FILE=/mnt/nvme/config/strimserver.env

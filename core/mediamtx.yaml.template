@@ -315,16 +315,16 @@ paths:
 
   ingress0:
     source: publisher
-    runOnAvailable: /notify.sh ingress0 ready
-    runOnUnavailable: /notify.sh ingress0 not-ready
+    runOnAvailable: /notify ingress0 ready
+    runOnUnavailable: /notify ingress0 not-ready
     srtPublishPassphrase: ${SRT_PUBLISH_PASSPHRASE}
     alwaysAvailable: true
     alwaysAvailableFile: "/video-files/strimserver-offline-2160p60.mp4"
 
   normalized:
     source: 'unix+mpegts://${NORMALIZED_MPEGTS_SOCKET}'
-    runOnAvailable: /notify.sh normalized ready
-    runOnUnavailable: /notify.sh normalized not-ready
+    runOnAvailable: /notify normalized ready
+    runOnUnavailable: /notify normalized not-ready
     record: yes
     # Path of recording segments.
     # Extension is added automatically.

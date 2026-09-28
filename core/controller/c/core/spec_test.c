@@ -79,7 +79,7 @@ static void test_mediamtx_mounts(void) {
     CHECK(strcmp(mounts[1].destination, STRIM_CTR_MEDIAMTX_TMPL) == 0);
     CHECK(mounts[1].read_write == false);
 
-    CHECK(strcmp(mounts[2].source, "/mnt/nvme/bin/notify.sh") == 0);
+    CHECK(strcmp(mounts[2].source, "/mnt/nvme/bin/notify") == 0);
     CHECK(strcmp(mounts[2].destination, STRIM_CTR_NOTIFY) == 0);
     CHECK(mounts[2].read_write == false);
 
@@ -137,7 +137,7 @@ static void test_default_layout(void) {
     strim_default_layout(&layout, "/mnt/nvme");
     CHECK(strcmp(layout.env, "/mnt/nvme/config/strimserver.env") == 0);
     CHECK(strcmp(layout.transcode, "/mnt/nvme/bin/transcode.sh") == 0);
-    CHECK(strcmp(layout.notify, "/mnt/nvme/bin/notify.sh") == 0);
+    CHECK(strcmp(layout.notify, "/mnt/nvme/bin/notify") == 0);
     CHECK(strcmp(layout.mediamtx_tmpl,
                  "/mnt/nvme/config/mediamtx.yaml.template") == 0);
     CHECK(strcmp(layout.srt_pass, "/mnt/nvme/srt-passphrase") == 0);

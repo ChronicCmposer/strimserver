@@ -96,6 +96,19 @@ cc_library(
     target_compatible_with = _TARGET_COMPAT,
 )
 
+# Shared env-file parser (/strimserver.env sourcing shared by the controller
+# binary and any lane that needs it). Plain stdlib, arch-neutral: NO
+# target_compatible_with restriction, so it builds on every target.
+cc_library(
+    name = "envfile",
+    srcs = ["envfile.c"],
+    hdrs = ["envfile.h"],
+    includes = ["."],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)
+
 # The controller binary (Wave 2 integration lane). main.c is the only source
 # living in THIS package; it wires the three Wave-1 implementation libs (core
 # state machine, containerd client, HTTP/websocket server) plus the nanopb

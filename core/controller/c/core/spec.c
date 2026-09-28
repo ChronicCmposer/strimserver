@@ -105,7 +105,7 @@ void strim_default_layout(strim_layout *out, const char *host_root) {
 
     join_path(g_layout_env, sizeof g_layout_env, root, "config/strimserver.env");
     join_path(g_layout_transcode, sizeof g_layout_transcode, root, "bin/transcode.sh");
-    join_path(g_layout_notify, sizeof g_layout_notify, root, "bin/notify.sh");
+    join_path(g_layout_notify, sizeof g_layout_notify, root, "bin/notify");
     join_path(g_layout_mediamtx_tmpl, sizeof g_layout_mediamtx_tmpl, root,
               "config/mediamtx.yaml.template");
     join_path(g_layout_srt_pass, sizeof g_layout_srt_pass, root, "srt-passphrase");

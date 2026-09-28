@@ -11,7 +11,7 @@
 //	n_env=1
 //	env[0]=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 //	n_args=1
-//	args[0]=/entrypoint.sh
+//	args[0]=/entrypoint
 //	cwd=/
 //	uid=0
 //	gid=0
@@ -60,7 +60,7 @@
 //     genrule env (core/BUILD.bazel:580): NVIDIA_VISIBLE_DEVICES=all,
 //     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,
 //     LD_LIBRARY_PATH=/usr/lib64, PATH=...
-//   - args:   mediamtx = image entrypoint ["/entrypoint.sh"] (no cmd);
+//   - args:   mediamtx = image entrypoint ["/entrypoint"] (no cmd);
 //     ffmpeg stages = oci.WithProcessArgs("/transcode.sh", "<stage>") —
 //     the CreateStageOps argv (container_factory.go:235-240).
 //   - cwd:    image WorkingDir, or "/" when unset.
@@ -93,7 +93,7 @@ import (
 const (
 	ctrEnv          = "/strimserver.env"
 	ctrTranscode    = "/transcode.sh"
-	ctrNotify       = "/notify.sh"
+	ctrNotify       = "/notify"
 	ctrMediaMTXTmpl = "/mediamtx.yaml.template"
 	ctrSrtSecret    = "/run/secrets/srt-passphrase"
 	ctrVideoDir     = "/video-files"
@@ -337,8 +337,8 @@ func main() {
 				{Src: layout.VideoDir, Dst: ctrVideoDir, ReadWrite: true},
 				{Src: layout.Tmp, Dst: ctrTmp, ReadWrite: true},
 			}
-			env = defaultUnixEnv              // mediamtx image sets no env -> defaultUnixEnv
-			args = []string{"/entrypoint.sh"} // image entrypoint, no cmd
+			env = defaultUnixEnv           // mediamtx image sets no env -> defaultUnixEnv
+			args = []string{"/entrypoint"} // image entrypoint, no cmd
 		case "normalize", "scale-and-egress", "single-stage-egress":
 			// CreateFFmpegContainer (container_factory.go:95-109)
 			mounts = []Mount{

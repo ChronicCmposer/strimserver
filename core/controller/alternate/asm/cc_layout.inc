@@ -167,7 +167,7 @@
 // ----------------------------------------------------------------------------
     .equ CC_LAY_ENV,          0        // 8   ptr to the strimserver.env path
     .equ CC_LAY_TRANSCODE,    8        // 8   ptr to the transcode.sh path
-    .equ CC_LAY_NOTIFY,       16       // 8   ptr to the notify.sh path
+    .equ CC_LAY_NOTIFY,       16       // 8   ptr to the notify path
     .equ CC_LAY_MEDIAMTX_TMPL, 24      // 8   ptr to the mediamtx template path
     .equ CC_LAY_SRT_PASS,     32       // 8   ptr to the srt-passphrase path
     .equ CC_LAY_VIDEO_DIR,    40       // 8   ptr to the video-files dir path
@@ -176,15 +176,15 @@
     .equ CC_LAY_SIZE,         64
 
 // Container-internal mount destinations (paths.go ctr* constants).  These are
-// a contract with the mounted scripts (transcode.sh, notify.sh,
-// entrypoint.mediamtx.sh); changing one means changing that script too.  The
+// a contract with the mounted scripts (transcode.sh, notify,
+// entrypoint); changing one means changing that script too.  The
 // string CONTENT lives here as a CPP macro (fail-loud, single source of
 // truth); the rodata labels are defined in the module that needs them:
 //     RODATA
 // cc_s_ctr_env:   .asciz CC_CTR_ENV
 #define CC_CTR_ENV          "/strimserver.env"
 #define CC_CTR_TRANSCODE    "/transcode.sh"
-#define CC_CTR_NOTIFY       "/notify.sh"
+#define CC_CTR_NOTIFY       "/notify"
 #define CC_CTR_MEDIAMTX_TMPL "/mediamtx.yaml.template"  // == MEDIAMTX_CONFIG_TEMPLATE
 #define CC_CTR_SRT_SECRET   "/run/secrets/srt-passphrase"
 #define CC_CTR_VIDEO_DIR    "/video-files"

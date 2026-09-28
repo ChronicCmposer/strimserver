@@ -337,7 +337,7 @@ int cc_ctr_resolve_chainid(int h, const char *image_ref,
         return CC_CTR_ERR_BADARG;
 #ifdef DRIVER_INJECT_EMPTY_PARENT
     // The empty-parent bug class: the container snapshot is prepared with NO
-    // parent, so the rootfs contains no image layers (exec /entrypoint.sh
+    // parent, so the rootfs contains no image layers (exec /entrypoint
     // not-found).  The oracle's snapshot_parent is the real ChainID, so the
     // differential turns RED — proving the harness catches this bug.
     (void)image_ref;

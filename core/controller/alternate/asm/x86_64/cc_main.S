@@ -722,7 +722,7 @@ main_build_layout:
     LEA rsi, main_s_bin_transcode
     call cc_cat_cstr
     mov %r14, CC_LAY_TRANSCODE(%rbx)
-    // Notify = <root>/bin/notify.sh (:35)
+    // Notify = <root>/bin/notify (:35)
     add $MAIN_LAY_STR_MAX, %r14
     mov %r14, %rdi
     mov %r13, %rsi
@@ -1422,7 +1422,7 @@ main_s_cfg_env:
 main_s_bin_transcode:
     .asciz "/bin/transcode.sh"                  // paths.go:34
 main_s_bin_notify:
-    .asciz "/bin/notify.sh"                     // paths.go:35
+    .asciz "/bin/notify"                     // paths.go:35
 main_s_cfg_tmpl:
     .asciz "/config/mediamtx.yaml.template"     // paths.go:36
 main_s_root_srt:

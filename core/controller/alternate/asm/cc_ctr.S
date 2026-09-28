@@ -32,7 +32,7 @@
 //    3. Snapshots/Prepare(key=snapshotID, parent=<image chainID>)
 //       (WithNewSnapshot — a NON-EMPTY parent chains the container's active
 //       snapshot onto the image's unpacked layers, so the rootfs carries
-//       /entrypoint.sh)
+//       /entrypoint)
 //    4. (Go reads the image config via the Content service — the C layer
 //       does NOT; the assembly supplies the OCI fields itself, deviation 1)
 //    5. Containers/Create(id, image=imageName, runtime=runc-v2,
@@ -92,15 +92,15 @@
 //                      namespace, main.go:137)
 //
 //    MediaMTX (CreateMediaMTXContainer :111-125; image core/BUILD.bazel:
-//    367-379 entrypoint ["/entrypoint.sh"], no env):
+//    367-379 entrypoint ["/entrypoint"], no env):
 //      env           = ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:
 //                       /usr/bin:/sbin:/bin"]  (defaultUnixEnv, pkg/oci/
 //                      spec.go:42-44 — image env empty)
-//      args          = ["/entrypoint.sh"]  (image entrypoint, no
+//      args          = ["/entrypoint"]  (image entrypoint, no
 //                      WithProcessArgs override)
 //      mounts (6)    = /strimserver.env<-Env(ro),
 //                      /mediamtx.yaml.template<-MediaMTXTmpl(ro),
-//                      /notify.sh<-Notify(ro), /run/secrets/srt-passphrase
+//                      /notify<-Notify(ro), /run/secrets/srt-passphrase
 //                      <-SrtPass(ro), /video-files<-VideoDir(rw),
 //                      /tmp<-Tmp(rw)  (:114-121)
 //
@@ -133,7 +133,7 @@
 //       (Images/Get + Content/Read x2 + identity.ChainID), mirroring the Go
 //       oracle's containerd.WithNewSnapshot exactly (B1: the old design-
 //       around passed parent="" and produced a bare rootfs with no image
-//       layers — the exec /entrypoint.sh not-found bug).
+//       layers — the exec /entrypoint not-found bug).
 //    4. Return mapping: ops return the first failing RPC's result — >= 0 is
 //       a gRPC status (0 = OK), negative is a CC_CTR_ERR_*/CC_GRPC_ERR_*
 //       client error; the NotFound-continue cases mirror Go's
@@ -690,7 +690,7 @@ ctr_start:
     // 3b. Snapshots/Prepare(key=snapshotID, parent=<image chainID>)
     // (Go WithNewSnapshot -> Snapshots/Prepare; a NON-EMPTY parent chains
     // the container's active snapshot onto the image's unpacked layers, so
-    // the rootfs carries /entrypoint.sh)
+    // the rootfs carries /entrypoint)
     mov x0, x21
     LEA x1, ctr_s_overlayfs
     ldr x2, [x19, #CC_CC_SNAPSHOT_ID]
@@ -882,7 +882,7 @@ ctr_s_rw:
 ctr_s_cap_sys_nice:
     .asciz "CAP_SYS_NICE"
 ctr_s_entrypoint_arg:
-    .asciz "/entrypoint.sh"         // mediamtx image entrypoint (core/BUILD.bazel:373)
+    .asciz "/entrypoint"         // mediamtx image entrypoint (core/BUILD.bazel:373)
 ctr_s_transcode_arg:
     .asciz "/transcode.sh"          // container_factory.go:238 ctrTranscode
 ctr_s_stage_normalize:

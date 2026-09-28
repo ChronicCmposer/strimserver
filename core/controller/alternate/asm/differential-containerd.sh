@@ -22,7 +22,7 @@
 #   The snapshot_parent is the critical field: it must equal the Go oracle's
 #   identity.ChainID(image rootfs diff_ids) — the parent
 #   containerd.WithNewSnapshot passes to Snapshots/Prepare so the container
-#   rootfs carries the image layers (/entrypoint.sh).  An empty parent (the
+#   rootfs carries the image layers (/entrypoint).  An empty parent (the
 #   production bug) turns B RED.
 #
 # HOW:

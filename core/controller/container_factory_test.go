@@ -196,7 +196,7 @@ func TestMediaMTXMounts(t *testing.T) {
    want := []Mount{
       {Src: "/mnt/nvme/config/strimserver.env", Dst: ctrEnv},
       {Src: "/mnt/nvme/config/mediamtx.yaml.template", Dst: ctrMediaMTXTmpl},
-      {Src: "/mnt/nvme/bin/notify.sh", Dst: ctrNotify},
+      {Src: "/mnt/nvme/bin/notify", Dst: ctrNotify},
       {Src: "/mnt/nvme/srt-passphrase", Dst: ctrSrtSecret},
       {Src: "/mnt/nvme/video-files", Dst: ctrVideoDir, ReadWrite: true},
       {Src: "/tmp", Dst: ctrTmp, ReadWrite: true},

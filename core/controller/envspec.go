@@ -197,7 +197,7 @@ func envSpec() []EnvVar {
       },
 
       // ------------------------------------------------------------- Media / ffmpeg
-      // Consumed by transcode.sh / mediamtx / the entrypoints — never by the
+      // Consumed by transcode.sh / mediamtx / the /entrypoint binary — never by the
       // controller — so Bind is nil. Required so -check-env still guards them.
       {
          Name: "FFMPEG_NICE", Group: GroupMedia, Required: true, Example: "-5",
@@ -285,7 +285,7 @@ func envSpec() []EnvVar {
       // -------------------------------------------------------------------- Secrets
       {
          // Not Required: the mediamtx container can instead read it from the
-         // /run/secrets/srt-passphrase bind mount (see entrypoint.mediamtx.sh).
+         // /run/secrets/srt-passphrase bind mount (see /entrypoint).
          Name: "SRT_PUBLISH_PASSPHRASE", Group: GroupSecret, Required: false,
          Example: "",
          Comment: "optional; falls back to /run/secrets/srt-passphrase if unset",

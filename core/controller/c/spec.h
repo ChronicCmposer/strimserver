@@ -65,11 +65,11 @@ extern "C" {
 #define STRIM_SPEC_ERR_TOOSMALL    (-2) /* caller buffer too small             */
 
 /* Container-internal mount destinations — a contract with the mounted
- * scripts (transcode.sh, notify.sh, entrypoint.mediamtx.sh). NOT
+ * scripts (transcode.sh, notify, entrypoint). NOT
  * independently configurable (paths.go:12-21). */
 #define STRIM_CTR_ENV          "/strimserver.env"
 #define STRIM_CTR_TRANSCODE    "/transcode.sh"
-#define STRIM_CTR_NOTIFY       "/notify.sh"
+#define STRIM_CTR_NOTIFY       "/notify"
 #define STRIM_CTR_MEDIAMTX_TMPL "/mediamtx.yaml.template"
 #define STRIM_CTR_SRT_SECRET   "/run/secrets/srt-passphrase"
 #define STRIM_CTR_VIDEO_DIR    "/video-files"
@@ -81,7 +81,7 @@ extern "C" {
 typedef struct strim_layout {
     const char *env;           /* <hostRoot>/config/strimserver.env          */
     const char *transcode;     /* <hostRoot>/bin/transcode.sh                */
-    const char *notify;        /* <hostRoot>/bin/notify.sh                   */
+    const char *notify;        /* <hostRoot>/bin/notify                     */
     const char *mediamtx_tmpl; /* <hostRoot>/config/mediamtx.yaml.template   */
     const char *srt_pass;      /* <hostRoot>/srt-passphrase                  */
     const char *video_dir;     /* <hostRoot>/video-files                     */

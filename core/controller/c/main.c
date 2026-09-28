@@ -59,6 +59,7 @@
 #include "cdi.h"
 #include "containerd_client.h"
 #include "controller.h"
+#include "envfile.h"
 #include "http_server.h"
 #include "internal.h"   /* STRIM_HTTP_ERR_BADJSON + strim_http_ws_send */
 #include "spec.h"
@@ -727,86 +728,6 @@ static int load_config(strim_config *cfg, char *err, size_t err_cap) {
         }
     }
     return n_errors == 0 ? 0 : -1;
-}
-
-/* =========================================================================
- * Env-file sourcing (the old entrypoint.sh: `set -a; . /strimserver.env;
- * set +a`). The file is a KEY="value" listing generated from envspec.go's
- * %q; this parser handles comments, blanks, optional `export` prefixes, and
- * double-quoted values (no shell interpolation — values are plain).
- * ------------------------------------------------------------------------- */
-
-#define STRIM_ENV_LINE_MAX 4096
-
-static int source_env_file(const char *path, char *err, size_t err_cap) {
-    FILE *f;
-    char line[STRIM_ENV_LINE_MAX];
-
-    f = fopen(path, "r");
-    if (f == NULL) {
-        return 0; /* absent: process env only (Go run() has no env file) */
-    }
-    while (fgets(line, sizeof line, f) != NULL) {
-        char *p = line;
-        char *eq;
-        char *name;
-        char *value;
-
-        /* Trim leading whitespace. */
-        while (*p == ' ' || *p == '\t') {
-            p++;
-        }
-        if (*p == '\0' || *p == '\n' || *p == '\r' || *p == '#') {
-            continue; /* blank or comment */
-        }
-        if (strncmp(p, "export ", 7) == 0) {
-            p += 7;
-            while (*p == ' ' || *p == '\t') {
-                p++;
-            }
-        }
-        name = p;
-        eq = strchr(p, '=');
-        if (eq == NULL) {
-            snprintf(err, err_cap, "malformed line in %s: %s", path, line);
-            fclose(f);
-            return -1;
-        }
-        *eq = '\0';
-        value = eq + 1;
-
-        /* Trim trailing whitespace / newline from the name. */
-        {
-            char *q = name + strlen(name);
-            while (q > name && (q[-1] == ' ' || q[-1] == '\t')) {
-                *--q = '\0';
-            }
-        }
-        /* Strip surrounding double quotes from the value. */
-        {
-            size_t vlen = strlen(value);
-            while (vlen > 0 && (value[vlen - 1] == '\n' ||
-                                value[vlen - 1] == '\r')) {
-                value[--vlen] = '\0';
-            }
-            if (vlen >= 2 && value[0] == '"' && value[vlen - 1] == '"') {
-                value[vlen - 1] = '\0';
-                value++;
-            }
-        }
-        if (name[0] == '\0') {
-            snprintf(err, err_cap, "malformed line in %s: %s", path, line);
-            fclose(f);
-            return -1;
-        }
-        if (setenv(name, value, 1) != 0) {
-            snprintf(err, err_cap, "setenv(%s) failed in %s", name, path);
-            fclose(f);
-            return -1;
-        }
-    }
-    fclose(f);
-    return 0;
 }
 
 /* =========================================================================

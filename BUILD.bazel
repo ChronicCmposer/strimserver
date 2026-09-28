@@ -45,7 +45,7 @@ touch $@
 
 # The bundle scripts fall into two mode classes:
 #   * executable scripts - invoked directly on the host (./deploy.sh,
-#     ./setup-gpu.sh, transcode.sh, notify.sh). rules_pkg 1.3.0 does NOT
+#     ./setup-gpu.sh, transcode.sh, notify). rules_pkg 1.3.0 does NOT
 #     preserve the source exec bit for plain source files: pkg_files only
 #     assigns 0755 when the src is an executable RULE (it has a runfiles
 #     manifest); plain files get default_mode "" which the tar writer maps to
@@ -60,10 +60,13 @@ pkg_files(
         "//deploy/aws:deploy.sh",
         "//deploy/aws:setup-gpu.sh",
         "//core:transcode.sh",
-        "//core:notify.sh",
+        "//core:notify",
     ],
     attributes = pkg_attributes(mode = "0755"),
     strip_prefix = strip_prefix.files_only(),
+    renames = {
+        "//core:notify": "notify",
+    },
 )
 
 pkg_files(

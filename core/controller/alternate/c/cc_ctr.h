@@ -246,7 +246,7 @@ int cc_ctr_get_image(int h, const char *image_ref,
  * rootfs.diff_ids, and computes identity.ChainID(diffIDs) — the exact
  * parent string the Go oracle passes to Snapshots/Prepare so the container
  * snapshot is chained onto the image's unpacked layers (a non-empty rootfs
- * with /entrypoint.sh). On OK out_parent receives the chainID
+ * with /entrypoint). On OK out_parent receives the chainID
  * ("sha256:…"), or "" for a no-layer image (base-layer Prepare). Returns 0
  * + output, the first failing RPC's status, or a CC_CTR_ERR_* code. */
 int cc_ctr_resolve_chainid(int h, const char *image_ref,
@@ -259,7 +259,7 @@ int cc_ctr_resolve_chainid(int h, const char *image_ref,
  *   parent: the snapshot's parent key — for a container rootfs this MUST be
  *           the image's chainID (cc_ctr_resolve_chainid), never NULL and
  *           never "" (an empty parent yields a bare rootfs with no image
- *           layers — the exec /entrypoint.sh not-found bug). NULL is
+ *           layers — the exec /entrypoint not-found bug). NULL is
  *           rejected loudly (CC_CTR_ERR_BADARG); "" is still accepted at
  *           this boundary for the base-snapshot helper callers, but the
  *           container-create path never uses it.

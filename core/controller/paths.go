@@ -7,12 +7,12 @@ import (
 )
 
 // Container-internal mount destinations. These are a contract with the scripts
-// that get mounted (transcode.sh, notify.sh, entrypoint.mediamtx.sh); changing
+// that get mounted (transcode.sh, notify, entrypoint); changing
 // one means changing that script too. NOT independently configurable.
 const (
    ctrEnv          = "/strimserver.env"
    ctrTranscode    = "/transcode.sh"
-   ctrNotify       = "/notify.sh"
+   ctrNotify       = "/notify"
    ctrMediaMTXTmpl = "/mediamtx.yaml.template" // must equal MEDIAMTX_CONFIG_TEMPLATE
    ctrSrtSecret    = "/run/secrets/srt-passphrase"
    ctrVideoDir     = "/video-files"
@@ -32,7 +32,7 @@ func DefaultLayout(hostRoot string) Layout {
    return Layout{
       Env:          path.Join(cfg, "strimserver.env"),
       Transcode:    path.Join(bin, "transcode.sh"),
-      Notify:       path.Join(bin, "notify.sh"),
+      Notify:       path.Join(bin, "notify"),
       MediaMTXTmpl: path.Join(cfg, "mediamtx.yaml.template"),
       SrtPass:      path.Join(hostRoot, "srt-passphrase"),
       VideoDir:     path.Join(hostRoot, "video-files"),

@@ -54,7 +54,7 @@
 //      uid/gid = 0, n_add_gids = 0, hostname = none, annotations = none,
 //      cgroups_path = "/<ContainerdNamespace>/<container-id>".
 //    MediaMTX: env = [PATH=...defaultUnixEnv...],
-//      args = ["/entrypoint.sh"], mounts (6) = Env/MediaMTXTmpl/Notify/
+//      args = ["/entrypoint"], mounts (6) = Env/MediaMTXTmpl/Notify/
 //      SrtPass (ro), VideoDir/Tmp (rw).
 //    FFmpeg stages: env = [NVIDIA_VISIBLE_DEVICES=all,
 //      NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,
@@ -76,7 +76,7 @@
 //       (Images/Get + Content/Read x2 + identity.ChainID), mirroring the Go
 //       oracle's containerd.WithNewSnapshot exactly (B1: the old design-
 //       around passed parent="" and produced a bare rootfs with no image
-//       layers — the exec /entrypoint.sh not-found bug).
+//       layers — the exec /entrypoint not-found bug).
 //    4. Return mapping: ops return the first failing RPC's result — >= 0 is
 //       a gRPC status (0 = OK), negative is a CC_CTR_ERR_*/CC_GRPC_ERR_*
 //       client error.
@@ -611,7 +611,7 @@ ctr_start:
     // 3b. Snapshots/Prepare(key=snapshotID, parent=<image chainID>)
     // (Go WithNewSnapshot -> Snapshots/Prepare; a NON-EMPTY parent chains
     // the container's active snapshot onto the image's unpacked layers, so
-    // the rootfs carries /entrypoint.sh)
+    // the rootfs carries /entrypoint)
     mov %r13d, %edi
     lea ctr_s_overlayfs(%rip), %rsi
     mov CC_CC_SNAPSHOT_ID(%rbx), %rdx
@@ -856,7 +856,7 @@ ctr_s_rw:
 ctr_s_cap_sys_nice:
     .asciz "CAP_SYS_NICE"
 ctr_s_entrypoint_arg:
-    .asciz "/entrypoint.sh"         // mediamtx image entrypoint
+    .asciz "/entrypoint"         // mediamtx image entrypoint
 ctr_s_transcode_arg:
     .asciz "/transcode.sh"
 ctr_s_stage_normalize:

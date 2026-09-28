@@ -990,7 +990,7 @@ int cc_ctr_prepare_snapshot(int h, const char *snapshotter, const char *key,
   /* The parent is passed through verbatim — NEVER defaulted to "": the
    * container-create path must chain the snapshot onto the image's
    * chainID (cc_ctr_resolve_chainid); an empty parent yields a bare
-   * rootfs with no image layers (the exec /entrypoint.sh not-found bug). */
+   * rootfs with no image layers (the exec /entrypoint not-found bug). */
   req.parent = (char *)parent;
   reqlen = containerd__services__snapshots__v1__prepare_snapshot_request__get_packed_size(
       &req);

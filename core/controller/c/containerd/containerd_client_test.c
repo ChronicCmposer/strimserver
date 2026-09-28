@@ -763,7 +763,7 @@ static char *build_large_spec_json(size_t *out_len) {
   off += (size_t)snprintf(
       json + off, cap - off,
       "{\"ociVersion\":\"1.0.2\",\"process\":{"
-      "\"args\":[\"/entrypoint.sh\"],\"cwd\":\"/\","
+      "\"args\":[\"/entrypoint\"],\"cwd\":\"/\","
       "\"env\":[\"PATH=/usr/bin\",\"NVIDIA_VISIBLE_DEVICES=all\"]},"
       "\"root\":{\"path\":\"rootfs\"},\"mounts\":[");
   for (i = 0; i < 160; i++) {
@@ -879,12 +879,12 @@ static const char CONFIG_JSON[] =
 
 /* The OCI/Docker image config uses CAPITALIZED keys ("Entrypoint", "Cmd",
  * "Env", "WorkingDir", "User") — the exact shape of the mediamtx image that
- * failed ("Entrypoint":["/entrypoint.sh"], no lowercase spelling). The C
+ * failed ("Entrypoint":["/entrypoint"], no lowercase spelling). The C
  * parser must read these like the Go oracle's case-insensitive
  * json.Unmarshal. */
 static const char CONFIG_JSON_CAPS[] =
     "{\"config\":{\"Env\":[\"PATH=/usr/bin\"],"
-    "\"Entrypoint\":[\"/entrypoint.sh\"],"
+    "\"Entrypoint\":[\"/entrypoint\"],"
     "\"Cmd\":[\"--flag\"],"
     "\"WorkingDir\":\"/\","
     "\"User\":\"1000\"},"
@@ -2183,7 +2183,7 @@ static void test_image_config_case_insensitive(void) {
    * Entrypoint lands in args, Cmd follows it, WorkingDir -> cwd, User ->
    * uid. */
   test_image_config_keys_case(CONFIG_JSON_CAPS,
-                              "\"args\":[\"/entrypoint.sh\",\"--flag\"]",
+                              "\"args\":[\"/entrypoint\",\"--flag\"]",
                               "\"uid\":1000", "\"cwd\":\"/\"");
   /* Lowercase keys (the parser's historical input) must keep working. */
   test_image_config_keys_case(CONFIG_JSON, "\"args\":[\"/transcode.sh\"]",
