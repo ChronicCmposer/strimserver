@@ -169,6 +169,7 @@ filegroup(
         "//tools/bazel:is_amd64_target": [":entrypoint_amd64"],
         "//tools/bazel:is_arm64_target": [":entrypoint_arm64"],
     }),
+    visibility = ["//visibility:public"],
 )
 
 filegroup(
@@ -177,6 +178,7 @@ filegroup(
         "//tools/bazel:is_amd64_target": [":notify_amd64"],
         "//tools/bazel:is_arm64_target": [":notify_arm64"],
     }),
+    visibility = ["//visibility:public"],
 )
 
 filegroup(

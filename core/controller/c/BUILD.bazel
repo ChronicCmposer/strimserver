@@ -153,6 +153,7 @@ cc_binary(
         ":codecs",
         ":containerd_lib",
         ":core_lib",
+        ":envfile",
         ":http_lib",
         "//core/controller/c/containerd:containerd_lib",
         "//core/controller/c/core:core_lib",
