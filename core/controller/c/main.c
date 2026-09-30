@@ -108,7 +108,7 @@ static void logmsg(const char *fmt, ...) {
  * status, append it so operators see WHY the daemon rejected the RPC (e.g. a
  * shim/runc error on Tasks/Create):
  *
- *   could not create scale-and-egress task: -9 (grpc status 13 (INTERNAL))
+ *   could not create "scale-and-egress" task: -9 (grpc status 13 (INTERNAL))
  */
 static void log_rpc_failure(const char *fmt, const char *stage, int rc,
                             strim_containerd_client *client) {
@@ -277,6 +277,112 @@ static int bind_duration_ms(int64_t *dst, const char *raw, char *err,
         *dst = (ns + 500000) / 1000000;
     }
     return 0;
+}
+
+/* Go fmtFrac (time/duration.go): format the fraction of v/10^prec into the
+ * tail of tmp (right-to-left), omitting trailing zeros and the decimal point
+ * when the fraction is 0. Returns the new write index and v/10^prec. */
+static int go_duration_frac(char *tmp, int w, uint64_t v, int prec,
+                            uint64_t *out_v) {
+    bool print = false;
+    for (int i = 0; i < prec; i++) {
+        uint64_t digit = v % 10;
+        print = print || digit != 0;
+        if (print) {
+            tmp[--w] = (char)(digit + '0');
+        }
+        v /= 10;
+    }
+    if (print) {
+        tmp[--w] = '.';
+    }
+    *out_v = v;
+    return w;
+}
+
+/* Go fmtInt (time/duration.go): format v as decimal into the tail of tmp
+ * (right-to-left). Returns the new write index. */
+static int go_duration_int(char *tmp, int w, uint64_t v) {
+    if (v == 0) {
+        tmp[--w] = '0';
+    } else {
+        while (v > 0) {
+            tmp[--w] = (char)(v % 10 + '0');
+            v /= 10;
+        }
+    }
+    return w;
+}
+
+/* Render a duration in milliseconds the way Go's time.Duration.String()
+ * prints it ("10s", "1m30s", "300ms", "1.5s") — the exact text the Go
+ * controller logs in `%q task did not exit within %s, forcing kill`. */
+static void go_duration_ms(int64_t ms, char *buf, size_t cap) {
+    char tmp[48];
+    uint64_t u;
+    int w;
+    int prec;
+    bool neg;
+
+    if (buf == NULL || cap == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    if (ms == 0) {
+        snprintf(buf, cap, "%s", "0s");
+        return;
+    }
+
+    neg = ms < 0;
+    u = neg ? (uint64_t)(-(ms + 1)) + 1 : (uint64_t)ms;
+    u *= 1000000ULL; /* ms -> ns */
+
+    w = (int)sizeof tmp;
+    if (u < 1000000000ULL) {
+        /* Smaller than a second: use smaller units (Go's ns/µs/ms). */
+        tmp[--w] = 's';
+        w--;
+        if (u < 1000ULL) {
+            prec = 0;
+            tmp[w] = 'n';
+        } else if (u < 1000000ULL) {
+            prec = 3;
+            w--;
+            tmp[w] = (char)0xC2; /* U+00B5 'µ' = 0xC2 0xB5 */
+            tmp[w + 1] = (char)0xB5;
+        } else {
+            prec = 6;
+            tmp[w] = 'm';
+        }
+        w = go_duration_frac(tmp, w, u, prec, &u);
+        w = go_duration_int(tmp, w, u);
+    } else {
+        tmp[--w] = 's';
+        w = go_duration_frac(tmp, w, u, 9, &u);
+        /* u is now whole seconds. */
+        w = go_duration_int(tmp, w, u % 60);
+        u /= 60;
+        /* u is now whole minutes. */
+        if (u > 0) {
+            tmp[--w] = 'm';
+            w = go_duration_int(tmp, w, u % 60);
+            u /= 60;
+            /* u is now whole hours. */
+            if (u > 0) {
+                tmp[--w] = 'h';
+                w = go_duration_int(tmp, w, u);
+            }
+        }
+    }
+    if (neg) {
+        tmp[--w] = '-';
+    }
+    if ((size_t)((int)sizeof tmp - w) < cap) {
+        memcpy(buf, tmp + w, (size_t)((int)sizeof tmp - w));
+        buf[(int)sizeof tmp - w] = '\0';
+    } else {
+        snprintf(buf, cap, "%s", "0s");
+    }
 }
 
 static int bind_uint8(uint8_t *dst, const char *raw, char *err, size_t err_cap) {
@@ -1062,7 +1168,7 @@ static int64_t op_rpc_budget(const strim_stage_op_cancel *cancel,
 static int op_superseded_abort(const strim_stage_ops *ops,
                                const strim_stage_op_cancel *cancel) {
     if (strim_stage_op_superseded(cancel)) {
-        logmsg("%s op superseded by a newer reconcile; aborting",
+        logmsg("\"%s\" op superseded by a newer reconcile; aborting",
                strim_stage_name_to_string(ops->stage));
         return 1;
     }
@@ -1111,7 +1217,7 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
 
     budget_ms = op_rpc_budget(cancel, timeout_ms);
     if (budget_ms <= 0) {
-        logmsg("%s stop op deadline expired; aborting",
+        logmsg("\"%s\" stop op deadline expired; aborting",
                strim_stage_name_to_string(ops->stage));
         return -1; /* failure clears InFlight; the next reconcile retries */
     }
@@ -1119,12 +1225,12 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
     rc = strim_containerd_load_container(ops->client, ops->container_id,
                                          &container);
     if (rc == STRIM_CTRD_ERR_NOTFOUND) {
-        logmsg("%s container not found, could not delete, continuing...",
+        logmsg("\"%s\" container not found, could not delete, continuing...",
                strim_stage_name_to_string(ops->stage));
         return 0;
     }
     if (rc != 0) {
-        log_rpc_failure("could not load %s container for deletion: %d",
+        log_rpc_failure("could not load \"%s\" container for deletion: %d",
                         strim_stage_name_to_string(ops->stage), rc,
                         ops->client);
         return rc;
@@ -1136,18 +1242,18 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
 
     rc = strim_containerd_load_task(container, &task);
     if (rc == STRIM_CTRD_ERR_NOTFOUND) {
-        logmsg("%s task not found, could not delete, continuing...",
+        logmsg("\"%s\" task not found, could not delete, continuing...",
                strim_stage_name_to_string(ops->stage));
         rc = strim_containerd_delete_container(container, 1);
         if (rc != 0) {
-            log_rpc_failure("could not delete %s container: %d",
+            log_rpc_failure("could not delete \"%s\" container: %d",
                             strim_stage_name_to_string(ops->stage), rc,
                             ops->client);
         }
         return rc == 0 ? 0 : rc;
     }
     if (rc != 0) {
-        log_rpc_failure("could not load %s task for deletion: %d",
+        log_rpc_failure("could not load \"%s\" task for deletion: %d",
                         strim_stage_name_to_string(ops->stage), rc,
                         ops->client);
         return rc;
@@ -1185,7 +1291,7 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
         /* Go: Kill error (non-NotFound) → return; the exit subscription is
          * abandoned. Join the waiter so we never leak a thread. */
         pthread_join(waiter_tid, NULL);
-        log_rpc_failure("could not signal %s task: %d",
+        log_rpc_failure("could not signal \"%s\" task: %d",
                         strim_stage_name_to_string(ops->stage), rc,
                         ops->client);
         return rc;
@@ -1199,21 +1305,23 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
     }
 
     if (w.rc == 0) {
-        logmsg("%s task exited gracefully, exit code: %d",
+        logmsg("\"%s\" task exited gracefully, exit code: %d",
                strim_stage_name_to_string(ops->stage), w.exit_code);
         rc = strim_containerd_task_delete(task, 0);
         if (rc != 0) {
-            log_rpc_failure("could not delete %s task after graceful exit: %d",
+            log_rpc_failure("could not delete \"%s\" task after graceful exit: %d",
                             strim_stage_name_to_string(ops->stage), rc,
                             ops->client);
             return rc;
         }
     } else if (w.rc == STRIM_CTRD_ERR_TIMEOUT) {
-        logmsg("%s task did not exit within grace period, forcing kill",
-               strim_stage_name_to_string(ops->stage));
+        char stop_dur[32];
+        go_duration_ms(ops->stage_stop_timeout_ms, stop_dur, sizeof stop_dur);
+        logmsg("\"%s\" task did not exit within %s, forcing kill",
+               strim_stage_name_to_string(ops->stage), stop_dur);
         rc = strim_containerd_task_delete(task, 1);
         if (rc != 0) {
-            log_rpc_failure("could not force-delete %s task: %d",
+            log_rpc_failure("could not force-delete \"%s\" task: %d",
                             strim_stage_name_to_string(ops->stage), rc,
                             ops->client);
             return rc;
@@ -1222,7 +1330,7 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
         /* Already gone (Go Wait NotFound → nil); fall through to delete the
          * container. */
     } else {
-        logmsg("could not wait on %s task: %d",
+        logmsg("could not wait on \"%s\" task: %d",
                strim_stage_name_to_string(ops->stage), w.rc);
         return w.rc;
     }
@@ -1233,12 +1341,12 @@ static int stage_stop_op(void *op_ctx, int64_t timeout_ms,
 
     rc = strim_containerd_delete_container(container, 1);
     if (rc != 0) {
-        log_rpc_failure("could not delete %s container: %d",
+        log_rpc_failure("could not delete \"%s\" container: %d",
                         strim_stage_name_to_string(ops->stage), rc,
                         ops->client);
         return rc;
     }
-    logmsg("%s container deleted", strim_stage_name_to_string(ops->stage));
+    logmsg("\"%s\" container deleted", strim_stage_name_to_string(ops->stage));
     return 0;
 }
 
@@ -1279,7 +1387,7 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
     int rc;
 
     if (ops == NULL || ops->client == NULL) {
-        logmsg("could not create %s container: containerd client unavailable",
+        logmsg("could not create \"%s\" container: containerd client unavailable",
                ops != NULL ? strim_stage_name_to_string(ops->stage)
                            : "stage");
         return -1; /* containerd unavailable; fail fast, reconcile retries */
@@ -1292,7 +1400,7 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
 
     budget_ms = op_rpc_budget(cancel, timeout_ms);
     if (budget_ms <= 0) {
-        logmsg("%s start op deadline expired; aborting",
+        logmsg("\"%s\" start op deadline expired; aborting",
                strim_stage_name_to_string(ops->stage));
         return -1; /* failure clears InFlight; the next reconcile retries */
     }
@@ -1302,7 +1410,7 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
      * and cancellation. */
     rc = stage_stop_op(ops, budget_ms, cancel);
     if (rc != 0) {
-        logmsg("could not clean up %s before start: %d",
+        logmsg("could not clean up \"%s\" before start: %d",
                strim_stage_name_to_string(ops->stage), rc);
         return rc;
     }
@@ -1321,7 +1429,7 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
         if (strim_stage_argv(ops->stage_table, ops->n_stage_table,
                              ops->container_id, argv0, sizeof argv0, argv1,
                              sizeof argv1) != 0) {
-            logmsg("could not build %s stage argv",
+            logmsg("could not build \"%s\" stage argv",
                    strim_stage_name_to_string(ops->stage));
             return -1;
         }
@@ -1333,7 +1441,7 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
         n_mounts = strim_ffmpeg_mounts(&ops->layout, mounts,
                                        STRIM_SPEC_MAX_MOUNTS);
         if (prepare_ffmpeg_cdi(&spec) != 0) {
-            logmsg("could not resolve %s for %s (CDI)",
+            logmsg("could not resolve \"%s\" for \"%s\" (CDI)",
                    STRIM_FFMPEG_CDI_DEVICE,
                    strim_stage_name_to_string(ops->stage));
             return -1;
@@ -1344,7 +1452,7 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
                                          STRIM_SPEC_MAX_MOUNTS);
     }
     if (n_mounts < 0) {
-        logmsg("could not build %s mount list: %d",
+        logmsg("could not build \"%s\" mount list: %d",
                strim_stage_name_to_string(ops->stage), n_mounts);
         return n_mounts;
     }
@@ -1359,7 +1467,7 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
                                         ops->snapshot_id, ops->image_name,
                                         &spec, &container);
     if (rc != 0) {
-        log_rpc_failure("could not create %s container: %d",
+        log_rpc_failure("could not create \"%s\" container: %d",
                         strim_stage_name_to_string(ops->stage), rc,
                         ops->client);
         return rc;
@@ -1371,7 +1479,7 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
 
     rc = strim_containerd_new_task(container, ops->logfile, &task);
     if (rc != 0) {
-        log_rpc_failure("could not create %s task: %d",
+        log_rpc_failure("could not create \"%s\" task: %d",
                         strim_stage_name_to_string(ops->stage), rc,
                         ops->client);
         return rc;
@@ -1383,7 +1491,7 @@ static int stage_start_op(void *op_ctx, int64_t timeout_ms,
 
     rc = strim_containerd_task_start(task);
     if (rc != 0) {
-        log_rpc_failure("could not start %s task: %d",
+        log_rpc_failure("could not start \"%s\" task: %d",
                         strim_stage_name_to_string(ops->stage), rc,
                         ops->client);
         return rc;
@@ -1515,7 +1623,7 @@ static void *containerd_listener_thread_fn(void *arg) {
 
         n = strim_event_container_id(env, cid, sizeof cid);
         if (n < 0) {
-            logmsg("received %s event without a container id",
+            logmsg("received \"%s\" event without a container id",
                    kind == STRIM_EVENT_TASK_START ? "TaskStart" : "TaskExit");
             continue;
         }
@@ -1528,7 +1636,7 @@ static void *containerd_listener_thread_fn(void *arg) {
             }
         }
         if (stage == (strim_stage_name)(-1)) {
-            logmsg("received %s event, but not associated with any stage: %s",
+            logmsg("received \"%s\" event, but not associated with any stage: %s",
                    kind == STRIM_EVENT_TASK_START ? "TaskStart" : "TaskExit",
                    cid);
             continue;
@@ -1540,7 +1648,7 @@ static void *containerd_listener_thread_fn(void *arg) {
         {
             int src = strim_controller_submit_stage_event(la->controller, &sev);
             if (src != 0) {
-                logmsg("could not handle %s event: %d",
+                logmsg("could not handle \"%s\" event: %d",
                        kind == STRIM_EVENT_TASK_START ? "TaskStart"
                                                       : "TaskExit",
                        src);
