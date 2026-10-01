@@ -1,0 +1,54 @@
+# BUILD file for the @cares external repo (c-ares 1.34.8 source, pinned in
+# MODULE.bazel). Builds the whole library as a static cc_library.
+#
+# The release tarball ships no generated ares_config.h (CMake/autotools
+# produce one at configure time), so tools/bazel/patches/
+# cares_linux_ares_config.patch drops a hand-written Linux config into
+# src/lib/ares_config.h (the natural include location: ares_setup.h's
+# `#include "ares_config.h"` resolves relative to src/lib/). The values
+# mirror c-ares's own configure/CMake results for a modern Linux C library
+# and are identical for both LP64 target arches (amd64 and arm64); the
+# shipped include/ares_build.h is the dist version with compiler-based
+# detection, so it also covers both arches.
+#
+# Everything in src/lib/**/*.c is compiled (the same whole-tree glob the
+# mbedtls BUILD uses): the platform-specific files (ares_android.c,
+# ares_sysconfig_mac.c, ares_sysconfig_win.c, windows_port.c,
+# event/ares_event_win32.c) are #ifdef-guarded to empty/no-op translation
+# units on Linux. Compilation defines:
+#   - HAVE_CONFIG_H      makes ares_setup.h load our committed ares_config.h;
+#   - CARES_STATICLIB    exported to consumers so ares.h matches the static
+#                        library's symbol visibility (mirrors BUILD.curl's
+#                        CURL_STATICLIB);
+#   - _GNU_SOURCE        exposes getrandom()/memmem() from the musl headers.
+#
+# Compiled statically against musl by the zig toolchain under
+# //tools/bazel:c_controller_transition: features = ["-supports_dynamic_linker"]
+# + linkstatic = True are the repo's musl-static cc_library convention
+# (core/controller/c). The strim-ddns binary links @cares//:cares for the
+# direct-authoritative check subcommand (//tools/ddns).
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "cares",
+    srcs = glob(["src/lib/**/*.c"]),
+    hdrs = glob([
+        "include/*.h",
+        "src/lib/**/*.h",
+    ]),
+    copts = [
+        "-D_GNU_SOURCE",
+        "-DHAVE_CONFIG_H",
+        "-DCARES_NO_DEPRECATED",
+    ],
+    defines = ["CARES_STATICLIB"],
+    includes = [
+        "include",
+        "src/lib",
+        "src/lib/include",
+    ],
+    features = ["-supports_dynamic_linker"],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)

@@ -1,5 +1,6 @@
 /*
- * strim-ddns: Namecheap dynamic-DNS update client + DNS-over-HTTPS probe.
+ * strim-ddns: Namecheap dynamic-DNS update client + direct-authoritative
+ * DNS probe.
  *
  * Two subcommands:
  *
@@ -16,21 +17,33 @@
  *     Mirrors the gitd reference implementation's ddnsSuccess().
  *
  *   check <host> <domain>
- *     Resolves $host.$domain's A records over DNS-over-HTTPS (DoH): first
- *     Google's dns.google/resolve, and on a transport or parse failure
- *     Cloudflare's dns-query (with an Accept: application/dns-json header).
+ *     Resolves $host.$domain's A record by querying the AUTHORITATIVE
+ *     nameserver directly, bypassing every resolver for the dynamic record:
+ *       1. NS discovery: ask the box's resolver (c-ares, default system
+ *          resolver config) for the DOMAIN's NS records (type NS).
+ *       2. NS hostname -> IP: resolve each NS hostname to an IPv4 address
+ *          via the same resolver.
+ *       3. Direct A query: send the A query for $host.$domain STRAIGHT to
+ *          one of those NS IPs over UDP/53 with c-ares
+ *          (ARES_OPT_SERVERS + ARES_FLAG_NORECURSE, so the RD bit is 0 and
+ *          the authoritative server answers from its own zone data instead
+ *          of recursing).
  *     Prints the first IPv4 address to stdout, or exits 1 having printed
- *     nothing when the name does not resolve.
+ *     nothing when the name does not resolve. Exactly one informative line
+ *     goes to stderr (see Q5c): "check <fqdn> -> <ip> (via <ns-hostname>)"
+ *     on success, "check <fqdn> not resolved (via <ns-hostname>: <reason>)"
+ *     (or an NS-discovery reason) on failure. The stdout contract (one IPv4
+ *     or nothing) is what deploy.sh's comparison depends on.
  *
  * Config comes from argv (host domain password_file [ip]) or, when the args
  * are absent, from the DDNS_HOST / DDNS_DOMAIN / DDNS_PASSWORD_FILE /
  * DDNS_IP environment variables. DDNS_ENDPOINT overrides the update URL
- * (testability); DDNS_DOH_ENDPOINT overrides the DoH endpoint (testability;
- * when set, check uses ONLY it, with no fallback); DDNS_DOH_PRIMARY_ENDPOINT
- * and DDNS_DOH_FALLBACK_ENDPOINT override the first (Google) and fallback
- * (Cloudflare) DoH endpoints of the fallback path (testability);
- * DDNS_CHECK_TIMEOUT caps each check DoH query in seconds (default 6; the
- * update query stays at 15); DDNS_CA_BUNDLE overrides the CA bundle path
+ * (testability). DDNS_RESOLVER (test-only) overrides the resolver c-ares
+ * uses for NS discovery / NS-hostname resolution as "ip" or "ip:port"
+ * (loopback DNS test double); DDNS_AUTHORITATIVE_PORT (test-only) overrides
+ * the UDP/TCP port of the direct authoritative A query (default 53). When
+ * unset, c-ares uses the system resolver config and port 53, so production
+ * behavior is unchanged. DDNS_CA_BUNDLE overrides the CA bundle path
  * (CURLOPT_CAINFO); when unset, libcurl's compiled-in CURL_CA_BUNDLE
  * (/etc/ssl/certs/ca-certificates.crt in the image) is used.
  *
@@ -40,31 +53,33 @@
 
 #include <curl/curl.h>
 
-#include "doh.h"
+#include <ares.h>
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 
 #define DDNS_DEFAULT_ENDPOINT "https://dynamicdns.park-your-domain.com/update"
 
 /* HTTPS timeouts: the update path is a single Namecheap GET that may take up
- * to 15s on a slow box; the check probe runs twice per attempt (Google +
- * Cloudflare fallback) inside deploy.sh's retry loop, so each check query is
- * capped much lower (DDNS_CHECK_TIMEOUT, default 6s) to keep the loop's
- * wall-clock budget real. */
+ * to 15s on a slow box. */
 #define DDNS_UPDATE_TIMEOUT_SECS 15L
-#define DDNS_CHECK_TIMEOUT_DEFAULT_SECS 6L
 
-/* DoH endpoints: Google first, Cloudflare as the fallback. dns.google's
- * /resolve returns JSON by default; Cloudflare's RFC 8484-style /dns-query
- * needs the JSON Accept header. */
-#define DOH_GOOGLE_ENDPOINT "https://dns.google/resolve"
-#define DOH_CLOUDFLARE_ENDPOINT "https://cloudflare-dns.com/dns-query"
-#define DOH_CLOUDFLARE_ACCEPT "Accept: application/dns-json"
+/* Per-query DNS budget for the check probe: each c-ares query (NS discovery,
+ * NS hostname -> IP, direct authoritative A) retries at most
+ * DDNS_DNS_TRIES times with DDNS_DNS_TIMEOUT_MS between attempts, bounding a
+ * single query to ~10s. deploy.sh's retry loop absorbs the failure case. */
+#define DDNS_DNS_TIMEOUT_MS 5000L
+#define DDNS_DNS_TRIES 2
+
+#define DDNS_MAX_NS_IPS 32
 
 /* Bounded response capture (the endpoint replies are a few hundred bytes;
  * the Go client caps reads at 1 MiB). */
@@ -252,33 +267,15 @@ static char *build_update_url(const char *endpoint, const char *host,
     return url;
 }
 
-/* build_doh_url: assembles <endpoint>?name=<fqdn>&type=A with the fqdn
- * URL-escaped. Returns a malloc'd string, or NULL on failure. */
-static char *build_doh_url(const char *endpoint, const char *fqdn) {
-    char *fqdn_e = url_escape(fqdn);
-    if (!fqdn_e) {
-        return NULL;
-    }
-    size_t need = strlen(endpoint) + strlen(fqdn_e) + 32;
-    char *url = malloc(need);
-    if (!url) {
-        curl_free(fqdn_e);
-        return NULL;
-    }
-    snprintf(url, need, "%s?name=%s&type=A", endpoint, fqdn_e);
-    curl_free(fqdn_e);
-    return url;
-}
-
 /* perform_https_get: runs the HTTPS GET, capturing the body into *reply.
  * TLS verification is ON (CURLOPT_SSL_VERIFYPEER=1 + VERIFYHOST=2); the CA
  * bundle comes from ca_bundle when set, else libcurl's compiled-in default.
- * When accept_header is set it is sent verbatim (e.g. the DoH JSON Accept
- * header); when quiet is true, transport errors are not printed (the check
- * probe's contract is silence on stdout and stderr -- the exit code is the
- * answer). timeout_secs bounds the whole transfer (CURLOPT_TIMEOUT).
- * Returns 0 on transfer success (the body decides the outcome), -1 on any
- * transport/TLS error (already printed unless quiet). */
+ * When accept_header is set it is sent verbatim. When quiet is true,
+ * transport errors are not printed (the check probe's contract is silence on
+ * stdout and stderr -- the exit code is the answer). timeout_secs bounds the
+ * whole transfer (CURLOPT_TIMEOUT). Returns 0 on transfer success (the body
+ * decides the outcome), -1 on any transport/TLS error (already printed
+ * unless quiet). */
 static int perform_https_get(const char *url, const char *ca_bundle,
                              const char *accept_header, bool quiet,
                              long timeout_secs, struct reply_buffer *reply) {
@@ -330,34 +327,6 @@ static int perform_https_get(const char *url, const char *ca_bundle,
     return 0;
 }
 
-/* doh_resolve: one DoH query for fqdn's A records against endpoint, bounded
- * by timeout_secs. Returns a malloc'd IPv4 string on success; on a transport
- * failure or a reply that does not resolve, prints nothing and returns NULL
- * (the caller decides fallback or the not-resolved exit). Sets *oom when an
- * out-of-memory condition aborted the lookup, so the caller can distinguish
- * a hard program error from a genuine not-resolved answer. */
-static char *doh_resolve(const char *endpoint, const char *accept_header,
-                         const char *fqdn, const char *ca_bundle,
-                         long timeout_secs, bool *oom) {
-    *oom = false;
-    char *url = build_doh_url(endpoint, fqdn);
-    if (!url) {
-        *oom = true;
-        return NULL;
-    }
-    struct reply_buffer reply = {0};
-    int rc = perform_https_get(url, ca_bundle, accept_header, /*quiet=*/true,
-                               timeout_secs, &reply);
-    free(url);
-    if (rc != 0) {
-        free(reply.data);
-        return NULL;
-    }
-    char *ip = doh_extract_ipv4(reply.data, reply.len, oom);
-    free(reply.data);
-    return ip;
-}
-
 static void print_usage(const char *prog) {
     fprintf(stderr,
             "usage: %s update <host> <domain> [password_file] [ip]\n"
@@ -366,11 +335,13 @@ static void print_usage(const char *prog) {
             "  is treated as \"update\" (legacy).\n"
             "  config may instead come from DDNS_HOST, DDNS_DOMAIN,\n"
             "  DDNS_PASSWORD_FILE, DDNS_IP; DDNS_ENDPOINT overrides the\n"
-            "  update URL; DDNS_DOH_ENDPOINT overrides the DoH endpoint\n"
-            "  (single, no fallback); DDNS_DOH_PRIMARY_ENDPOINT and\n"
-            "  DDNS_DOH_FALLBACK_ENDPOINT override the fallback-path\n"
-            "  endpoints; DDNS_CHECK_TIMEOUT caps each check query in\n"
-            "  seconds (default 6); DDNS_CA_BUNDLE overrides the CA bundle.\n",
+            "  update URL; DDNS_CA_BUNDLE overrides the CA bundle.\n"
+            "  check discovers the domain's authoritative NS via the system\n"
+            "  resolver and queries the A record directly (no resolver is\n"
+            "  trusted for the dynamic A record); DDNS_RESOLVER (test-only)\n"
+            "  points NS discovery at an ip[:port] resolver,\n"
+            "  DDNS_AUTHORITATIVE_PORT (test-only) overrides the direct\n"
+            "  query port (default 53).\n",
             prog, prog, prog);
 }
 
@@ -426,76 +397,419 @@ static int run_update(int argc, char **argv, int first) {
     return ok ? 0 : 1;
 }
 
-/* run_check: the DoH resolution probe. Resolves $host.$domain's A records
- * over the primary DoH endpoint, and on a transport/parse failure the
- * fallback endpoint (Google -> Cloudflare; both overridable for tests), and
- * prints the first IPv4 address, or exits 1 having printed nothing when the
- * name does not resolve. Usage/config errors exit 2. */
+/* =========================================================================
+ * check subcommand: direct authoritative A-record resolution (c-ares)
+ * =========================================================================
+ *
+ * Parse-don't-validate at the boundary: the raw DNS replies are parsed by
+ * c-ares (ares_parse_ns_reply / ares_parse_a_reply) and only typed
+ * hostnames/IPs flow through the rest of the function. Guard clauses handle
+ * every failure path with an early return; nothing is printed to stdout on
+ * any failure, preserving the one-IPv4-or-nothing contract.
+ */
+
+/* dns_status_str: short human reason for an ares_query callback status. */
+static const char *dns_status_str(int status) {
+    switch (status) {
+    case ARES_SUCCESS:
+        return "ok";
+    case ARES_ENODATA:
+        return "no answer records";
+    case ARES_EFORMERR:
+        return "malformed response";
+    case ARES_ESERVFAIL:
+        return "server failure";
+    case ARES_ENOTFOUND:
+        return "name not found";
+    case ARES_ENOTIMP:
+        return "not implemented";
+    case ARES_EREFUSED:
+        return "query refused";
+    case ARES_EBADRESP:
+        return "bad response";
+    case ARES_ECONNREFUSED:
+        return "connection refused";
+    case ARES_ETIMEOUT:
+        return "timeout";
+    case ARES_ECANCELLED:
+        return "cancelled";
+    case ARES_ENOMEM:
+        return "out of memory";
+    default:
+        return "DNS error";
+    }
+}
+
+/* dns_query_state: one synchronous ares_query; the callback stashes a
+ * malloc'd copy of the reply so parsing can happen after the event loop. */
+struct dns_query_state {
+    bool done;
+    bool oom;
+    int status;
+    unsigned char *reply;
+    size_t reply_len;
+};
+
+static void dns_query_cb(void *arg, int status, int timeouts,
+                         unsigned char *abuf, int alen) {
+    (void)timeouts;
+    struct dns_query_state *st = arg;
+    st->status = status;
+    if (abuf != NULL && alen > 0) {
+        unsigned char *copy = malloc((size_t)alen);
+        if (copy == NULL) {
+            st->oom = true;
+        } else {
+            memcpy(copy, abuf, (size_t)alen);
+            st->reply = copy;
+            st->reply_len = (size_t)alen;
+        }
+    }
+    st->done = true;
+}
+
+/* run_dns_query: one synchronous ares_query on channel. The channel's own
+ * ARES_OPT_TIMEOUTMS / ARES_OPT_TRIES bound the wait; the 1s select cap just
+ * paces the event loop (ares_timeout returns whichever is sooner). On
+ * completion st->status holds the callback status and st->reply a malloc'd
+ * reply copy (free with free()). */
+static void run_dns_query(ares_channel_t *channel, const char *name,
+                          int dnsclass, int type, struct dns_query_state *st) {
+    /* Defensive: the callback normally overwrites this, but if the event
+     * loop drains before it fires (nfds == 0 break below), the query must
+     * read as a failure, never as ARES_SUCCESS. */
+    st->status = ARES_ETIMEOUT;
+    ares_query(channel, name, dnsclass, type, dns_query_cb, st);
+    while (!st->done) {
+        fd_set read_fds, write_fds;
+        FD_ZERO(&read_fds);
+        FD_ZERO(&write_fds);
+        int nfds = ares_fds(channel, &read_fds, &write_fds);
+        if (nfds == 0) {
+            break; /* query drained; nothing left to wait on */
+        }
+        struct timeval maxtv, tv;
+        maxtv.tv_sec = 1;
+        maxtv.tv_usec = 0;
+        struct timeval *tvp = ares_timeout(channel, &maxtv, &tv);
+        int rc = select(nfds, &read_fds, &write_fds, NULL, tvp);
+        if (rc < 0 && errno != EINTR) {
+            st->status = ARES_ETIMEOUT;
+            ares_cancel(channel);
+            st->done = true;
+            break;
+        }
+        ares_process(channel, &read_fds, &write_fds);
+    }
+}
+
+/* init_resolver_channel: a c-ares channel for NS discovery / NS-hostname
+ * resolution. When override_ip is set (test-only DDNS_RESOLVER), the channel
+ * queries ONLY that server (override_port, or 53 when zero); otherwise it
+ * reads the system resolver config (the production default). */
+static int init_resolver_channel(ares_channel_t **channel_out,
+                                 const struct in_addr *override_ip,
+                                 unsigned short override_port) {
+    struct ares_options options;
+    memset(&options, 0, sizeof(options));
+    int optmask = ARES_OPT_TIMEOUTMS | ARES_OPT_TRIES;
+    options.timeout = DDNS_DNS_TIMEOUT_MS;
+    options.tries = DDNS_DNS_TRIES;
+    if (override_ip != NULL) {
+        options.servers = (struct in_addr *)override_ip;
+        options.nservers = 1;
+        optmask |= ARES_OPT_SERVERS;
+        if (override_port != 0) {
+            options.udp_port = override_port;
+            options.tcp_port = override_port;
+            optmask |= ARES_OPT_UDP_PORT | ARES_OPT_TCP_PORT;
+        }
+    }
+    return ares_init_options(channel_out, &options, optmask);
+}
+
+/* init_authoritative_channel: a c-ares channel whose ONLY servers are the
+ * discovered authoritative NS IPs, with the RD bit cleared (ARES_FLAG_NORECURSE)
+ * so the NS answers from its own zone data. port_override (test-only
+ * DDNS_AUTHORITATIVE_PORT) replaces the default 53. */
+static int init_authoritative_channel(ares_channel_t **channel_out,
+                                      const struct in_addr *ns_ips,
+                                      size_t nns,
+                                      unsigned short port_override) {
+    struct ares_options options;
+    memset(&options, 0, sizeof(options));
+    int optmask = ARES_OPT_FLAGS | ARES_OPT_TIMEOUTMS | ARES_OPT_TRIES |
+                  ARES_OPT_SERVERS;
+    options.flags = ARES_FLAG_NORECURSE;
+    options.timeout = DDNS_DNS_TIMEOUT_MS;
+    options.tries = DDNS_DNS_TRIES;
+    options.servers = (struct in_addr *)ns_ips;
+    options.nservers = (int)nns;
+    if (port_override != 0) {
+        options.udp_port = port_override;
+        options.tcp_port = port_override;
+        optmask |= ARES_OPT_UDP_PORT | ARES_OPT_TCP_PORT;
+    }
+    return ares_init_options(channel_out, &options, optmask);
+}
+
+/* parse_resolver_override: parse DDNS_RESOLVER ("ip" or "ip:port", test-only)
+ * at the boundary. Returns 0 with *ip_out unset when the env is empty/absent;
+ * returns 1 with ip/port filled on success; returns -1 on malformed input
+ * (with a descriptive error printed). */
+static int parse_resolver_override(const char *env, struct in_addr *ip_out,
+                                   unsigned short *port_out) {
+    if (env == NULL || *env == '\0') {
+        return 0;
+    }
+    const char *colon = strrchr(env, ':');
+    if (colon == NULL) {
+        if (inet_pton(AF_INET, env, ip_out) != 1) {
+            fprintf(stderr,
+                    "strim-ddns: invalid DDNS_RESOLVER '%s' "
+                    "(expected an IPv4 address or ip:port)\n",
+                    env);
+            return -1;
+        }
+        *port_out = 0;
+        return 1;
+    }
+    char ipbuf[64];
+    size_t iplen = (size_t)(colon - env);
+    if (iplen == 0 || iplen >= sizeof(ipbuf)) {
+        fprintf(stderr,
+                "strim-ddns: invalid DDNS_RESOLVER '%s' "
+                "(expected an IPv4 address or ip:port)\n",
+                env);
+        return -1;
+    }
+    memcpy(ipbuf, env, iplen);
+    ipbuf[iplen] = '\0';
+    if (inet_pton(AF_INET, ipbuf, ip_out) != 1) {
+        fprintf(stderr,
+                "strim-ddns: invalid DDNS_RESOLVER '%s' "
+                "(expected an IPv4 address or ip:port)\n",
+                env);
+        return -1;
+    }
+    char *end = NULL;
+    long parsed = strtol(colon + 1, &end, 10);
+    if (end == colon + 1 || *end != '\0' || parsed <= 0 || parsed > 65535) {
+        fprintf(stderr,
+                "strim-ddns: invalid DDNS_RESOLVER '%s' "
+                "(expected an IPv4 address or ip:port)\n",
+                env);
+        return -1;
+    }
+    *port_out = (unsigned short)parsed;
+    return 1;
+}
+
+/* parse_authoritative_port: parse DDNS_AUTHORITATIVE_PORT (test-only) at the
+ * boundary. Returns the port (0 when unset) or -1 on malformed input (with a
+ * descriptive error printed). */
+static long parse_authoritative_port(const char *env) {
+    if (env == NULL || *env == '\0') {
+        return 0;
+    }
+    char *end = NULL;
+    long parsed = strtol(env, &end, 10);
+    if (end == env || *end != '\0' || parsed <= 0 || parsed > 65535) {
+        fprintf(stderr,
+                "strim-ddns: invalid DDNS_AUTHORITATIVE_PORT '%s' "
+                "(expected a port number 1-65535)\n",
+                env);
+        return -1;
+    }
+    return parsed;
+}
+
+/* run_check: the direct-authoritative resolution probe (see the top-of-file
+ * comment). Prints one IPv4 to stdout on success; prints nothing and exits 1
+ * when the name does not resolve; exits 2 on usage/config errors. Exactly
+ * one informative line goes to stderr. */
 static int run_check(int argc, char **argv, int first) {
     const char *host = argc > first ? argv[first] : getenv("DDNS_HOST");
     const char *domain = argc > first + 1 ? argv[first + 1] : getenv("DDNS_DOMAIN");
-    const char *endpoint = getenv("DDNS_DOH_ENDPOINT");
-    const char *primary_env = getenv("DDNS_DOH_PRIMARY_ENDPOINT");
-    const char *fallback_env = getenv("DDNS_DOH_FALLBACK_ENDPOINT");
-    const char *ca_bundle = getenv("DDNS_CA_BUNDLE");
 
     if (!host || !*host || !domain || !*domain) {
         print_usage(argv[0]);
         return 2;
     }
 
-    /* Parse the per-check query timeout at the boundary: DDNS_CHECK_TIMEOUT
-     * (seconds), defaulting to the short check budget. */
-    long timeout_secs = DDNS_CHECK_TIMEOUT_DEFAULT_SECS;
-    const char *timeout_env = getenv("DDNS_CHECK_TIMEOUT");
-    if (timeout_env && *timeout_env) {
-        char *end = NULL;
-        long parsed = strtol(timeout_env, &end, 10);
-        if (end == timeout_env || *end != '\0' || parsed <= 0) {
-            fprintf(stderr,
-                    "strim-ddns: invalid DDNS_CHECK_TIMEOUT '%s' "
-                    "(expected a positive integer of seconds)\n",
-                    timeout_env);
-            return 2;
-        }
-        timeout_secs = parsed;
+    /* Parse the test-only overrides at the boundary: bad input is a usage
+     * error (exit 2), never a silent misconfiguration. */
+    struct in_addr resolver_override;
+    unsigned short resolver_override_port = 0;
+    int ov = parse_resolver_override(getenv("DDNS_RESOLVER"), &resolver_override,
+                                     &resolver_override_port);
+    if (ov < 0) {
+        return 2;
+    }
+    long auth_port = parse_authoritative_port(getenv("DDNS_AUTHORITATIVE_PORT"));
+    if (auth_port < 0) {
+        return 2;
     }
 
     size_t fqdn_len = strlen(host) + 1 + strlen(domain) + 1;
     char *fqdn = malloc(fqdn_len);
     if (!fqdn) {
+        fprintf(stderr, "strim-ddns: out of memory during DNS check\n");
         return 2;
     }
     snprintf(fqdn, fqdn_len, "%s.%s", host, domain);
 
-    char *ip = NULL;
-    bool oom = false;
-    if (endpoint && *endpoint) {
-        ip = doh_resolve(endpoint, NULL, fqdn, ca_bundle, timeout_secs, &oom);
-    } else {
-        const char *primary = (primary_env && *primary_env)
-                                  ? primary_env
-                                  : DOH_GOOGLE_ENDPOINT;
-        const char *fallback = (fallback_env && *fallback_env)
-                                   ? fallback_env
-                                   : DOH_CLOUDFLARE_ENDPOINT;
-        ip = doh_resolve(primary, NULL, fqdn, ca_bundle, timeout_secs, &oom);
-        if (!ip && !oom) {
-            ip = doh_resolve(fallback, DOH_CLOUDFLARE_ACCEPT, fqdn, ca_bundle,
-                             timeout_secs, &oom);
-        }
+    /* 1. NS discovery: ask the resolver for the DOMAIN's NS records. The
+     * production channel reads the system resolver config; the test-only
+     * DDNS_RESOLVER override builds a channel pinned to one server. */
+    ares_channel_t *resolver_chan = NULL;
+    int init_rc = (ov > 0) ? init_resolver_channel(&resolver_chan,
+                                                   &resolver_override,
+                                                   resolver_override_port)
+                           : ares_init_options(&resolver_chan, NULL, 0);
+    if (init_rc != ARES_SUCCESS) {
+        fprintf(stderr, "strim-ddns: failed to initialize the DNS resolver\n");
+        free(fqdn);
+        return 2;
     }
-    free(fqdn);
 
-    if (!ip) {
-        if (oom) {
-            fprintf(stderr, "strim-ddns: out of memory during DoH lookup\n");
+    struct dns_query_state nsq = {0};
+    run_dns_query(resolver_chan, domain, ARES_CLASS_IN, ARES_REC_TYPE_NS, &nsq);
+    if (nsq.oom) {
+        fprintf(stderr, "strim-ddns: out of memory during DNS check\n");
+        ares_destroy(resolver_chan);
+        free(fqdn);
+        return 2;
+    }
+    if (nsq.status != ARES_SUCCESS) {
+        fprintf(stderr, "check %s not resolved (NS lookup failed: %s)\n",
+                fqdn, dns_status_str(nsq.status));
+        free(nsq.reply);
+        ares_destroy(resolver_chan);
+        free(fqdn);
+        return 1;
+    }
+    struct hostent *ns_hosts = NULL;
+    int ns_rc = ares_parse_ns_reply(nsq.reply, (int)nsq.reply_len, &ns_hosts);
+    free(nsq.reply);
+    if (ns_rc != ARES_SUCCESS || ns_hosts == NULL || ns_hosts->h_aliases == NULL) {
+        fprintf(stderr, "check %s not resolved (NS lookup failed: %s)\n",
+                fqdn, dns_status_str(ns_rc));
+        ares_free_hostent(ns_hosts);
+        ares_destroy(resolver_chan);
+        free(fqdn);
+        return 1;
+    }
+
+    /* 2. NS hostname -> IP: resolve each NS hostname's A records via the
+     * resolver. The FIRST hostname that yields an address is the stderr
+     * "via" name. */
+    struct in_addr ns_ips[DDNS_MAX_NS_IPS];
+    size_t n_ns_ips = 0;
+    char *via_ns = NULL; /* strdup'd first NS hostname that resolved */
+    for (int i = 0; ns_hosts->h_aliases[i] != NULL &&
+                    n_ns_ips < DDNS_MAX_NS_IPS; i++) {
+        const char *ns_name = ns_hosts->h_aliases[i];
+        struct dns_query_state aq = {0};
+        run_dns_query(resolver_chan, ns_name, ARES_CLASS_IN, ARES_REC_TYPE_A, &aq);
+        if (aq.oom) {
+            fprintf(stderr, "strim-ddns: out of memory during DNS check\n");
+            free(aq.reply);
+            ares_free_hostent(ns_hosts);
+            ares_destroy(resolver_chan);
+            free(fqdn);
             return 2;
         }
-        return 1; /* not resolved: nothing printed */
+        if (aq.status == ARES_SUCCESS) {
+            struct ares_addrttl addrs[DDNS_MAX_NS_IPS];
+            int n_addrs = DDNS_MAX_NS_IPS;
+            int ar_rc = ares_parse_a_reply(aq.reply, (int)aq.reply_len, NULL,
+                                           addrs, &n_addrs);
+            if (ar_rc == ARES_SUCCESS && n_addrs > 0) {
+                if (via_ns == NULL) {
+                    /* Copy before the hostent is freed below: via_ns must
+                     * outlive ares_free_hostent(). */
+                    via_ns = strdup(ns_name);
+                    if (via_ns == NULL) {
+                        fprintf(stderr,
+                                "strim-ddns: out of memory during DNS check\n");
+                        free(aq.reply);
+                        ares_free_hostent(ns_hosts);
+                        ares_destroy(resolver_chan);
+                        free(fqdn);
+                        return 2;
+                    }
+                }
+                for (int j = 0; j < n_addrs && n_ns_ips < DDNS_MAX_NS_IPS; j++) {
+                    ns_ips[n_ns_ips++] = addrs[j].ipaddr;
+                }
+            }
+        }
+        free(aq.reply);
+    }
+    ares_free_hostent(ns_hosts);
+    ares_destroy(resolver_chan);
+
+    if (n_ns_ips == 0) {
+        fprintf(stderr, "check %s not resolved (no address for the domain's NS)\n",
+                fqdn);
+        free(via_ns);
+        free(fqdn);
+        return 1;
+    }
+
+    /* 3. Direct authoritative A query: send the A query for the FQDN to the
+     * discovered NS IPs with the RD bit clear, and take the FIRST IPv4. */
+    ares_channel_t *auth_chan = NULL;
+    if (init_authoritative_channel(&auth_chan, ns_ips, n_ns_ips,
+                                   (unsigned short)auth_port) != ARES_SUCCESS) {
+        fprintf(stderr, "strim-ddns: failed to initialize the authoritative query\n");
+        free(via_ns);
+        free(fqdn);
+        return 2;
+    }
+    struct dns_query_state fq = {0};
+    run_dns_query(auth_chan, fqdn, ARES_CLASS_IN, ARES_REC_TYPE_A, &fq);
+    ares_destroy(auth_chan);
+    if (fq.oom) {
+        fprintf(stderr, "strim-ddns: out of memory during DNS check\n");
+        free(via_ns);
+        free(fqdn);
+        return 2;
+    }
+    if (fq.status != ARES_SUCCESS) {
+        fprintf(stderr, "check %s not resolved (via %s: %s)\n",
+                fqdn, via_ns, dns_status_str(fq.status));
+        free(fq.reply);
+        free(via_ns);
+        free(fqdn);
+        return 1;
+    }
+    struct ares_addrttl addrs[DDNS_MAX_NS_IPS];
+    int n_addrs = DDNS_MAX_NS_IPS;
+    int ar_rc = ares_parse_a_reply(fq.reply, (int)fq.reply_len, NULL, addrs,
+                                   &n_addrs);
+    free(fq.reply);
+    if (ar_rc != ARES_SUCCESS || n_addrs <= 0) {
+        fprintf(stderr, "check %s not resolved (via %s: no A records)\n",
+                fqdn, via_ns);
+        free(via_ns);
+        free(fqdn);
+        return 1;
+    }
+
+    char ip[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, &addrs[0].ipaddr, ip, sizeof(ip)) == NULL) {
+        fprintf(stderr, "check %s not resolved (via %s: bad A record)\n",
+                fqdn, via_ns);
+        free(via_ns);
+        free(fqdn);
+        return 1;
     }
     printf("%s\n", ip);
-    free(ip);
+    fprintf(stderr, "check %s -> %s (via %s)\n", fqdn, ip, via_ns);
+    free(via_ns);
+    free(fqdn);
     return 0;
 }
 

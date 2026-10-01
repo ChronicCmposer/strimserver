@@ -249,25 +249,31 @@ if [ "$ENABLE_DDNS" = "true" ]; then
    set +x
    printf "%s refresh done!\n" "$DDNS_FQDN"
 
-   # 5) verify the record resolves to this box (bounded: ~24 retries; each
-   #    check query is capped at 6s per DoH endpoint via DDNS_CHECK_TIMEOUT,
-   #    with 5s slept between retries, so an all-failures run takes a few
-   #    minutes worst-case rather than unbounded time).
-   #    Resolve via the strim-ddns container's DoH `check` subcommand so the
-   #    lookup bypasses AL2023's systemd-resolved cache (stale TTLs and
-   #    negative-cached NXDOMAIN would otherwise produce false failures).
+   # 5) verify the record resolves to this box (bounded: 24 retries with 5s
+   #    slept between them, so an all-failures run takes ~120s worst case
+   #    rather than unbounded time).
+   #    Resolve via the strim-ddns container's `check` subcommand, which
+   #    queries the authoritative NS directly (c-ares, no DoH): the lookup
+   #    bypasses AL2023's systemd-resolved cache (stale TTLs and negative-cached
+   #    NXDOMAIN would otherwise produce false failures). c-ares applies its
+   #    own internal query timeout, so no per-query timeout env is needed.
    #    Per-iteration invocation: `check` needs no DDNS password, so no
    #    password bind-mount or DDNS_PASSWORD_FILE env is passed. The
    #    resolv.conf + hosts bind-mounts mirror the strim-ddns unit and are
-   #    required: the FROM-scratch image has no /etc/resolv.conf, so without
-   #    them the container cannot resolve the DoH endpoint hostnames.
+   #    required: the FROM-scratch image ships neither file, so the container
+   #    would otherwise have no resolver configuration.
+   #    Stream contract: stdout carries only the resolved IPv4 (captured into
+   #    DDNS_RESOLVED_IP for the comparison below); stderr carries the
+   #    per-attempt diagnostic (e.g. `check strim.example.com -> 203.0.113.10
+   #    (via ns1.example.com)`) and passes straight through to the deploy log.
    printf "verifying %s -> %s...\n" "$DDNS_FQDN" "$PUBLIC_IP"
    DDNS_VERIFIED=0
    for attempt in $(seq 1 24); do
+      printf "attempt %s/24: resolving %s...\n" "$attempt" "$DDNS_FQDN"
       DDNS_RESOLVED_IP="$(sudo ctr -n "$CONTAINERD_NAMESPACE" run --rm --net-host \
          --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
          --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
-         docker.io/library/strim-ddns:latest strim-ddns check "$DDNS_HOST" "$DDNS_DOMAIN" 2>/dev/null)" || DDNS_RESOLVED_IP=""
+         docker.io/library/strim-ddns:latest strim-ddns check "$DDNS_HOST" "$DDNS_DOMAIN")" || DDNS_RESOLVED_IP=""
       if [ -n "$DDNS_RESOLVED_IP" ] && [ "$DDNS_RESOLVED_IP" = "$PUBLIC_IP" ]; then
          DDNS_VERIFIED=1
          break

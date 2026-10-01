@@ -56,14 +56,17 @@ At the end of the deploy run `deploy.sh`:
 4. Runs a one-shot refresh passing `ip=$PUBLIC_IP` explicitly (`DDNS_IP=` via a
    temporary EnvironmentFile), so the record points at this box immediately;
    the env file is removed after the run.
-5. Verifies — up to ~24 retries with a 6s-per-query DoH timeout
-   (`DDNS_CHECK_TIMEOUT`) and 5s between retries, up to a few minutes
-   worst-case, failing loudly on mismatch — that `strim.example.com` resolves to
-   the box's public IP. The verification runs **inside** the `strim-ddns`
-   container via its `check` subcommand, which queries a public
-   DNS-over-HTTPS resolver (Google/Cloudflare); it is therefore immune to the
-   box's local resolver cache and needs no bind-utils/dnsutils installed on
-   the box. On mismatch it fails loudly (`exit 1`).
+5. Verifies — retrying ~24 times with 5s sleeps, up to a few minutes
+   worst-case, failing loudly on mismatch — that `strim.example.com` resolves
+   to the box's public IP. Each check runs **inside** the `strim-ddns`
+   container via its `check` subcommand: a direct authoritative query to the
+   domain's nameservers, via the container's c-ares DNS client — it discovers
+   the NS via the resolver, then queries the authoritative NS directly for
+   the A record; there is no per-query timeout env (the DNS client has its
+   own internal timeout). Being direct to the authoritative nameservers, the
+   check is ground truth, immune to the box's local resolver cache, and needs
+   no bind-utils/dnsutils installed on the box. On mismatch it fails loudly
+   (`exit 1`).
 
 Subsequent timer runs keep `ip=` omitted — the `strim-ddns` client then lets
 Namecheap use the requester IP (the instance's auto-assigned public IP):
@@ -98,13 +101,17 @@ host strim.example.com          # -> should return the box's public IP
 
 That is an operator-side check only — `deploy.sh`'s own verification runs
 **inside** the `strim-ddns` container via its `check` subcommand, which
-queries a public DNS-over-HTTPS resolver (Google/Cloudflare). Being
-in-container and over HTTPS, it is authoritative and immune to the box's
-local resolver cache — the box needs no bind-utils/dnsutils installed. On the
-box you can confirm the same check directly:
+queries the domain's nameservers directly (the container's c-ares DNS client
+discovers the authoritative NS via the resolver, then queries the NS
+directly for the A record). Being in-container and direct to the
+authoritative nameservers, it is ground truth and immune to the box's local
+resolver cache — the box needs no bind-utils/dnsutils installed. On the box
+you can confirm the same check directly:
 
 ```sh
 sudo ctr -n strimserver run --rm --net-host \
+  --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
+  --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
   docker.io/library/strim-ddns:latest strim-ddns check strim example.com
 ```
 

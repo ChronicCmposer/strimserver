@@ -235,12 +235,14 @@ the GPU-runtime step:
     transferred password to `/etc/strim-ddns/password` (root:root `0600`,
     transfer file scrubbed), install + enable the `strim-ddns.timer` (6h,
     `Persistent=true`), import `strim-ddns-container.tar`, run a one-shot
-    refresh passing `ip=$PUBLIC_IP`, then verify — up to ~24 retries with a
-    6s-per-query DoH timeout (`DDNS_CHECK_TIMEOUT`) and 5s between retries, up
-    to a few minutes worst-case, failing loudly on mismatch —
-    that `strim.example.com` resolves to the box's public IP. The
-    verification runs **inside** the `strim-ddns` container via its `check`
-    subcommand (DNS-over-HTTPS to Google/Cloudflare), so it is immune to the
+    refresh passing `ip=$PUBLIC_IP`, then verify — retrying ~24 times with 5s
+    sleeps, up to a few minutes worst-case, failing loudly on mismatch —
+    that `strim.example.com` resolves to the box's public IP. Each check is a
+    direct authoritative query to the domain's nameservers, run **inside** the
+    `strim-ddns` container via its `check` subcommand (the container's c-ares
+    DNS client discovers the NS via the resolver, then queries the
+    authoritative NS directly for the A record; there is no per-query timeout
+    env — the DNS client has its own internal timeout), so it is immune to the
     box's local resolver cache and needs no bind-utils/dnsutils on the box.
 11. Print the next-step commands (SSH service start, encoder configuration).
 
@@ -314,11 +316,14 @@ task attached to the GPU via CDI.
 
 ```sh
 sudo ctr -n strimserver run --rm --net-host \
+  --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
+  --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
   docker.io/library/strim-ddns:latest strim-ddns check strim example.com
 ```
 
 `deploy.sh` verified the record at deploy time the same way — in-container,
-DNS-over-HTTPS (Google/Cloudflare) — so the box needs no bind-utils/dnsutils.
+a direct authoritative query to the domain's nameservers (via the
+container's c-ares DNS client) — so the box needs no bind-utils/dnsutils.
 
 **Build-time gates on the arm64 build:**
 

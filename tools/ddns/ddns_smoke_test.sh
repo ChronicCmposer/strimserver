@@ -1,21 +1,28 @@
 #!/usr/bin/env bash
-# Smoke test for the strim-ddns binary against a local loopback HTTP server.
+# Smoke test for the strim-ddns binary against local loopback test doubles.
 #
 # The Namecheap dynamicdns endpoint answers HTTP 200 for BOTH outcomes, so
 # the body is authoritative. This test runs the binary against a tiny static
-# C HTTP test double (ddns-test-server) and exercises the body-based success
-# detection:
+# C HTTP test double (ddns-test-server, HTTP mode) and exercises the
+# body-based success detection:
 #   - classic plain-text success ("Good 1.2.3.4")
 #   - unchanged IP ("No change")
 #   - XML <interface-response> with <ErrCount>0</ErrCount>
 #   - failure bodies (plain-text "911" and XML <ErrCount>1)
 # plus a request-log assertion that the client URL-escaped and sent the
-# host/domain/password/ip query params. It also exercises the check
-# subcommand's DoH resolution against the same double's /resolve path
-# (driven by DDNS_DOH_ENDPOINT): the A-record extraction, the not-resolved
-# exit (empty / non-zero Status / non-IPv4 data), the CNAME skip, and a
-# request-log assertion of the name=...&type=A query. Runs on the host
-# (sh_test); the binaries come from runfiles:
+# host/domain/password/ip query params.
+#
+# The check subcommand's direct-authoritative resolution is driven against
+# the same double's UDP DNS mode: a stand-in recursive resolver (NS
+# discovery + NS-hostname resolution, pointed at via the test-only
+# DDNS_RESOLVER=127.0.0.1:<port> override) and a per-case authoritative
+# server (the direct A query, pointed at via the test-only
+# DDNS_AUTHORITATIVE_PORT=<port> override; production uses port 53). Each
+# case asserts the stdout contract (one IPv4 or nothing), the exit code, the
+# stderr line, and the request-log proof that the resolver saw the NS query
+# while the authoritative server saw the direct A query.
+#
+# Runs on the host (sh_test); the binaries come from runfiles:
 #   $1 = the strim-ddns binary
 #   $2 = the ddns-test-server binary
 set -euo pipefail
@@ -25,17 +32,21 @@ server="${2:?missing ddns-test-server path (arg 2)}"
 
 tmp="$(mktemp -d)"
 spid=""
+spid_r=""
+spid_a=""
 cleanup() {
-    if [ -n "$spid" ]; then
-        kill "$spid" 2>/dev/null || true
-        wait "$spid" 2>/dev/null || true
-    fi
+    for pid in "$spid" "$spid_r" "$spid_a"; do
+        if [ -n "$pid" ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
     rm -rf "$tmp"
 }
 trap cleanup EXIT
 
-# wait_for_port <portfile> <body-description> : blocks until the test server
-# printed its ephemeral port; echoes it (empty on failure).
+# wait_for_port <portfile> <desc> : blocks until a test server printed its
+# ephemeral port; echoes it (empty on failure).
 wait_for_port() {
     local portfile="$1" desc="$2" port=""
     for _ in $(seq 1 100); do
@@ -46,13 +57,25 @@ wait_for_port() {
         sleep 0.05
     done
     if [ -z "$port" ]; then
-        kill "$spid" 2>/dev/null || true
-        wait "$spid" 2>/dev/null || true
+        kill "$spid" "$spid_r" "$spid_a" 2>/dev/null || true
+        wait "$spid" "$spid_r" "$spid_a" 2>/dev/null || true
         spid=""
+        spid_r=""
+        spid_a=""
         echo "FAIL: test server did not report a port ($desc)" >&2
         return 1
     fi
     echo "$port"
+}
+
+# kill_server <pid-var> : stop one tracked test server and clear its var.
+kill_server() {
+    local -n pid_ref="$1"
+    if [ -n "$pid_ref" ]; then
+        kill "$pid_ref" 2>/dev/null || true
+        wait "$pid_ref" 2>/dev/null || true
+        pid_ref=""
+    fi
 }
 
 # run_case <response-body> <expected-rc> [<expected-query-substring>] [<subcommand>]
@@ -77,9 +100,7 @@ run_case() {
     local rc=$?
     set -e
 
-    kill "$spid" 2>/dev/null || true
-    wait "$spid" 2>/dev/null || true
-    spid=""
+    kill_server spid
 
     if [ "$want_rc" = 0 ]; then
         if [ "$rc" -ne 0 ]; then
@@ -104,112 +125,97 @@ run_case() {
     rm -f "$portfile" "$reqlog" "$pwfile" "$out"
 }
 
-# run_check_case <json-body> <expected-rc> [<expected-ip>]
-#   expected-rc: 0 (resolved; stdout must equal the expected-ip) or 1 (not
-#   resolved; stdout must be empty). Every case also asserts the client sent
-#   the DoH query name=testhost.example.com&type=A to /resolve.
-run_check_case() {
-    local body="$1" want_rc="$2" want_ip="${3:-}"
-    local portfile="$tmp/port.$$" reqlog="$tmp/reqlog.$$" out="$tmp/out.$$"
+# start_dns_pair <auth-config> : start the recursive resolver role (fixed
+# behavior) plus one authoritative role configured by auth-config; fills
+# resolver_port / auth_port.
+start_dns_pair() {
+    local auth_config="$1"
+    local pfile_r="$tmp/port_r.$$" pfile_a="$tmp/port_a.$$"
 
-    "$server" "$body" "$reqlog" > "$portfile" 2>/dev/null &
-    spid=$!
+    "$server" dns resolver fixed "$reqlog_r" > "$pfile_r" 2>/dev/null &
+    spid_r=$!
+    "$server" dns authoritative "$auth_config" "$reqlog_a" > "$pfile_a" 2>/dev/null &
+    spid_a=$!
 
-    local port=""
-    port="$(wait_for_port "$portfile" "body: $body")" || return 1
+    resolver_port="$(wait_for_port "$pfile_r" "resolver")" || return 1
+    auth_port="$(wait_for_port "$pfile_a" "authoritative: $auth_config")" || return 1
+}
+
+# run_dns_check_case <auth-config> <expected-rc> [<expected-ip>]
+#   Drives the full direct-authoritative flow: NS discovery + NS-hostname
+#   resolution against the resolver role (DDNS_RESOLVER), then the direct A
+#   query against the authoritative role (DDNS_AUTHORITATIVE_PORT).
+#   expected-rc: 0 (resolved; stdout must equal the expected-ip and stderr
+#   must carry the success line) or 1 (not resolved; stdout must be empty).
+#   Also asserts the resolver log saw the NS query for example.com and the
+#   authoritative log saw the direct A query for testhost.example.com.
+run_dns_check_case() {
+    local auth_config="$1" want_rc="$2" want_ip="${3:-}"
+    local out="$tmp/out.$$" err="$tmp/err.$$"
+    reqlog_r="$tmp/reqlog_r.$$"
+    reqlog_a="$tmp/reqlog_a.$$"
+    local resolver_port="" auth_port=""
+
+    start_dns_pair "$auth_config" || return 1
 
     set +e
-    DDNS_DOH_ENDPOINT="http://127.0.0.1:$port/resolve" "$ddns" check testhost example.com > "$out" 2>&1
+    DDNS_RESOLVER="127.0.0.1:$resolver_port" \
+    DDNS_AUTHORITATIVE_PORT="$auth_port" \
+        "$ddns" check testhost example.com > "$out" 2> "$err"
     local rc=$?
     set -e
 
-    kill "$spid" 2>/dev/null || true
-    wait "$spid" 2>/dev/null || true
-    spid=""
+    kill_server spid_r
+    kill_server spid_a
 
     if [ "$want_rc" = 0 ]; then
         if [ "$rc" -ne 0 ]; then
-            cat "$out" >&2
-            echo "FAIL: check expected rc=0, got $rc (body: $body)" >&2
+            cat "$err" >&2
+            echo "FAIL: check expected rc=0, got $rc (config: $auth_config)" >&2
             return 1
         fi
         local got="$(cat "$out")"
         if [ "$got" != "$want_ip" ]; then
-            cat "$out" >&2
-            echo "FAIL: check expected stdout '$want_ip', got '$got' (body: $body)" >&2
+            cat "$err" >&2
+            echo "FAIL: check expected stdout '$want_ip', got '$got' (config: $auth_config)" >&2
+            return 1
+        fi
+        if ! grep -qF "check testhost.example.com -> $want_ip (via ns1.example.com)" "$err"; then
+            cat "$err" >&2
+            echo "FAIL: check missing stderr success line (config: $auth_config)" >&2
             return 1
         fi
     else
         if [ "$rc" -ne 1 ]; then
-            cat "$out" >&2
-            echo "FAIL: check expected rc=1, got $rc (body: $body)" >&2
+            cat "$err" >&2
+            echo "FAIL: check expected rc=1, got $rc (config: $auth_config)" >&2
             return 1
         fi
         if [ -s "$out" ]; then
-            cat "$out" >&2
-            echo "FAIL: check expected empty stdout, got output (body: $body)" >&2
+            cat "$err" >&2
+            echo "FAIL: check expected empty stdout, got output (config: $auth_config)" >&2
+            return 1
+        fi
+        if ! grep -qE "check testhost\.example\.com not resolved" "$err"; then
+            cat "$err" >&2
+            echo "FAIL: check missing stderr not-resolved line (config: $auth_config)" >&2
             return 1
         fi
     fi
-    if ! grep -qF "name=testhost.example.com&type=A" "$reqlog"; then
-        cat "$reqlog" >&2
-        echo "FAIL: check request log missing 'name=testhost.example.com&type=A' (body: $body)" >&2
+    if ! grep -qF "DNS example.com NS" "$reqlog_r"; then
+        cat "$reqlog_r" >&2
+        echo "FAIL: resolver log missing NS query for example.com (config: $auth_config)" >&2
         return 1
     fi
-    rm -f "$portfile" "$reqlog" "$out"
+    if ! grep -qF "DNS testhost.example.com A" "$reqlog_a"; then
+        cat "$reqlog_a" >&2
+        echo "FAIL: authoritative log missing direct A query (config: $auth_config)" >&2
+        return 1
+    fi
+    rm -f "$out" "$err" "$reqlog_r" "$reqlog_a"
 }
 
-# run_check_fallback_case <json-body> <expected-ip>
-#   Exercises the Google->Cloudflare fallback path: the primary DoH endpoint
-#   (DDNS_DOH_PRIMARY_ENDPOINT) is pointed at a dead loopback port so the
-#   transport fails fast, and the fallback endpoint
-#   (DDNS_DOH_FALLBACK_ENDPOINT) is pointed at the live loopback test server.
-#   Asserts check resolves the single-A JSON from the fallback and that the
-#   fallback request carried the Cloudflare JSON Accept header.
-run_check_fallback_case() {
-    local body="$1" want_ip="$2"
-    local portfile="$tmp/port.$$" reqlog="$tmp/reqlog.$$" out="$tmp/out.$$"
-
-    "$server" "$body" "$reqlog" > "$portfile" 2>/dev/null &
-    spid=$!
-
-    local port=""
-    port="$(wait_for_port "$portfile" "body: $body")" || return 1
-
-    set +e
-    DDNS_DOH_PRIMARY_ENDPOINT="http://127.0.0.1:1/resolve" \
-    DDNS_DOH_FALLBACK_ENDPOINT="http://127.0.0.1:$port/resolve" \
-        "$ddns" check testhost example.com > "$out" 2>&1
-    local rc=$?
-    set -e
-
-    kill "$spid" 2>/dev/null || true
-    wait "$spid" 2>/dev/null || true
-    spid=""
-
-    if [ "$rc" -ne 0 ]; then
-        cat "$out" >&2
-        echo "FAIL: fallback check expected rc=0, got $rc (body: $body)" >&2
-        return 1
-    fi
-    local got="$(cat "$out")"
-    if [ "$got" != "$want_ip" ]; then
-        cat "$out" >&2
-        echo "FAIL: fallback check expected stdout '$want_ip', got '$got' (body: $body)" >&2
-        return 1
-    fi
-    if ! grep -qF "Accept: application/dns-json" "$reqlog"; then
-        cat "$reqlog" >&2
-        echo "FAIL: fallback request log missing 'Accept: application/dns-json'" >&2
-        return 1
-    fi
-    if ! grep -qF "name=testhost.example.com&type=A" "$reqlog"; then
-        cat "$reqlog" >&2
-        echo "FAIL: fallback request log missing 'name=testhost.example.com&type=A'" >&2
-        return 1
-    fi
-    rm -f "$portfile" "$reqlog" "$out"
-}
+# --- update subcommand (HTTP mode) ---
 
 # Classic plain-text success: "Good <ip>". Assert the client sent the
 # URL-escaped query (password '&' must become %26).
@@ -231,28 +237,52 @@ run_case "911 Domain Not Found" 1 ""
 # legacy path exercised above.
 run_case "Good 1.2.3.4" 0 "host=testhost" update
 
-# --- check subcommand: DoH A-record resolution via DDNS_DOH_ENDPOINT ---
+# --- check subcommand: direct authoritative resolution (UDP DNS mode) ---
 
-# Single A record resolves to 1.2.3.4.
-run_check_case '{"Status":0,"Answer":[{"type":1,"data":"1.2.3.4"}]}' 0 "1.2.3.4"
+# Single A record on the authoritative server resolves to 1.2.3.4.
+run_dns_check_case "single:1.2.3.4" 0 "1.2.3.4"
 
-# No Answer array: not resolved.
-run_check_case '{"Status":0}' 1 ""
+# CNAME then A (multi-record answer): the A record wins.
+run_dns_check_case "cname:alias.example.com,5.6.7.8" 0 "5.6.7.8"
 
-# Non-zero DNS Status: not resolved.
-run_check_case '{"Status":3}' 1 ""
+# NXDOMAIN from the authoritative server: not resolved.
+run_dns_check_case "nxdomain" 1 ""
 
-# Leading CNAME must be skipped; the A record wins.
-run_check_case '{"Status":0,"Answer":[{"type":5,"data":"cname."},{"type":1,"data":"5.6.7.8"}]}' 0 "5.6.7.8"
+# SERVFAIL from the authoritative server: not resolved.
+run_dns_check_case "servfail" 1 ""
 
-# A record with non-IPv4 data: not resolved.
-run_check_case '{"Status":0,"Answer":[{"type":1,"data":"not-an-ip"}]}' 1 ""
+# REFUSED from the authoritative server: not resolved.
+run_dns_check_case "refused" 1 ""
 
-# --- check subcommand: Google->Cloudflare fallback ---
+# NOERROR with no answers: not resolved.
+run_dns_check_case "empty" 1 ""
 
-# Primary endpoint unreachable (dead loopback port 1, ECONNREFUSED fails
-# fast) -> the client must fall through to the fallback endpoint and resolve
-# the single-A JSON there, sending the Cloudflare JSON Accept header.
-run_check_fallback_case '{"Status":0,"Answer":[{"type":1,"data":"9.9.9.9"}]}' "9.9.9.9"
+# CNAME only, no A: not resolved.
+run_dns_check_case "only-cname:alias.example.com" 1 ""
+
+# --- check subcommand: usage errors ---
+
+# Missing host/domain: usage error (exit 2), nothing on stdout (the usage
+# text goes to stderr).
+set +e
+"$ddns" check > "$tmp/usage_out.$$" 2> "$tmp/usage_err.$$"
+usage_rc=$?
+set -e
+if [ "$usage_rc" -ne 2 ]; then
+    cat "$tmp/usage_err.$$" >&2
+    echo "FAIL: check with no args expected rc=2, got $usage_rc" >&2
+    exit 1
+fi
+if [ -s "$tmp/usage_out.$$" ]; then
+    cat "$tmp/usage_err.$$" >&2
+    echo "FAIL: check with no args expected empty stdout" >&2
+    exit 1
+fi
+if ! grep -q "usage:" "$tmp/usage_err.$$"; then
+    cat "$tmp/usage_err.$$" >&2
+    echo "FAIL: check with no args expected a usage line on stderr" >&2
+    exit 1
+fi
+rm -f "$tmp/usage_out.$$" "$tmp/usage_err.$$"
 
 echo "PASS: strim-ddns smoke test"

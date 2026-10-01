@@ -1,9 +1,15 @@
-# strim-ddns: Namecheap dynamic-DNS update client.
+# strim-ddns: Namecheap dynamic-DNS update client + direct-authoritative DNS
+# check.
 #
 # A new static C binary (musl, zig toolchain) that performs the Namecheap
 # dynamic-DNS HTTPS GET with libcurl + mbedTLS (both vendored under
 # third_party/curl and third_party/mbedtls) and reports success from the
-# response body (see main.c). The binary is `manual` like the mediamtx
+# response body (see main.c). The check subcommand resolves the dynamic A
+# record DIRECTLY from the domain's authoritative NS via c-ares (vendored
+# under third_party/cares): NS discovery through the box's resolver, then an
+# A query straight to the discovered NS IP with the RD bit clear
+# (ARES_OPT_SERVERS + ARES_FLAG_NORECURSE) -- the dynamic record is never
+# trusted to a resolver. The binary is `manual` like the mediamtx
 # entrypoint/notify helpers: it builds only on explicit request, through the
 # //tools/bazel:c_controller_transition wrappers below, which inject the
 # exact --config=amd64 / --config=arm64 zig musl flags. The :strim_ddns
@@ -46,8 +52,6 @@ cc_binary(
     name = "strim_ddns_bin",
     tags = ["manual"],
     srcs = [
-        "doh.c",
-        "doh.h",
         "main.c",
     ],
     features = _MUSL_FEATURES,
@@ -60,6 +64,10 @@ cc_binary(
         "-Os",
         "-ffunction-sections",
         "-fdata-sections",
+        # The check path deliberately uses the legacy ares_query +
+        # ares_parse_a_reply API (see main.c); silence c-ares's deprecation
+        # attribute on those declarations.
+        "-DCARES_NO_DEPRECATED",
     ],
     linkopts = [
         "-static",
@@ -72,9 +80,9 @@ cc_binary(
         "-lm",
     ],
     deps = [
+        "@cares//:cares",
         "@curl//:curl",
         "@mbedtls//:mbedtls",
-        "//third_party/yyjson:yyjson",
     ],
 )
 
@@ -104,13 +112,23 @@ filegroup(
 )
 
 # =============================================================================
-# Loopback HTTP test double (smoke test only)
+# Loopback HTTP + UDP DNS test double (smoke test only)
 # =============================================================================
+# ddns-test-server serves BOTH roles: the HTTP test double for the update
+# subcommand (fixed response body) and a minimal UDP DNS server for the check
+# subcommand's direct-authoritative flow (a stand-in recursive resolver for
+# NS discovery / NS-hostname resolution and a per-case authoritative server
+# for the direct A query). The wire codec is shared with the focused
+# ares_reply_test via dns_wire.c/h.
 cc_binary(
     name = "ddns_test_server_bin",
     tags = ["manual"],
     testonly = True,
-    srcs = ["ddns_test_server.c"],
+    srcs = [
+        "ddns_test_server.c",
+        "dns_wire.c",
+        "dns_wire.h",
+    ],
     features = _MUSL_FEATURES,
     linkstatic = True,
     target_compatible_with = _TARGET_COMPAT,
@@ -158,8 +176,8 @@ filegroup(
 # The smoke test runs the binary against the loopback test double and
 # exercises the body-based success detection: "Good 1.2.3.4", "No change",
 # XML <ErrCount>0</ErrCount>, failure bodies (see ddns_smoke_test.sh), and
-# the check subcommand's DoH resolution against the same double's /resolve
-# path (driven by DDNS_DOH_ENDPOINT).
+# the check subcommand's direct-authoritative resolution against the UDP DNS
+# roles (driven by DDNS_RESOLVER + DDNS_AUTHORITATIVE_PORT).
 sh_test(
     name = "ddns_smoke_test",
     srcs = ["ddns_smoke_test.sh"],
@@ -173,28 +191,30 @@ sh_test(
     ],
 )
 
-# Focused unit test for the DoH JSON extractor: feeds the five reply shapes
-# (single A, empty, non-zero Status, CNAME-then-A, non-IPv4 data) straight
-# into doh_extract_ipv4() linked against the real vendored yyjson, so the
-# extractor is exercised without any networking (see doh_extract_test.c).
+# Focused unit test for the A-record extraction: builds the wire shapes the
+# authoritative test double serves (single A, CNAME-then-A, empty, CNAME
+# only) with the shared dns_wire codec and feeds them straight into
+# ares_parse_a_reply linked against the real vendored c-ares, so the
+# extractor is exercised without any networking (see ares_reply_test.c).
 cc_test(
-    name = "doh_extract_test",
+    name = "ares_reply_test",
     srcs = [
-        "doh.c",
-        "doh.h",
-        "doh_extract_test.c",
+        "ares_reply_test.c",
+        "dns_wire.c",
+        "dns_wire.h",
     ],
     copts = [
         "-std=gnu11",
         "-Wall",
         "-Wextra",
+        "-DCARES_NO_DEPRECATED",
     ],
     features = _MUSL_FEATURES,
     linkstatic = True,
     linkopts = ["-static"],
     target_compatible_with = _TARGET_COMPAT,
     deps = [
-        "//third_party/yyjson:yyjson",
+        "@cares//:cares",
     ],
 )
 

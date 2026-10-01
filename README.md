@@ -865,9 +865,12 @@ the one-time setup). Supply the DDNS password via
 bootstraps by the box's raw public IP because the hostname
 does not resolve until `deploy.sh` registers it. `deploy.sh`
 verifies that registration in-container via the `strim-ddns`
-container's `check` subcommand (DNS-over-HTTPS to
-Google/Cloudflare), so the check is cache-independent and the
-box needs no bind-utils/dnsutils.
+container's `check` subcommand — a direct authoritative query
+to the domain's nameservers (the container's c-ares DNS client
+discovers the NS via the resolver, then queries the NS
+directly for the A record) — so the check is authoritative
+ground truth, cache-independent, and the box needs no
+bind-utils/dnsutils.
 
 After the instance is reachable over SSH, run the setup
 script from the local machine:
