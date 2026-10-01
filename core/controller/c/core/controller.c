@@ -1,40 +1,15 @@
 /*
  * controller.c — the strimserver controller state machine (C port).
  *
- * Wave 1 core lane. Implements the controller.h contract 1:1 from the Go
- * oracle (core/controller/controller.go + names.go):
+ * Implements the controller.h contract 1:1 from the Go oracle
+ * (core/controller/controller.go + names.go); see controller.h for the wire
+ * strings, lifecycle, reconcile, and teardown semantics.
  *
- *   - The controller is SINGLE-THREADED: all state mutation happens on the
- *     action-queue thread (Go: `for act := range c.actions { act(c) }`).
- *     Every submit function enqueues an action and blocks until the queue
- *     thread has run it (Go's `submit`, controller.go:182-186);
- *     request_reconcile enqueues WITHOUT blocking and coalesces (at most one
- *     pending reconcile pass, latest-wins — a safe optimization: reconciles
- *     are idempotent).
- *
- *   - Reconcile semantics (the exactly-once contract): a stage whose
- *     Desired != Actual is converged by firing its op for the desired state.
- *     The op is fired only when the stage is NOT in flight, or when the
- *     previous op exceeded inflight_timeout_ms (a timed-out retry). The op
- *     runs on the worker pool with the inflight timeout; a failed op clears
- *     InFlight through the queue so the next reconcile retries
- *     (controller.go:287-314). The timed-out retry supersedes the previous
- *     op through a per-stage generation token (strim_stage_op_cancel): the
- *     old op aborts at its next safe point, and its RPCs are bounded by the
- *     remaining deadline, so two ops for one stage never run concurrently
- *     (the Go oracle cancels the old op's context at the same point).
- *
- *   - Prerequisite gating: a route's prerequisite is checked BEFORE the
- *     desired state is committed (applyDesiredStageTarget,
- *     controller.go:269-285); a failing prerequisite leaves the stage's
- *     desired state untouched and the submit returns STRIM_CTRL_ERR_PREREQ.
- *
- *   - Teardown (controller.go:331-348) runs as a queued action and
- *     synchronously stops every stage whose actual state is Running, then
- *     marks desired/actual == Stopped and notifies.
- *
- * Wire strings are fixed (controller.h STRIM_*_STR); the HTTP/JSON lanes must
- * go through the from_string/to_string helpers and never invent spellings.
+ * C-port-specific deviations from the Go oracle:
+ *   - request_reconcile coalesces: at most one reconcile pass is queued,
+ *     latest-wins (safe: reconciles are idempotent).
+ *   - Teardown runs as a queued action (ACTION_TEARDOWN) so it serializes
+ *     with every other handler on the single queue thread.
  *
  * License: project code (see LICENSE). No GPL.
  */
@@ -51,15 +26,10 @@
 #include <time.h>
 
 /* Internal bounds (not part of the public contract; fail loud if exceeded).
- * The HTTP lane caps ws clients at STRIM_HTTP_MAX_WS_CLIENTS (4), well below
- * the listener cap. The worker pool is sized for the four stages: the Go
- * oracle launches one goroutine per op, and at most one op per stage can be
- * in flight. A timed-out retry supersedes the previous op through a
- * per-stage generation token (strim_stage_op_cancel), and every op bounds
- * its RPCs by the remaining deadline, so a hung op cannot outlive the
- * inflight timeout and two ops never run destructively on the same stage. */
+ * The worker pool is sized one worker per stage: at most one op per stage can
+ * be in flight, so one worker per stage suffices and the pool stays small. */
 #define STRIM_CTRL_MAX_LISTENERS 16
-#define STRIM_CTRL_WORKERS       4
+#define STRIM_CTRL_WORKERS       STRIM_STAGE_NAME_COUNT
 
 /* -------------------------------------------------------------------------
  * Action queue — the serialized single-writer core
@@ -89,6 +59,8 @@ typedef struct strim_action {
     strim_controller_listener listener;     /* ACTION_ADD/REMOVE_LISTENER  */
     void                    *listener_userdata;
     strim_stage_name         clear_stage;   /* ACTION_CLEAR_INFLIGHT       */
+    uint64_t clear_generation;  /* fire generation stamped at enqueue
+                                 * (ACTION_CLEAR_INFLIGHT)               */
 
     /* blocking-reply handshake (all ACTION_* submits) */
     int  reply_result;
@@ -97,7 +69,7 @@ typedef struct strim_action {
     /* non-blocking actions (reconcile, clear-inflight) are freed by the
      * queue thread after processing; blocking submits own their action
      * (often stack-allocated) and free it after reply_done. */
-    bool owns_self;
+    bool self_allocated;
 } strim_action;
 
 typedef struct strim_waitgroup {
@@ -171,6 +143,17 @@ struct strim_controller {
     bool            q_closed;
     bool            reconcile_queued;
 
+    /* Shutdown handshake. Set by begin_shutdown() UNDER q_lock — before
+     * WaitForOps — so a reconcile that races shutdown either sees the flag in
+     * its locked fire section and suppresses the fire, or acquired the lock
+     * first and already completed its wg_add; WaitForOps can then only return
+     * after every already-submitted op has finished. close() also sets it
+     * (idempotent belt-and-suspenders for callers that skip begin_shutdown).
+     * Enforced order: begin_shutdown (suppress fires) -> WaitForOps ->
+     * Teardown -> Close (Run returns) -> Destroy. Atomic: written under
+     * q_lock, read by reconcile on the queue thread. */
+    _Atomic bool shutting_down;
+
     strim_waitgroup  ops_wg;
     strim_workerpool pool;
 };
@@ -180,17 +163,59 @@ struct strim_controller {
  * ------------------------------------------------------------------------- */
 
 static bool valid_path_status(strim_path_status s) {
-    return s >= STRIM_PATH_UNKNOWN && s <= STRIM_PATH_NOT_READY;
+    return (unsigned)s < (unsigned)STRIM_PATH_STATUS_COUNT;
 }
 
 static bool valid_stage_state(strim_stage_state s) {
-    return s == STRIM_STAGE_RUNNING || s == STRIM_STAGE_STOPPED;
+    /* A stored stage state is only ever STOPPED or RUNNING; NO_TARGET is a
+     * reconcile sentinel, never a stored desired/actual state. */
+    return (unsigned)s <= (unsigned)STRIM_STAGE_RUNNING;
 }
 
 static int64_t default_now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* The op for a target state; target is always RUNNING or STOPPED after
+ * validation (valid_stage_state rejects NO_TARGET). */
+static strim_stage_op stage_op_for(const strim_stage *stage,
+                                   strim_stage_state target) {
+    return (target == STRIM_STAGE_RUNNING) ? stage->start_op : stage->stop_op;
+}
+
+/* Route keys are unique at construction; the first match is the only match. */
+static bool route_keys_equal(const strim_route *a, const strim_route *b,
+                             int kind_expected) {
+    if (kind_expected == STRIM_ROUTE_PATH_EVENT) {
+        return a->path == b->path && a->path_status == b->path_status;
+    }
+    return a->component == b->component && a->action == b->action;
+}
+
+static const strim_route *find_path_event_route(const strim_controller *c,
+                                                strim_path_name path,
+                                                strim_path_status status) {
+    for (size_t i = 0; i < c->n_path_routes; i++) {
+        const strim_route *r = &c->path_routes[i];
+        if (r->path == path && r->path_status == status) {
+            return r; /* first match is the only match (routes are unique) */
+        }
+    }
+    return NULL;
+}
+
+static const strim_route *find_control_route(const strim_controller *c,
+                                             strim_control_component component,
+                                             strim_control_action action) {
+    for (size_t i = 0; i < c->n_control_routes; i++) {
+        const strim_route *r = &c->control_routes[i];
+        if (r->component == component && r->action == action) {
+            return r; /* first match is the only match (routes are unique) */
+        }
+    }
+    return NULL;
 }
 
 /* -------------------------------------------------------------------------
@@ -207,7 +232,7 @@ struct strim_stage_op_cancel {
 };
 
 int strim_stage_op_superseded(const strim_stage_op_cancel *cancel) {
-    if (cancel == NULL || cancel->current_generation == NULL) {
+    if (cancel == NULL) {
         return 0; /* no cancellation (Teardown); never superseded */
     }
     /* The stage generation is _Atomic: the queue thread bumps it while the
@@ -252,6 +277,47 @@ static void wg_wait(strim_waitgroup *wg) {
         pthread_cond_wait(&wg->cond, &wg->lock);
     }
     pthread_mutex_unlock(&wg->lock);
+}
+
+/* -------------------------------------------------------------------------
+ * Queue helpers
+ * ------------------------------------------------------------------------- */
+
+/* Append act to the queue and wake the queue thread. The caller holds
+ * q_lock. */
+static void enqueue_locked(strim_controller *c, strim_action *act) {
+    act->next = NULL;
+    if (c->q_tail == NULL) {
+        c->q_head = c->q_tail = act;
+    } else {
+        c->q_tail->next = act;
+        c->q_tail = act;
+    }
+    pthread_cond_signal(&c->q_cond);
+}
+
+/* Enqueue + wait for the queue thread to run act (Go `submit`). Returns the
+ * handler's result, or STRIM_CTRL_ERR_CLOSED when the queue is closed. The
+ * caller owns act (often stack-allocated); it must stay alive until
+ * reply_done. Must not be called from the queue thread itself (Go would
+ * deadlock the same way). */
+static int queue_submit(strim_controller *c, strim_action *act) {
+    act->reply_result = 0;
+    act->reply_done = false;
+    act->self_allocated = false;
+
+    pthread_mutex_lock(&c->q_lock);
+    if (c->q_closed) {
+        pthread_mutex_unlock(&c->q_lock);
+        return STRIM_CTRL_ERR_CLOSED;
+    }
+    enqueue_locked(c, act);
+    while (!act->reply_done) {
+        pthread_cond_wait(&c->q_cond, &c->q_lock);
+    }
+    int result = act->reply_result;
+    pthread_mutex_unlock(&c->q_lock);
+    return result;
 }
 
 /* -------------------------------------------------------------------------
@@ -315,17 +381,29 @@ static int workerpool_init(strim_workerpool *pool) {
     return 0;
 }
 
-static void workerpool_submit(strim_workerpool *pool, void (*fn)(void *arg),
-                              void *arg) {
+/* Enqueue one job. Returns 0 on success. On failure the caller still owns arg
+ * (and must free/undo it); on success the worker thread frees it after fn
+ * returns. Soft failure only — never aborts the process (the reconcile fire
+ * path handles OOM and pool shutdown by retrying on the next reconcile). */
+static int workerpool_submit(strim_workerpool *pool, void (*fn)(void *arg),
+                             void *arg) {
     strim_worker_job *job = malloc(sizeof *job);
     if (job == NULL) {
-        fprintf(stderr, "strim_controller: worker pool allocation failed\n");
-        abort();
+        return STRIM_CTRL_ERR_NOMEM;
     }
     job->fn = fn;
     job->arg = arg;
     job->next = NULL;
     pthread_mutex_lock(&pool->lock);
+    if (pool->shutting_down) {
+        /* Defense-in-depth: reconcile suppresses new fires before close(), so
+         * a submit after shutdown is a programming error. Refuse the job
+         * (the caller undoes its wg/stage accounting) rather than leak it and
+         * hang WaitForOps. */
+        pthread_mutex_unlock(&pool->lock);
+        free(job);
+        return STRIM_CTRL_ERR_CLOSED;
+    }
     if (pool->tail == NULL) {
         pool->head = pool->tail = job;
     } else {
@@ -334,6 +412,7 @@ static void workerpool_submit(strim_workerpool *pool, void (*fn)(void *arg),
     }
     pthread_cond_signal(&pool->cond);
     pthread_mutex_unlock(&pool->lock);
+    return 0;
 }
 
 /* One fired stage op. The cancel handle is embedded (per-fire, valid for the
@@ -358,28 +437,25 @@ static void run_stage_op(void *arg) {
          * next reconcile retries. The clear runs through the action queue
          * (single-writer invariant); it is dropped if the queue is already
          * closed (shutdown in progress — Teardown owns the stage now).
-         * A SUPERSEDED op must NOT clear: a newer retry owns the stage and
-         * its InFlight marker, and clearing it would let reconcile fire a
-         * third op concurrently. */
+         * The clear is stamped with THIS fire's generation and only wipes
+         * InFlight while it is still the live generation: a SUPERSEDED op's
+         * clear must NOT fire — a newer retry owns the stage and its InFlight
+         * marker, and a stale clear would let reconcile fire a third op
+         * concurrently. */
         strim_action *act = malloc(sizeof *act);
         if (act != NULL) {
-            memset(act, 0, sizeof *act);
-            act->kind = ACTION_CLEAR_INFLIGHT;
-            act->clear_stage = job->stage;
-            act->owns_self = true;
+            *act = (strim_action){
+                .kind = ACTION_CLEAR_INFLIGHT,
+                .clear_stage = job->stage,
+                .clear_generation = job->cancel.generation,
+                .self_allocated = true,
+            };
             pthread_mutex_lock(&c->q_lock);
             if (c->q_closed) {
                 pthread_mutex_unlock(&c->q_lock);
                 free(act);
             } else {
-                act->next = NULL;
-                if (c->q_tail == NULL) {
-                    c->q_head = c->q_tail = act;
-                } else {
-                    c->q_tail->next = act;
-                    c->q_tail = act;
-                }
-                pthread_cond_signal(&c->q_cond);
+                enqueue_locked(c, act);
                 pthread_mutex_unlock(&c->q_lock);
             }
         }
@@ -390,197 +466,146 @@ static void run_stage_op(void *arg) {
 }
 
 /* -------------------------------------------------------------------------
- * Queue helpers
- * ------------------------------------------------------------------------- */
-
-/* Enqueue + wait for the queue thread to run act (Go `submit`). Returns the
- * handler's result, or STRIM_CTRL_ERR_CLOSED when the queue is closed. The
- * caller owns act (often stack-allocated); it must stay alive until
- * reply_done. Must not be called from the queue thread itself (Go would
- * deadlock the same way). */
-static int queue_submit(strim_controller *c, strim_action *act) {
-    act->reply_result = 0;
-    act->reply_done = false;
-    act->owns_self = false;
-
-    pthread_mutex_lock(&c->q_lock);
-    if (c->q_closed) {
-        pthread_mutex_unlock(&c->q_lock);
-        return STRIM_CTRL_ERR_CLOSED;
-    }
-    act->next = NULL;
-    if (c->q_tail == NULL) {
-        c->q_head = c->q_tail = act;
-    } else {
-        c->q_tail->next = act;
-        c->q_tail = act;
-    }
-    pthread_cond_signal(&c->q_cond);
-    while (!act->reply_done) {
-        pthread_cond_wait(&c->q_cond, &c->q_lock);
-    }
-    int result = act->reply_result;
-    pthread_mutex_unlock(&c->q_lock);
-    return result;
-}
-
-/* -------------------------------------------------------------------------
  * Enum <-> wire-string helpers (controller.h contract; exact JSON spellings)
  * ------------------------------------------------------------------------- */
 
-int strim_path_status_from_string(const char *s, strim_path_status *out) {
-    if (s == NULL || out == NULL) {
+static const char *const k_path_status_strs[STRIM_PATH_STATUS_COUNT] = {
+    [STRIM_PATH_UNKNOWN]   = STRIM_PATH_UNKNOWN_STR,
+    [STRIM_PATH_READY]     = STRIM_PATH_READY_STR,
+    [STRIM_PATH_NOT_READY] = STRIM_PATH_NOT_READY_STR,
+};
+
+static const char *const k_stage_state_strs[STRIM_STAGE_STATE_COUNT] = {
+    [STRIM_STAGE_STOPPED]   = STRIM_STAGE_STOPPED_STR,
+    [STRIM_STAGE_RUNNING]   = STRIM_STAGE_RUNNING_STR,
+    [STRIM_STAGE_NO_TARGET] = "", /* Go NoTarget; never on the wire */
+};
+
+static const char *const k_path_name_strs[STRIM_PATH_NAME_COUNT] = {
+    [STRIM_PATH_INGRESS0]   = STRIM_PATH_INGRESS0_STR,
+    [STRIM_PATH_NORMALIZED] = STRIM_PATH_NORMALIZED_STR,
+};
+
+static const char *const k_stage_name_strs[STRIM_STAGE_NAME_COUNT] = {
+    [STRIM_STAGE_MEDIA_MTX]           = STRIM_STAGE_MEDIA_MTX_STR,
+    [STRIM_STAGE_NORMALIZE]           = STRIM_STAGE_NORMALIZE_STR,
+    [STRIM_STAGE_SCALE_AND_EGRESS]    = STRIM_STAGE_SCALE_AND_EGRESS_STR,
+    [STRIM_STAGE_SINGLE_STAGE_EGRESS] = STRIM_STAGE_SINGLE_STAGE_EGRESS_STR,
+};
+
+static const char *const k_control_component_strs[STRIM_COMPONENT_COUNT] = {
+    [STRIM_COMPONENT_EGRESS] = STRIM_COMPONENT_EGRESS_STR,
+};
+
+static const char *const k_control_action_strs[STRIM_ACTION_COUNT] = {
+    [STRIM_ACTION_START] = STRIM_ACTION_START_STR,
+    [STRIM_ACTION_STOP]  = STRIM_ACTION_STOP_STR,
+};
+
+/* Generic lookup over the tables above. Returns the enum index, or -1 for an
+ * unknown (or NULL) string. */
+static int enum_from_string(const char *s, size_t count,
+                            const char *const *strs) {
+    if (s == NULL || strs == NULL) {
         return -1;
     }
-    if (strcmp(s, STRIM_PATH_UNKNOWN_STR) == 0) {
-        *out = STRIM_PATH_UNKNOWN;
-        return 0;
-    }
-    if (strcmp(s, STRIM_PATH_READY_STR) == 0) {
-        *out = STRIM_PATH_READY;
-        return 0;
-    }
-    if (strcmp(s, STRIM_PATH_NOT_READY_STR) == 0) {
-        *out = STRIM_PATH_NOT_READY;
-        return 0;
+    for (size_t i = 0; i < count; i++) {
+        if (strs[i] != NULL && strcmp(s, strs[i]) == 0) {
+            return (int)i;
+        }
     }
     return -1;
+}
+
+/* Generic string lookup. Returns NULL for an out-of-range value. */
+static const char *enum_to_string(int v, size_t count,
+                                  const char *const *strs) {
+    if ((unsigned)v >= (unsigned)count) {
+        return NULL;
+    }
+    return strs[v];
+}
+
+int strim_path_status_from_string(const char *s, strim_path_status *out) {
+    int v = enum_from_string(s, STRIM_PATH_STATUS_COUNT, k_path_status_strs);
+    if (v < 0 || out == NULL) {
+        return -1;
+    }
+    *out = (strim_path_status)v;
+    return 0;
 }
 
 const char *strim_path_status_to_string(strim_path_status v) {
-    switch (v) {
-        case STRIM_PATH_UNKNOWN:   return STRIM_PATH_UNKNOWN_STR;
-        case STRIM_PATH_READY:     return STRIM_PATH_READY_STR;
-        case STRIM_PATH_NOT_READY: return STRIM_PATH_NOT_READY_STR;
-        default:                   return NULL;
-    }
+    return enum_to_string((int)v, STRIM_PATH_STATUS_COUNT, k_path_status_strs);
 }
 
 int strim_stage_state_from_string(const char *s, strim_stage_state *out) {
-    if (s == NULL || out == NULL) {
+    int v = enum_from_string(s, STRIM_STAGE_STATE_COUNT, k_stage_state_strs);
+    if (v < 0 || out == NULL) {
         return -1;
     }
-    if (strcmp(s, STRIM_STAGE_STOPPED_STR) == 0) {
-        *out = STRIM_STAGE_STOPPED;
-        return 0;
-    }
-    if (strcmp(s, STRIM_STAGE_RUNNING_STR) == 0) {
-        *out = STRIM_STAGE_RUNNING;
-        return 0;
-    }
-    if (s[0] == '\0') {
-        /* NoTarget ("") is a valid enum value but never sent on the wire;
-         * accepting it keeps to_string/from_string a clean round trip. */
-        *out = STRIM_STAGE_NO_TARGET;
-        return 0;
-    }
-    return -1;
+    *out = (strim_stage_state)v;
+    return 0;
 }
 
 const char *strim_stage_state_to_string(strim_stage_state v) {
-    switch (v) {
-        case STRIM_STAGE_STOPPED:  return STRIM_STAGE_STOPPED_STR;
-        case STRIM_STAGE_RUNNING:  return STRIM_STAGE_RUNNING_STR;
-        case STRIM_STAGE_NO_TARGET: return ""; /* Go NoTarget; never on wire */
-        default:                   return NULL;
-    }
+    return enum_to_string((int)v, STRIM_STAGE_STATE_COUNT, k_stage_state_strs);
 }
 
 int strim_path_name_from_string(const char *s, strim_path_name *out) {
-    if (s == NULL || out == NULL) {
+    int v = enum_from_string(s, STRIM_PATH_NAME_COUNT, k_path_name_strs);
+    if (v < 0 || out == NULL) {
         return -1;
     }
-    if (strcmp(s, STRIM_PATH_INGRESS0_STR) == 0) {
-        *out = STRIM_PATH_INGRESS0;
-        return 0;
-    }
-    if (strcmp(s, STRIM_PATH_NORMALIZED_STR) == 0) {
-        *out = STRIM_PATH_NORMALIZED;
-        return 0;
-    }
-    return -1;
+    *out = (strim_path_name)v;
+    return 0;
 }
 
 const char *strim_path_name_to_string(strim_path_name v) {
-    switch (v) {
-        case STRIM_PATH_INGRESS0:   return STRIM_PATH_INGRESS0_STR;
-        case STRIM_PATH_NORMALIZED: return STRIM_PATH_NORMALIZED_STR;
-        default:                    return NULL;
-    }
+    return enum_to_string((int)v, STRIM_PATH_NAME_COUNT, k_path_name_strs);
 }
 
 int strim_stage_name_from_string(const char *s, strim_stage_name *out) {
-    if (s == NULL || out == NULL) {
+    int v = enum_from_string(s, STRIM_STAGE_NAME_COUNT, k_stage_name_strs);
+    if (v < 0 || out == NULL) {
         return -1;
     }
-    if (strcmp(s, STRIM_STAGE_MEDIA_MTX_STR) == 0) {
-        *out = STRIM_STAGE_MEDIA_MTX;
-        return 0;
-    }
-    if (strcmp(s, STRIM_STAGE_NORMALIZE_STR) == 0) {
-        *out = STRIM_STAGE_NORMALIZE;
-        return 0;
-    }
-    if (strcmp(s, STRIM_STAGE_SCALE_AND_EGRESS_STR) == 0) {
-        *out = STRIM_STAGE_SCALE_AND_EGRESS;
-        return 0;
-    }
-    if (strcmp(s, STRIM_STAGE_SINGLE_STAGE_EGRESS_STR) == 0) {
-        *out = STRIM_STAGE_SINGLE_STAGE_EGRESS;
-        return 0;
-    }
-    return -1;
+    *out = (strim_stage_name)v;
+    return 0;
 }
 
 const char *strim_stage_name_to_string(strim_stage_name v) {
-    switch (v) {
-        case STRIM_STAGE_MEDIA_MTX:           return STRIM_STAGE_MEDIA_MTX_STR;
-        case STRIM_STAGE_NORMALIZE:           return STRIM_STAGE_NORMALIZE_STR;
-        case STRIM_STAGE_SCALE_AND_EGRESS:    return STRIM_STAGE_SCALE_AND_EGRESS_STR;
-        case STRIM_STAGE_SINGLE_STAGE_EGRESS: return STRIM_STAGE_SINGLE_STAGE_EGRESS_STR;
-        default:                              return NULL;
-    }
+    return enum_to_string((int)v, STRIM_STAGE_NAME_COUNT, k_stage_name_strs);
 }
 
-int strim_control_component_from_string(const char *s, strim_control_component *out) {
-    if (s == NULL || out == NULL) {
+int strim_control_component_from_string(const char *s,
+                                        strim_control_component *out) {
+    int v = enum_from_string(s, STRIM_COMPONENT_COUNT,
+                             k_control_component_strs);
+    if (v < 0 || out == NULL) {
         return -1;
     }
-    if (strcmp(s, STRIM_COMPONENT_EGRESS_STR) == 0) {
-        *out = STRIM_COMPONENT_EGRESS;
-        return 0;
-    }
-    return -1;
+    *out = (strim_control_component)v;
+    return 0;
 }
 
 const char *strim_control_component_to_string(strim_control_component v) {
-    switch (v) {
-        case STRIM_COMPONENT_EGRESS: return STRIM_COMPONENT_EGRESS_STR;
-        default:                     return NULL;
-    }
+    return enum_to_string((int)v, STRIM_COMPONENT_COUNT,
+                          k_control_component_strs);
 }
 
-int strim_control_action_from_string(const char *s, strim_control_action *out) {
-    if (s == NULL || out == NULL) {
+int strim_control_action_from_string(const char *s,
+                                     strim_control_action *out) {
+    int v = enum_from_string(s, STRIM_ACTION_COUNT, k_control_action_strs);
+    if (v < 0 || out == NULL) {
         return -1;
     }
-    if (strcmp(s, STRIM_ACTION_START_STR) == 0) {
-        *out = STRIM_ACTION_START;
-        return 0;
-    }
-    if (strcmp(s, STRIM_ACTION_STOP_STR) == 0) {
-        *out = STRIM_ACTION_STOP;
-        return 0;
-    }
-    return -1;
+    *out = (strim_control_action)v;
+    return 0;
 }
 
 const char *strim_control_action_to_string(strim_control_action v) {
-    switch (v) {
-        case STRIM_ACTION_START: return STRIM_ACTION_START_STR;
-        case STRIM_ACTION_STOP:  return STRIM_ACTION_STOP_STR;
-        default:                 return NULL;
-    }
+    return enum_to_string((int)v, STRIM_ACTION_COUNT, k_control_action_strs);
 }
 
 /* -------------------------------------------------------------------------
@@ -612,52 +637,50 @@ static int validate_and_copy_routes(strim_controller *c,
         strim_route *r = &copy[i];
 
         if (r->kind != kind_expected) {
-            goto badarg;
+            free(copy);
+            return STRIM_CTRL_ERR_BADARG;
         }
         if (kind_expected == STRIM_ROUTE_PATH_EVENT) {
-            if (r->path < 0 || r->path >= STRIM_PATH_NAME_COUNT) {
-                goto badarg; /* Go: route references unknown path */
+            if ((unsigned)r->path >= (unsigned)STRIM_PATH_NAME_COUNT) {
+                free(copy);
+                return STRIM_CTRL_ERR_BADARG; /* Go: unknown path */
             }
             if (!valid_path_status(r->path_status)) {
-                goto badarg;
+                free(copy);
+                return STRIM_CTRL_ERR_BADARG;
             }
         } else {
-            if (r->component < 0 || r->component >= STRIM_COMPONENT_COUNT) {
-                goto badarg;
+            if ((unsigned)r->component >= (unsigned)STRIM_COMPONENT_COUNT) {
+                free(copy);
+                return STRIM_CTRL_ERR_BADARG;
             }
-            if (r->action < 0 || r->action >= STRIM_ACTION_COUNT) {
-                goto badarg;
+            if ((unsigned)r->action >= (unsigned)STRIM_ACTION_COUNT) {
+                free(copy);
+                return STRIM_CTRL_ERR_BADARG;
             }
         }
 
-        if (r->target_stage < 0 || r->target_stage >= STRIM_STAGE_NAME_COUNT) {
-            goto badarg; /* Go: route targets unknown stage */
+        if ((unsigned)r->target_stage >= (unsigned)STRIM_STAGE_NAME_COUNT) {
+            free(copy);
+            return STRIM_CTRL_ERR_BADARG; /* Go: route targets unknown stage */
         }
         if (!valid_stage_state(r->target_state)) {
-            goto badarg;
+            free(copy);
+            return STRIM_CTRL_ERR_BADARG;
         }
-        strim_stage_op op = (r->target_state == STRIM_STAGE_RUNNING)
-                                ? c->stages[r->target_stage].start_op
-                                : c->stages[r->target_stage].stop_op;
+        strim_stage_op op = stage_op_for(&c->stages[r->target_stage],
+                                         r->target_state);
         if (op == NULL) {
-            goto badarg; /* Go: no op for stage/state */
+            free(copy);
+            return STRIM_CTRL_ERR_BADARG; /* Go: no op for stage/state */
         }
 
         for (size_t j = 0; j < i; j++) {
-            bool same = (kind_expected == STRIM_ROUTE_PATH_EVENT)
-                            ? (copy[j].path == r->path &&
-                               copy[j].path_status == r->path_status)
-                            : (copy[j].component == r->component &&
-                               copy[j].action == r->action);
-            if (same) {
-                goto badarg; /* duplicate route key */
+            if (route_keys_equal(&copy[j], r, kind_expected)) {
+                free(copy);
+                return STRIM_CTRL_ERR_BADARG; /* duplicate route key */
             }
         }
-        continue;
-
-badarg:
-        free(copy);
-        return STRIM_CTRL_ERR_BADARG;
     }
 
     *out = copy;
@@ -690,16 +713,23 @@ int strim_controller_new(const strim_controller_config *cfg,
     c->actions_buffer_size = cfg->actions_buffer_size;
     memcpy(c->paths, cfg->initial_paths, sizeof c->paths);
 
+    pthread_mutex_init(&c->q_lock, NULL);
+    pthread_cond_init(&c->q_cond, NULL);
+    pthread_mutex_init(&c->ops_wg.lock, NULL);
+    pthread_cond_init(&c->ops_wg.cond, NULL);
+    atomic_init(&c->shutting_down, false);
+
+    int rc = 0;
     for (size_t i = 0; i < STRIM_STAGE_NAME_COUNT; i++) {
         const strim_stage_config *sc = &cfg->stages[i];
         if (sc->name != (strim_stage_name)i) {
-            free(c);
-            return STRIM_CTRL_ERR_BADARG; /* stages[] is indexed by enum */
+            rc = STRIM_CTRL_ERR_BADARG; /* stages[] is indexed by enum */
+            goto cleanup;
         }
         if (!valid_stage_state(sc->status.desired) ||
             !valid_stage_state(sc->status.actual)) {
-            free(c);
-            return STRIM_CTRL_ERR_BADARG; /* Go: seeded invalid state */
+            rc = STRIM_CTRL_ERR_BADARG; /* Go: seeded invalid state */
+            goto cleanup;
         }
         c->stages[i].name = sc->name;
         c->stages[i].status = sc->status;
@@ -707,49 +737,40 @@ int strim_controller_new(const strim_controller_config *cfg,
         c->stages[i].stop_op = sc->stop_op;
         c->stages[i].op_ctx = sc->op_ctx;
         c->stages[i].in_flight_since = 0; /* never seeded InFlight */
+        atomic_init(&c->stages[i].op_generation, 0);
     }
 
-    int rc = validate_and_copy_routes(c, cfg->path_routes,
-                                      cfg->n_path_routes,
-                                      STRIM_ROUTE_PATH_EVENT,
-                                      &c->path_routes);
+    rc = validate_and_copy_routes(c, cfg->path_routes, cfg->n_path_routes,
+                                  STRIM_ROUTE_PATH_EVENT, &c->path_routes);
     if (rc != 0) {
-        free(c);
-        return rc;
+        goto cleanup;
     }
     c->n_path_routes = cfg->n_path_routes;
 
-    rc = validate_and_copy_routes(c, cfg->control_routes,
-                                  cfg->n_control_routes,
-                                  STRIM_ROUTE_CONTROL,
-                                  &c->control_routes);
+    rc = validate_and_copy_routes(c, cfg->control_routes, cfg->n_control_routes,
+                                  STRIM_ROUTE_CONTROL, &c->control_routes);
     if (rc != 0) {
-        free(c->path_routes);
-        free(c);
-        return rc;
+        goto cleanup;
     }
     c->n_control_routes = cfg->n_control_routes;
 
-    pthread_mutex_init(&c->q_lock, NULL);
-    pthread_cond_init(&c->q_cond, NULL);
-    pthread_mutex_init(&c->ops_wg.lock, NULL);
-    pthread_cond_init(&c->ops_wg.cond, NULL);
-    c->ops_wg.count = 0;
-
     rc = workerpool_init(&c->pool);
     if (rc != 0) {
-        pthread_mutex_destroy(&c->q_lock);
-        pthread_cond_destroy(&c->q_cond);
-        pthread_mutex_destroy(&c->ops_wg.lock);
-        pthread_cond_destroy(&c->ops_wg.cond);
-        free(c->path_routes);
-        free(c->control_routes);
-        free(c);
-        return rc;
+        goto cleanup; /* workerpool_init self-cleans its own pool on failure */
     }
 
     *out = c;
     return 0;
+
+cleanup:
+    pthread_mutex_destroy(&c->q_lock);
+    pthread_cond_destroy(&c->q_cond);
+    pthread_mutex_destroy(&c->ops_wg.lock);
+    pthread_cond_destroy(&c->ops_wg.cond);
+    free(c->path_routes);
+    free(c->control_routes);
+    free(c);
+    return rc;
 }
 
 /* -------------------------------------------------------------------------
@@ -787,10 +808,32 @@ void strim_controller_run(strim_controller *c) {
     }
 }
 
+void strim_controller_begin_shutdown(strim_controller *c) {
+    if (c == NULL) {
+        return;
+    }
+    /* Shutdown step one: suppress new reconcile fires BEFORE WaitForOps runs.
+     * The store happens UNDER q_lock so it serializes against a reconcile
+     * fire in its q_lock critical section: either the fire's locked re-check
+     * ran first and completed its wg_add (the op is then counted by
+     * WaitForOps), or it runs after and skips the fire. Does NOT touch
+     * q_closed — Teardown still needs the queue open. Idempotent. */
+    pthread_mutex_lock(&c->q_lock);
+    atomic_store(&c->shutting_down, true);
+    pthread_mutex_unlock(&c->q_lock);
+}
+
 void strim_controller_close(strim_controller *c) {
     if (c == NULL) {
         return;
     }
+    /* Close the action queue; Run returns. New-fire suppression is the job of
+     * begin_shutdown (step one, before WaitForOps); setting shutting_down
+     * here again is idempotent belt-and-suspenders for callers that skip
+     * begin_shutdown (e.g. the tests / the emergency thread_fail path).
+     * Enforced sequence: begin_shutdown -> WaitForOps -> Teardown -> Close
+     * (Run returns) -> Destroy. */
+    atomic_store(&c->shutting_down, true);
     pthread_mutex_lock(&c->q_lock);
     c->q_closed = true;
     pthread_cond_broadcast(&c->q_cond);
@@ -873,7 +916,7 @@ int strim_controller_handle_path_event(strim_controller *c,
     if (c == NULL || e == NULL) {
         return STRIM_CTRL_ERR_BADARG;
     }
-    if (e->path < 0 || e->path >= STRIM_PATH_NAME_COUNT) {
+    if ((unsigned)e->path >= (unsigned)STRIM_PATH_NAME_COUNT) {
         return STRIM_CTRL_ERR_UNKNOWN; /* Go: invalid path name */
     }
     if (!valid_path_status(e->status)) {
@@ -884,15 +927,9 @@ int strim_controller_handle_path_event(strim_controller *c,
      * matches (controller.go:230-231). */
     c->paths[e->path] = e->status;
 
-    /* Exact (path, status) route lookup. Routes are unique at construction,
-     * so the last match equals the only match. */
-    const strim_route *route = NULL;
-    for (size_t i = 0; i < c->n_path_routes; i++) {
-        const strim_route *r = &c->path_routes[i];
-        if (r->path == e->path && r->path_status == e->status) {
-            route = r;
-        }
-    }
+    /* Exact (path, status) route lookup; first match is the only match
+     * (routes are unique at construction). */
+    const strim_route *route = find_path_event_route(c, e->path, e->status);
     if (route == NULL) {
         return 0;
     }
@@ -904,20 +941,15 @@ int strim_controller_handle_control(strim_controller *c,
     if (c == NULL || cmd == NULL) {
         return STRIM_CTRL_ERR_BADARG;
     }
-    if (cmd->component < 0 || cmd->component >= STRIM_COMPONENT_COUNT) {
+    if ((unsigned)cmd->component >= (unsigned)STRIM_COMPONENT_COUNT) {
         return STRIM_CTRL_ERR_UNKNOWN; /* Go: control not implemented */
     }
-    if (cmd->action < 0 || cmd->action >= STRIM_ACTION_COUNT) {
+    if ((unsigned)cmd->action >= (unsigned)STRIM_ACTION_COUNT) {
         return STRIM_CTRL_ERR_UNKNOWN;
     }
 
-    const strim_route *route = NULL;
-    for (size_t i = 0; i < c->n_control_routes; i++) {
-        const strim_route *r = &c->control_routes[i];
-        if (r->component == cmd->component && r->action == cmd->action) {
-            route = r;
-        }
-    }
+    const strim_route *route = find_control_route(c, cmd->component,
+                                                  cmd->action);
     if (route == NULL) {
         return STRIM_CTRL_ERR_UNKNOWN; /* Go: control not implemented */
     }
@@ -929,7 +961,7 @@ int strim_controller_handle_stage_event(strim_controller *c,
     if (c == NULL || e == NULL) {
         return STRIM_CTRL_ERR_BADARG;
     }
-    if (e->stage < 0 || e->stage >= STRIM_STAGE_NAME_COUNT) {
+    if ((unsigned)e->stage >= (unsigned)STRIM_STAGE_NAME_COUNT) {
         return STRIM_CTRL_ERR_UNKNOWN; /* Go: invalid stage name */
     }
     if (!valid_stage_state(e->state)) {
@@ -950,6 +982,12 @@ void strim_controller_handle_reconcile(strim_controller *c) {
     if (c == NULL) {
         return;
     }
+    /* Shutdown handshake (fast path): once begin_shutdown() has run, no new
+     * fires. The authoritative check is repeated under q_lock inside the fire
+     * section below — this early return is belt-and-suspenders. */
+    if (atomic_load(&c->shutting_down)) {
+        return;
+    }
     for (size_t i = 0; i < STRIM_STAGE_NAME_COUNT; i++) {
         strim_stage *stage = &c->stages[i];
 
@@ -959,50 +997,85 @@ void strim_controller_handle_reconcile(strim_controller *c) {
             continue;
         }
 
-        /* planReconcile (controller.go:316-320). */
-        strim_stage_state target = STRIM_STAGE_NO_TARGET;
-        if (stage->in_flight_since == 0) {
-            target = stage->status.desired;
-        } else if (c->now_ms() - stage->in_flight_since >=
-                   c->inflight_timeout_ms) {
-            /* Timed-out retry: the previous op exceeded inflight_timeout_ms
-             * (Go logs "reconcile %q -> %q timed out"). The generation bump
-             * below supersedes the older op, whose cancel handle then
-             * reports superseded at its next safe point. */
-            target = stage->status.desired;
-        }
-        if (target == STRIM_STAGE_NO_TARGET) {
+        /* planReconcile (controller.go:316-320): fire when not in flight, or
+         * when the previous op exceeded inflight_timeout_ms (a timed-out
+         * retry; the generation bump below supersedes the older op, whose
+         * cancel handle then reports superseded at its next safe point). */
+        bool fire = (stage->in_flight_since == 0) ||
+                    (c->now_ms() - stage->in_flight_since >=
+                     c->inflight_timeout_ms);
+        if (!fire) {
             continue; /* in flight and not yet timed out */
         }
+        strim_stage_state target = stage->status.desired;
 
-        strim_stage_op op = (target == STRIM_STAGE_RUNNING) ? stage->start_op
-                          : (target == STRIM_STAGE_STOPPED) ? stage->stop_op
-                          : NULL;
+        strim_stage_op op = stage_op_for(stage, target);
         if (op == NULL) {
             continue; /* unreachable after construction validation */
+        }
+
+        /* The fire is atomic w.r.t. begin_shutdown: the whole fire runs under
+         * q_lock, and we re-check shutting_down AFTER acquiring it. A fire
+         * that loses the race to begin_shutdown is skipped; a fire that wins
+         * the lock completes its wg_add before begin_shutdown can store the
+         * flag, so WaitForOps counts exactly the ops submitted before
+         * suppression. This closes the Add-vs-Wait race deterministically.
+         * Lock order: q_lock -> {pool->lock, wg->lock} — nothing takes
+         * q_lock while holding pool->lock or wg->lock (verified: worker_main
+         * releases pool->lock before running a job; run_stage_op takes
+         * wg->lock and q_lock sequentially, never nested). */
+        pthread_mutex_lock(&c->q_lock);
+        if (atomic_load(&c->shutting_down)) {
+            pthread_mutex_unlock(&c->q_lock);
+            continue; /* begin_shutdown won the race: suppress this fire */
+        }
+
+        /* Allocate the op job BEFORE mutating in_flight_since/op_generation
+         * so an OOM cannot wedge the stage (no op, no wg accounting): on
+         * failure we leave the stage untouched and the next reconcile fires
+         * again. */
+        strim_op_job *job = malloc(sizeof *job);
+        if (job == NULL) {
+            fprintf(stderr,
+                    "strim_controller: reconcile op allocation failed\n");
+            pthread_mutex_unlock(&c->q_lock);
+            continue;
         }
 
         int64_t now = c->now_ms();
         stage->in_flight_since = now;
         stage->op_generation++; /* the new fire supersedes any older one */
-        strim_op_job *job = malloc(sizeof *job);
-        if (job == NULL) {
-            fprintf(stderr,
-                    "strim_controller: reconcile op allocation failed\n");
-            abort();
-        }
-        job->c = c;
-        job->stage = (strim_stage_name)i;
-        job->op = op;
-        job->op_ctx = stage->op_ctx;
-        job->timeout_ms = c->inflight_timeout_ms;
-        job->cancel.generation = stage->op_generation;
-        job->cancel.deadline_ms = now + c->inflight_timeout_ms;
-        job->cancel.current_generation = &stage->op_generation;
-        job->cancel.now_ms = c->now_ms;
+        *job = (strim_op_job){
+            .c = c,
+            .stage = (strim_stage_name)i,
+            .op = op,
+            .op_ctx = stage->op_ctx,
+            .timeout_ms = c->inflight_timeout_ms,
+            .cancel = {
+                .generation = stage->op_generation,
+                .deadline_ms = now + c->inflight_timeout_ms,
+                .current_generation = &stage->op_generation,
+                .now_ms = c->now_ms,
+            },
+        };
 
         wg_add(&c->ops_wg, 1);
-        workerpool_submit(&c->pool, run_stage_op, job);
+        if (workerpool_submit(&c->pool, run_stage_op, job) != 0) {
+            /* No op was launched: undo the wg add and the stage mutation so
+             * WaitForOps never hangs on a phantom in-flight op. Rare OOM /
+             * pool-shutdown case; the next reconcile retries. */
+            wg_done(&c->ops_wg);
+            stage->in_flight_since = 0;
+            /* op_generation is _Atomic: this decrement is an atomic RMW. The
+             * transient false-supersede window it could cause for another
+             * in-flight op is acceptable on this rare OOM path — that op's
+             * next safe point just aborts early and is retried. */
+            stage->op_generation--;
+            free(job);
+            pthread_mutex_unlock(&c->q_lock);
+            continue;
+        }
+        pthread_mutex_unlock(&c->q_lock);
     }
 }
 
@@ -1050,29 +1123,28 @@ static int handle_remove_listener(strim_controller *c,
  * every running stage, then marks desired/actual == Stopped and notifies.
  * ------------------------------------------------------------------------- */
 
-static int teardown_inner(strim_controller *c) {
+static void teardown_inner(strim_controller *c) {
     for (size_t i = 0; i < STRIM_STAGE_NAME_COUNT; i++) {
         strim_stage *stage = &c->stages[i];
-        if (stage->status.actual != STRIM_STAGE_RUNNING) {
+        if (stage->status.actual != STRIM_STAGE_RUNNING ||
+            stage->stop_op == NULL) {
             continue;
         }
-        if (stage->stop_op == NULL) {
-            continue;
-        }
+        /* Bump the fire generation first so any lingering reconcile-fired op
+         * for this stage is superseded at its next safe point before we stop
+         * it synchronously. */
+        stage->op_generation++;
         /* Teardown runs with NO cancellation (Go: context.WithoutCancel
          * survives the signal); the ops fall back to their plain inflight
          * timeout and are never superseded. */
         int err = stage->stop_op(stage->op_ctx, c->inflight_timeout_ms, NULL);
-        if (err != 0) {
-            /* Go logs and continues; the stage is marked stopped either way
-             * so the controller does not wedge on a half-stopped stage. */
-        }
+        (void)err; /* Go logs and continues; the stage is marked stopped
+                    * either way so the controller does not wedge. */
         stage->status.desired = STRIM_STAGE_STOPPED;
         stage->status.actual = STRIM_STAGE_STOPPED;
         stage->in_flight_since = 0;
     }
     notify_listeners(c);
-    return 0;
 }
 
 /* -------------------------------------------------------------------------
@@ -1105,24 +1177,32 @@ static void run_action(strim_controller *c, strim_action *act) {
         case ACTION_RECONCILE:
             strim_controller_handle_reconcile(c);
             break;
-        case ACTION_CLEAR_INFLIGHT:
-            c->stages[act->clear_stage].in_flight_since = 0;
+        case ACTION_CLEAR_INFLIGHT: {
+            strim_stage *stage = &c->stages[act->clear_stage];
+            /* Generation-stamped clear: only the clear belonging to the
+             * CURRENT fire may wipe in_flight_since. A stale clear (the queue
+             * thread bumped op_generation and fired a retry after the failing
+             * op enqueued it) must not wipe the new fire's marker, or a third
+             * op could fire and two ops would run concurrently. */
+            if (atomic_load(&stage->op_generation) == act->clear_generation) {
+                stage->in_flight_since = 0;
+            }
             break;
+        }
         case ACTION_TEARDOWN:
-            result = teardown_inner(c);
+            teardown_inner(c);
             break;
     }
 
-    bool owns_self = act->owns_self;
-    bool has_waiter = !owns_self;
+    bool self_allocated = act->self_allocated;
     pthread_mutex_lock(&c->q_lock);
-    if (has_waiter) {
+    if (!self_allocated) {
         act->reply_result = result;
         act->reply_done = true;
         pthread_cond_broadcast(&c->q_cond);
     }
     pthread_mutex_unlock(&c->q_lock);
-    if (owns_self) {
+    if (self_allocated) {
         free(act);
     }
 }
@@ -1136,10 +1216,7 @@ int strim_controller_submit_path_event(strim_controller *c,
     if (c == NULL || e == NULL) {
         return STRIM_CTRL_ERR_BADARG;
     }
-    strim_action act;
-    memset(&act, 0, sizeof act);
-    act.kind = ACTION_PATH_EVENT;
-    act.path_event = *e;
+    strim_action act = {.kind = ACTION_PATH_EVENT, .path_event = *e};
     return queue_submit(c, &act);
 }
 
@@ -1148,10 +1225,7 @@ int strim_controller_submit_control(strim_controller *c,
     if (c == NULL || cmd == NULL) {
         return STRIM_CTRL_ERR_BADARG;
     }
-    strim_action act;
-    memset(&act, 0, sizeof act);
-    act.kind = ACTION_CONTROL;
-    act.control = *cmd;
+    strim_action act = {.kind = ACTION_CONTROL, .control = *cmd};
     return queue_submit(c, &act);
 }
 
@@ -1160,10 +1234,7 @@ int strim_controller_submit_stage_event(strim_controller *c,
     if (c == NULL || e == NULL) {
         return STRIM_CTRL_ERR_BADARG;
     }
-    strim_action act;
-    memset(&act, 0, sizeof act);
-    act.kind = ACTION_STAGE_EVENT;
-    act.stage_event = *e;
+    strim_action act = {.kind = ACTION_STAGE_EVENT, .stage_event = *e};
     return queue_submit(c, &act);
 }
 
@@ -1172,10 +1243,7 @@ int strim_controller_submit_status(strim_controller *c,
     if (c == NULL || out == NULL) {
         return STRIM_CTRL_ERR_BADARG;
     }
-    strim_action act;
-    memset(&act, 0, sizeof act);
-    act.kind = ACTION_STATUS;
-    act.status_out = out;
+    strim_action act = {.kind = ACTION_STATUS, .status_out = out};
     return queue_submit(c, &act);
 }
 
@@ -1185,11 +1253,11 @@ int strim_controller_submit_add_listener(strim_controller *c,
     if (c == NULL || listener == NULL) {
         return STRIM_CTRL_ERR_BADARG;
     }
-    strim_action act;
-    memset(&act, 0, sizeof act);
-    act.kind = ACTION_ADD_LISTENER;
-    act.listener = listener;
-    act.listener_userdata = userdata;
+    strim_action act = {
+        .kind = ACTION_ADD_LISTENER,
+        .listener = listener,
+        .listener_userdata = userdata,
+    };
     return queue_submit(c, &act);
 }
 
@@ -1199,11 +1267,11 @@ int strim_controller_submit_remove_listener(strim_controller *c,
     if (c == NULL || listener == NULL) {
         return STRIM_CTRL_ERR_BADARG;
     }
-    strim_action act;
-    memset(&act, 0, sizeof act);
-    act.kind = ACTION_REMOVE_LISTENER;
-    act.listener = listener;
-    act.listener_userdata = userdata;
+    strim_action act = {
+        .kind = ACTION_REMOVE_LISTENER,
+        .listener = listener,
+        .listener_userdata = userdata,
+    };
     return queue_submit(c, &act);
 }
 
@@ -1218,9 +1286,10 @@ void strim_controller_request_reconcile(strim_controller *c) {
     if (act == NULL) {
         return; /* drop this request (a hint, not a command) */
     }
-    memset(act, 0, sizeof *act);
-    act->kind = ACTION_RECONCILE;
-    act->owns_self = true;
+    *act = (strim_action){
+        .kind = ACTION_RECONCILE,
+        .self_allocated = true,
+    };
 
     pthread_mutex_lock(&c->q_lock);
     if (c->q_closed || c->reconcile_queued) {
@@ -1229,14 +1298,7 @@ void strim_controller_request_reconcile(strim_controller *c) {
         return;
     }
     c->reconcile_queued = true;
-    act->next = NULL;
-    if (c->q_tail == NULL) {
-        c->q_head = c->q_tail = act;
-    } else {
-        c->q_tail->next = act;
-        c->q_tail = act;
-    }
-    pthread_cond_signal(&c->q_cond);
+    enqueue_locked(c, act);
     pthread_mutex_unlock(&c->q_lock);
 }
 
@@ -1251,8 +1313,6 @@ int strim_controller_teardown(strim_controller *c) {
     if (c == NULL) {
         return STRIM_CTRL_ERR_BADARG;
     }
-    strim_action act;
-    memset(&act, 0, sizeof act);
-    act.kind = ACTION_TEARDOWN;
+    strim_action act = {.kind = ACTION_TEARDOWN};
     return queue_submit(c, &act);
 }

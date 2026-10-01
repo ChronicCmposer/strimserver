@@ -1,7 +1,10 @@
 /*
  * controller_test.c — state-machine regression suite (C port of
- * core/controller/controller_test.go, plus the inflight-timeout retry and
- * the queue/submit surface).
+ * core/controller/controller_test.go, plus the inflight-timeout retry, the
+ * queue/submit surface, and the two M1 concurrency regressions: shutdown
+ * ordering (Close suppresses reconcile fires before WaitForOps) and the
+ * generation-stamped clear-inflight (a failed op can never unblock a newer
+ * retry into a third, concurrent op).
  *
  * The Go oracle drives the unexported handlers directly on a single
  * goroutine; this suite does the same through the public handle_* functions
@@ -33,6 +36,10 @@ static int g_failures = 0;
             g_failures++;                                                 \
         }                                                                 \
     } while (0)
+
+/* run_thread is defined with the listener/submit tests below; the M1
+ * queue-driver tests use it earlier. */
+static void *run_thread(void *arg);
 
 /* testInFlightTimeout is generous on purpose (Go: time.Minute). */
 #define TEST_INFLIGHT_TIMEOUT_MS (60 * 1000)
@@ -126,6 +133,220 @@ static void await_calls(recording_op *r, int want) {
         }
     }
     pthread_mutex_unlock(&r->lock);
+}
+
+/* Teardown recording op — the synchronous stop op the Teardown path fires
+ * (controller.go:331-348). Unlike the reconcile-fired ops above it runs on
+ * the ACTION-QUEUE thread, and the public strim_controller_teardown blocks
+ * until it has completed, so the tests read the counters only after teardown
+ * returns (no await needed). It records invocations plus whether the
+ * Teardown path passed a NULL cancel handle — the WithoutCancel contract the
+ * header pins down ("Teardown runs with NO cancellation"). */
+typedef struct teardown_op {
+    int calls;
+    int cancel_was_null;
+    pthread_mutex_t lock;
+} teardown_op;
+
+static void teardown_op_init(teardown_op *t) {
+    memset(t, 0, sizeof *t);
+    pthread_mutex_init(&t->lock, NULL);
+}
+
+static void teardown_op_destroy(teardown_op *t) {
+    pthread_mutex_destroy(&t->lock);
+}
+
+static int teardown_op_fn(void *ctx, int64_t timeout_ms,
+                          const strim_stage_op_cancel *cancel) {
+    teardown_op *t = ctx;
+    (void)timeout_ms;
+    pthread_mutex_lock(&t->lock);
+    t->calls++;
+    t->cancel_was_null = (cancel == NULL);
+    pthread_mutex_unlock(&t->lock);
+    return 0;
+}
+
+static int teardown_op_calls(teardown_op *t) {
+    int n;
+    pthread_mutex_lock(&t->lock);
+    n = t->calls;
+    pthread_mutex_unlock(&t->lock);
+    return n;
+}
+
+static int teardown_op_cancel_was_null(teardown_op *t) {
+    int was_null;
+    pthread_mutex_lock(&t->lock);
+    was_null = t->cancel_was_null;
+    pthread_mutex_unlock(&t->lock);
+    return was_null;
+}
+
+/* -------------------------------------------------------------------------
+ * Blocking listener — parks the action-queue thread at a deterministic
+ * point. submit_add_listener invokes the listener on the queue thread, so a
+ * listener that blocks (until the test releases it) holds the queue thread
+ * exactly where the M1 shutdown/clear regressions need it: a queued action
+ * cannot be drained until the test says so. The queue thread holds no locks
+ * while inside the listener, so the test may safely call the direct handlers
+ * (the suite's normal style) while it is parked. Only the FIRST invocation
+ * blocks; later invocations return immediately.
+ * ------------------------------------------------------------------------- */
+
+typedef struct blocking_listener {
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+    int entered;   /* the listener is running on the queue thread */
+    int release;   /* 1 = the listener may return */
+    int calls;     /* invocations seen (only the first blocks) */
+} blocking_listener;
+
+static void blocking_listener_init(blocking_listener *b) {
+    memset(b, 0, sizeof *b);
+    pthread_mutex_init(&b->lock, NULL);
+    pthread_cond_init(&b->cond, NULL);
+}
+
+static void blocking_listener_destroy(blocking_listener *b) {
+    pthread_mutex_destroy(&b->lock);
+    pthread_cond_destroy(&b->cond);
+}
+
+static void blocking_listener_fn(const strim_controller_status *status,
+                                 void *userdata) {
+    blocking_listener *b = userdata;
+    (void)status;
+    pthread_mutex_lock(&b->lock);
+    b->calls++;
+    if (b->calls == 1) {
+        b->entered = 1;
+        pthread_cond_broadcast(&b->cond);
+        while (!b->release) {
+            pthread_cond_wait(&b->cond, &b->lock);
+        }
+    }
+    pthread_mutex_unlock(&b->lock);
+}
+
+static void await_listener_entered(blocking_listener *b) {
+    pthread_mutex_lock(&b->lock);
+    while (!b->entered) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 1;
+        int rc = pthread_cond_timedwait(&b->cond, &b->lock, &ts);
+        if (rc == ETIMEDOUT) {
+            pthread_mutex_unlock(&b->lock);
+            fprintf(stderr,
+                    "FAIL: the blocking listener never ran on the queue "
+                    "thread\n");
+            g_failures++;
+            return;
+        }
+    }
+    pthread_mutex_unlock(&b->lock);
+}
+
+static void release_listener(blocking_listener *b) {
+    pthread_mutex_lock(&b->lock);
+    b->release = 1;
+    pthread_cond_broadcast(&b->cond);
+    pthread_mutex_unlock(&b->lock);
+}
+
+typedef struct add_listener_arg {
+    strim_controller  *c;
+    blocking_listener *bl;
+    int result; /* the submit result, written by add_listener_thread */
+} add_listener_arg;
+
+/* Registers the blocking listener. The submit blocks until the listener
+ * returns (the queue thread parks inside it), so this must run on its own
+ * thread. */
+static void *add_listener_thread(void *arg) {
+    add_listener_arg *a = arg;
+    a->result = strim_controller_submit_add_listener(a->c,
+                                                     blocking_listener_fn,
+                                                     a->bl);
+    return NULL;
+}
+
+/* -------------------------------------------------------------------------
+ * WaitForOps observer — runs wait_for_ops on a helper thread so the test can
+ * assert that it is still blocked while an op is genuinely running, and that
+ * it returns once the op finishes.
+ * ------------------------------------------------------------------------- */
+
+typedef struct wait_ops_arg {
+    strim_controller *c;
+    int returned; /* 1 = wait_for_ops has returned */
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+} wait_ops_arg;
+
+static void wait_ops_arg_init(wait_ops_arg *a, strim_controller *c) {
+    a->c = c;
+    a->returned = 0;
+    pthread_mutex_init(&a->lock, NULL);
+    pthread_cond_init(&a->cond, NULL);
+}
+
+static void wait_ops_arg_destroy(wait_ops_arg *a) {
+    pthread_mutex_destroy(&a->lock);
+    pthread_cond_destroy(&a->cond);
+}
+
+static void *wait_ops_thread(void *arg) {
+    wait_ops_arg *a = arg;
+    strim_controller_wait_for_ops(a->c);
+    pthread_mutex_lock(&a->lock);
+    a->returned = 1;
+    pthread_cond_broadcast(&a->cond);
+    pthread_mutex_unlock(&a->lock);
+    return NULL;
+}
+
+/* Assert WaitForOps has NOT returned within 150ms — the shutdown-ordering
+ * contract: while an op is genuinely running, WaitForOps must remain
+ * blocked. */
+static void await_wait_ops_still_pending(wait_ops_arg *a) {
+    pthread_mutex_lock(&a->lock);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 150 * 1000 * 1000;
+    if (ts.tv_nsec >= 1000000000) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000;
+    }
+    pthread_cond_timedwait(&a->cond, &a->lock, &ts);
+    int returned = a->returned;
+    pthread_mutex_unlock(&a->lock);
+    if (returned) {
+        fprintf(stderr,
+                "FAIL: WaitForOps returned while an op was still running "
+                "(shutdown ordering violated)\n");
+        g_failures++;
+    }
+}
+
+static void await_wait_ops_returned(wait_ops_arg *a) {
+    pthread_mutex_lock(&a->lock);
+    while (!a->returned) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 1;
+        int rc = pthread_cond_timedwait(&a->cond, &a->lock, &ts);
+        if (rc == ETIMEDOUT) {
+            pthread_mutex_unlock(&a->lock);
+            fprintf(stderr,
+                    "FAIL: WaitForOps did not return after the op finished\n");
+            g_failures++;
+            return;
+        }
+    }
+    pthread_mutex_unlock(&a->lock);
 }
 
 /* -------------------------------------------------------------------------
@@ -437,6 +658,9 @@ typedef struct slow_op {
     int superseded;  /* ops that aborted because a retry superseded them */
     int deadline;    /* ops that aborted because the deadline expired */
     int release;     /* 1 = let blocked ops finish normally */
+    int fail;        /* 1 = the next safe point returns an error instead of
+                      * completing (simulates an RPC failure) */
+    int failed;      /* ops that returned an error via the fail flag */
 } slow_op;
 
 static void slow_op_init(slow_op *s) {
@@ -459,6 +683,7 @@ static int slow_op_fn(void *ctx, int64_t timeout_ms,
                       const strim_stage_op_cancel *cancel) {
     slow_op *s = ctx;
     (void)timeout_ms;
+    int rc = 0;
     pthread_mutex_lock(&s->lock);
     s->calls++;
     pthread_cond_broadcast(&s->cond);
@@ -485,6 +710,15 @@ static int slow_op_fn(void *ctx, int64_t timeout_ms,
             s->superseded++;
             break;
         }
+        /* The test sets fail to make an op return an error at its next safe
+         * point (simulating an RPC failure that must clear InFlight). Checked
+         * BEFORE the deadline so the failure is observable even after the
+         * fake clock has passed the op's deadline. */
+        if (s->fail) {
+            s->failed++;
+            rc = -1;
+            break;
+        }
         int64_t remaining = strim_stage_op_remaining_ms(cancel);
         if (remaining <= 0) {
             s->deadline++;
@@ -505,7 +739,7 @@ static int slow_op_fn(void *ctx, int64_t timeout_ms,
     s->active--;
     pthread_cond_broadcast(&s->cond);
     pthread_mutex_unlock(&s->lock);
-    return 0;
+    return rc;
 }
 
 static void await_active(slow_op *s, int want) {
@@ -719,6 +953,143 @@ static void test_inflight_timeout_supersedes_previous_op(void) {
 
     strim_controller_wait_for_ops(c);
     strim_controller_destroy(c);
+    slow_op_destroy(&op);
+}
+
+/* M1 regression: the stale, generation-unaware ACTION_CLEAR_INFLIGHT. A
+ * failed op stamps its clear-inflight action with the FIRE generation; the
+ * queue clears InFlight only if that generation is still the LIVE one (see
+ * the supersede rationale on strim_stage_op_superseded). Before the fix, op
+ * #1's failure clear ran after a timed-out retry (op #2) had already fired,
+ * wiped op #2's InFlight marker, and the next reconcile fired a THIRD op —
+ * two ops ran concurrently. Sequence (deterministic via the blocking
+ * listener + fake clock):
+ *   - op #1 fires (gen 1) and blocks past the inflight timeout;
+ *   - the timed-out retry reconcile (R2) is queued while the queue thread is
+ *     parked inside the blocking listener;
+ *   - op #1 is released and FAILS; not yet superseded (R2 has not run), so
+ *     its clear (stamped gen 1) is queued BEHIND R2;
+ *   - the queue thread drains R2 (the retry fires op #2, gen 2, and sets its
+ *     InFlight marker) and then the stale clear (gen 1 != live gen 2): the
+ *     fix DROPS it, so op #2's marker survives;
+ *   - a final reconcile (R3) must NOT fire a third op — exactly one op runs
+ *     at a time for the stage (the supersede-by-timeout guarantee; the
+ *     event-cleared-InFlight divergence documented in the header is out of
+ *     scope here).
+ * The direct handle_reconcile below is safe because the queue thread is
+ * parked inside the listener (holding no locks); this is the suite's usual
+ * direct-handler style. */
+static void test_inflight_timeout_stale_clear_no_third_op(void) {
+    slow_op op;
+    slow_op_init(&op);
+
+    test_setup s;
+    base_setup(&s);
+    g_now_ms = 1000;
+    s.cfg.initial_paths[STRIM_PATH_INGRESS0] = STRIM_PATH_UNKNOWN;
+    s.cfg.stages[STRIM_STAGE_NORMALIZE].start_op = slow_op_fn;
+    s.cfg.stages[STRIM_STAGE_NORMALIZE].op_ctx = &op;
+    s.path_routes[0] = (strim_route){
+        .kind = STRIM_ROUTE_PATH_EVENT,
+        .path = STRIM_PATH_INGRESS0,
+        .path_status = STRIM_PATH_READY,
+        .target_stage = STRIM_STAGE_NORMALIZE,
+        .target_state = STRIM_STAGE_RUNNING,
+    };
+    s.path_routes[1] = ROUTE_END;
+
+    strim_controller *c = build_controller(&s);
+    CHECK(c != NULL);
+    if (c == NULL) {
+        slow_op_destroy(&op);
+        return;
+    }
+
+    /* Record intent through the queue, then start the Run loop. */
+    pthread_t qtid;
+    CHECK(pthread_create(&qtid, NULL, run_thread, c) == 0);
+    strim_path_event e = {STRIM_PATH_INGRESS0, STRIM_PATH_READY};
+    CHECK(strim_controller_submit_path_event(c, &e) == 0);
+
+    /* Park the queue thread inside the blocking listener: while parked, the
+     * queue cannot drain, which is what makes the action ordering below
+     * deterministic. */
+    blocking_listener bl;
+    blocking_listener_init(&bl);
+    add_listener_arg aa = {c, &bl, 0};
+    pthread_t atid;
+    CHECK(pthread_create(&atid, NULL, add_listener_thread, &aa) == 0);
+    await_listener_entered(&bl);
+
+    /* Fire op #1 (gen 1); it blocks in its RPC step and will overrun the
+     * inflight timeout. */
+    strim_controller_handle_reconcile(c);
+    await_active(&op, 1);
+    CHECK(op.calls == 1);
+
+    /* Advance past the timeout and queue the timed-out retry (R2). It sits
+     * in the queue until the listener is released. */
+    g_now_ms += TEST_INFLIGHT_TIMEOUT_MS + 1;
+    pthread_mutex_lock(&op.lock);
+    op.fail = 1;
+    pthread_mutex_unlock(&op.lock);
+    strim_controller_request_reconcile(c);
+
+    /* Release op #1: at its next safe point it sees the fail flag and
+     * returns an error. The stage generation is still 1 (R2 has not run), so
+     * the failed op's clear is queued — stamped gen 1, behind R2. */
+    pthread_mutex_lock(&op.lock);
+    pthread_cond_broadcast(&op.cond);
+    pthread_mutex_unlock(&op.lock);
+    await_inactive(&op);
+    CHECK(op.failed == 1);
+    pthread_mutex_lock(&op.lock);
+    op.fail = 0;
+    pthread_mutex_unlock(&op.lock);
+
+    /* Release the queue thread: it drains R2 (the timed-out retry fires op
+     * #2, gen 2, which blocks) and then the stale clear. The fix drops the
+     * clear (gen 1 != live gen 2); the bug clears op #2's InFlight marker. */
+    release_listener(&bl);
+    await_active(&op, 1);
+    CHECK(op.calls == 2);
+
+    /* A final reconcile must NOT fire a third op. Synchronize with the queue
+     * via a blocking status submit (queued after R3), then watch a window. */
+    strim_controller_request_reconcile(c);
+    strim_controller_status st;
+    CHECK(strim_controller_submit_status(c, &st) == 0);
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 200 * 1000 * 1000; /* 200ms */
+    if (ts.tv_nsec >= 1000000000) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000;
+    }
+    pthread_mutex_lock(&op.lock);
+    int rc = pthread_cond_timedwait(&op.cond, &op.lock, &ts);
+    pthread_mutex_unlock(&op.lock);
+    CHECK(rc == ETIMEDOUT);      /* no third op within the window */
+    CHECK(op.calls == 2);        /* exactly the two expected fires */
+    CHECK(op.max_active == 1);   /* at most one op ran at a time */
+
+    /* Release op #2: only the retry completes the step. */
+    pthread_mutex_lock(&op.lock);
+    op.release = 1;
+    pthread_cond_broadcast(&op.cond);
+    pthread_mutex_unlock(&op.lock);
+    await_inactive(&op);
+    CHECK(op.completed == 1);
+    CHECK(op.calls == 2);
+
+    strim_controller_wait_for_ops(c);
+    pthread_join(atid, NULL);
+    CHECK(aa.result == 0);
+    strim_controller_close(c);
+    pthread_join(qtid, NULL);
+    strim_controller_destroy(c);
+    blocking_listener_destroy(&bl);
     slow_op_destroy(&op);
 }
 
@@ -940,6 +1311,291 @@ static void test_submit_surface(void) {
     recording_op_destroy(&op);
 }
 
+/* M1 regression: the WaitGroup "Add concurrent with Wait" race. The fix
+ * gives Close the shutdown-ordering guarantee — Close suppresses new
+ * reconcile fires before WaitForOps runs, so WaitForOps waits for exactly the
+ * ops that were already counted (shutdown order: Close -> WaitForOps ->
+ * Teardown -> Run returns -> Destroy, per the header). The exact race needs a
+ * reconcile firing on the queue thread in the same instant WaitForOps reads
+ * the (empty) WaitGroup, which is not deterministically reachable through the
+ * public API; this test locks in the observable shutdown contract instead:
+ *   - Close does not abort an op that is genuinely running;
+ *   - WaitForOps must NOT return while that op is still running;
+ *   - a post-Close reconcile request is dropped (no new fire).
+ * The deterministic heart of the suppression — a reconcile already queued
+ * when Close runs — is covered by
+ * test_shutdown_close_suppresses_queued_reconcile_fires below. Teardown is
+ * out of scope: no stage here is actually Running, so it would be a no-op. */
+static void test_shutdown_wait_for_ops_waits_for_running_op(void) {
+    slow_op op;
+    slow_op_init(&op);
+
+    test_setup s;
+    base_setup(&s);
+    g_now_ms = 1000;
+    s.cfg.initial_paths[STRIM_PATH_INGRESS0] = STRIM_PATH_UNKNOWN;
+    s.cfg.stages[STRIM_STAGE_NORMALIZE].start_op = slow_op_fn;
+    s.cfg.stages[STRIM_STAGE_NORMALIZE].op_ctx = &op;
+    s.path_routes[0] = (strim_route){
+        .kind = STRIM_ROUTE_PATH_EVENT,
+        .path = STRIM_PATH_INGRESS0,
+        .path_status = STRIM_PATH_READY,
+        .target_stage = STRIM_STAGE_NORMALIZE,
+        .target_state = STRIM_STAGE_RUNNING,
+    };
+    s.path_routes[1] = ROUTE_END;
+
+    strim_controller *c = build_controller(&s);
+    CHECK(c != NULL);
+    if (c == NULL) {
+        slow_op_destroy(&op);
+        return;
+    }
+
+    /* Fire op #1; it blocks inside its RPC step and is genuinely running. */
+    strim_path_event e = {STRIM_PATH_INGRESS0, STRIM_PATH_READY};
+    CHECK(strim_controller_handle_path_event(c, &e) == 0);
+    strim_controller_handle_reconcile(c);
+    await_active(&op, 1);
+    CHECK(op.calls == 1);
+
+    /* Shutdown step one: Close. This suppresses any further fires and must
+     * NOT abort the op that is still running. */
+    strim_controller_close(c);
+
+    /* Shutdown step two: WaitForOps, on a helper thread so we can observe it.
+     * The op is still inside its critical section, so WaitForOps must remain
+     * blocked — the exact symptom of the race being fixed. */
+    wait_ops_arg wa;
+    wait_ops_arg_init(&wa, c);
+    pthread_t wtid;
+    CHECK(pthread_create(&wtid, NULL, wait_ops_thread, &wa) == 0);
+    await_wait_ops_still_pending(&wa);
+
+    /* A post-Close reconcile request is dropped: no new fire may start after
+     * Close (the queue is closed; the request is a no-op). */
+    strim_controller_request_reconcile(c);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 100 * 1000 * 1000; /* 100ms */
+    if (ts.tv_nsec >= 1000000000) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000;
+    }
+    pthread_mutex_lock(&op.lock);
+    int rc = pthread_cond_timedwait(&op.cond, &op.lock, &ts);
+    pthread_mutex_unlock(&op.lock);
+    CHECK(rc == ETIMEDOUT); /* no new fire within the window */
+    CHECK(op.calls == 1);
+    CHECK(op.max_active == 1);
+
+    /* Release op #1: it finishes normally (Close does not abort in-flight
+     * ops), and only then does WaitForOps return. */
+    pthread_mutex_lock(&op.lock);
+    op.release = 1;
+    pthread_cond_broadcast(&op.cond);
+    pthread_mutex_unlock(&op.lock);
+    await_inactive(&op);
+    await_wait_ops_returned(&wa);
+    CHECK(op.completed == 1);
+    CHECK(op.calls == 1);
+
+    pthread_join(wtid, NULL);
+    wait_ops_arg_destroy(&wa);
+    strim_controller_destroy(c);
+    slow_op_destroy(&op);
+}
+
+/* M1 regression, deterministic heart: a reconcile that was ALREADY queued
+ * when Close ran must not fire afterwards. Before the fix, Close only closed
+ * the queue; Run still drains queued actions, so the reconcile ran AFTER
+ * Close, called wg_add concurrently with the caller's WaitForOps, and could
+ * strand an op that started after WaitForOps returned. The fix adds an
+ * internal shutting_down flag that suppresses reconcile fires, so a drained
+ * post-Close reconcile is a no-op. We make the interleaving deterministic by
+ * parking the queue thread inside a blocking listener, enqueueing the
+ * reconcile, calling Close, and only then releasing the listener: the
+ * reconcile is provably processed after Close, and the test asserts no op
+ * fires. */
+static void test_shutdown_close_suppresses_queued_reconcile_fires(void) {
+    recording_op op;
+    recording_op_init(&op);
+
+    test_setup s;
+    base_setup(&s);
+    g_now_ms = 1000;
+    s.cfg.initial_paths[STRIM_PATH_INGRESS0] = STRIM_PATH_UNKNOWN;
+    s.cfg.stages[STRIM_STAGE_NORMALIZE].start_op = recording_op_fn;
+    s.cfg.stages[STRIM_STAGE_NORMALIZE].op_ctx = &op;
+    s.path_routes[0] = (strim_route){
+        .kind = STRIM_ROUTE_PATH_EVENT,
+        .path = STRIM_PATH_INGRESS0,
+        .path_status = STRIM_PATH_READY,
+        .target_stage = STRIM_STAGE_NORMALIZE,
+        .target_state = STRIM_STAGE_RUNNING,
+    };
+    s.path_routes[1] = ROUTE_END;
+
+    strim_controller *c = build_controller(&s);
+    CHECK(c != NULL);
+    if (c == NULL) {
+        recording_op_destroy(&op);
+        return;
+    }
+
+    /* Run loop first, then record intent through the normal submit surface
+     * (the blocking submit needs the queue thread). */
+    pthread_t qtid;
+    CHECK(pthread_create(&qtid, NULL, run_thread, c) == 0);
+    strim_path_event e = {STRIM_PATH_INGRESS0, STRIM_PATH_READY};
+    CHECK(strim_controller_submit_path_event(c, &e) == 0);
+
+    /* Park the queue thread inside a blocking listener. */
+    blocking_listener bl;
+    blocking_listener_init(&bl);
+    add_listener_arg aa = {c, &bl, 0};
+    pthread_t atid;
+    CHECK(pthread_create(&atid, NULL, add_listener_thread, &aa) == 0);
+    await_listener_entered(&bl);
+
+    /* The queue thread is provably parked: queue a reconcile (non-blocking;
+     * it will be drained AFTER Close) and then begin shutdown. The stage
+     * still wants to run (desired != actual), so a non-suppressed reconcile
+     * would fire the op. */
+    strim_controller_request_reconcile(c);
+    strim_controller_close(c);
+
+    /* Release the queue thread: it drains the queued reconcile. The fix
+     * suppresses the fire (shutting_down), so no op may start. */
+    release_listener(&bl);
+
+    /* Give the queue time to drain and assert no op ever fires. */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 200 * 1000 * 1000; /* 200ms */
+    if (ts.tv_nsec >= 1000000000) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000;
+    }
+    pthread_mutex_lock(&op.lock);
+    int rc = pthread_cond_timedwait(&op.cond, &op.lock, &ts);
+    pthread_mutex_unlock(&op.lock);
+    CHECK(rc == ETIMEDOUT); /* no fire within the window */
+    CHECK(recording_op_calls(&op) == 0);
+
+    strim_controller_wait_for_ops(c);
+    pthread_join(atid, NULL);
+    CHECK(aa.result == 0); /* the add-listener submit itself succeeded */
+    pthread_join(qtid, NULL);
+    strim_controller_destroy(c);
+    blocking_listener_destroy(&bl);
+    recording_op_destroy(&op);
+}
+
+/* Teardown (controller.go:331-348): a stage seeded RUNNING — and converged
+ * (desired == actual == RUNNING, so no reconcile ever interferes) — is
+ * stopped synchronously by the public strim_controller_teardown. The stop op
+ * runs exactly once, with a NULL cancel handle (the WithoutCancel contract),
+ * and the stage lands on desired/actual == Stopped. Teardown is a blocking
+ * queue submit, so the run thread must be alive and the queue open. */
+static void test_teardown_stops_running_stage(void) {
+    teardown_op top;
+    teardown_op_init(&top);
+
+    test_setup s;
+    base_setup(&s);
+    s.cfg.stages[STRIM_STAGE_NORMALIZE].status.desired = STRIM_STAGE_RUNNING;
+    s.cfg.stages[STRIM_STAGE_NORMALIZE].status.actual = STRIM_STAGE_RUNNING;
+    s.cfg.stages[STRIM_STAGE_NORMALIZE].stop_op = teardown_op_fn;
+    s.cfg.stages[STRIM_STAGE_NORMALIZE].op_ctx = &top;
+
+    strim_controller *c = build_controller(&s);
+    CHECK(c != NULL);
+    if (c == NULL) {
+        teardown_op_destroy(&top);
+        return;
+    }
+
+    /* Teardown needs the queue open and running: start the Run loop first. */
+    pthread_t tid;
+    CHECK(pthread_create(&tid, NULL, run_thread, c) == 0);
+
+    CHECK(strim_controller_teardown(c) == 0);
+
+    /* The stop op ran synchronously on the queue thread — exactly once, with
+     * no cancellation handle. */
+    CHECK(teardown_op_calls(&top) == 1);
+    CHECK(teardown_op_cancel_was_null(&top));
+
+    /* The stage is now converged on Stopped. */
+    strim_controller_status st;
+    CHECK(strim_controller_submit_status(c, &st) == 0);
+    CHECK(st.stages[STRIM_STAGE_NORMALIZE].desired == STRIM_STAGE_STOPPED);
+    CHECK(st.stages[STRIM_STAGE_NORMALIZE].actual == STRIM_STAGE_STOPPED);
+
+    strim_controller_close(c);
+    pthread_join(tid, NULL);
+    strim_controller_destroy(c);
+    teardown_op_destroy(&top);
+}
+
+/* The teardown-after-close contract: teardown is a blocking queue submit, so
+ * once Close has closed the queue it fails fast with STRIM_CTRL_ERR_CLOSED
+ * (the header's "must be called BEFORE close(), while the queue is still
+ * open"). No run thread is needed: Close flips q_closed and the submit
+ * refuses before touching the queue. */
+static void test_teardown_after_close_returns_closed(void) {
+    test_setup s;
+    base_setup(&s);
+
+    strim_controller *c = build_controller(&s);
+    CHECK(c != NULL);
+    if (c == NULL) {
+        return;
+    }
+
+    strim_controller_close(c);
+    CHECK(strim_controller_teardown(c) == STRIM_CTRL_ERR_CLOSED);
+
+    strim_controller_destroy(c);
+}
+
+/* Teardown only stops stages whose actual state is Running (the loop's
+ * guard): a stage seeded (and converged) Stopped must NOT have its stop op
+ * invoked, and its status stays Stopped. */
+static void test_teardown_skips_non_running_stage(void) {
+    teardown_op top;
+    teardown_op_init(&top);
+
+    test_setup s;
+    base_setup(&s); /* every stage seeded desired/actual == STOPPED */
+    s.cfg.stages[STRIM_STAGE_MEDIA_MTX].stop_op = teardown_op_fn;
+    s.cfg.stages[STRIM_STAGE_MEDIA_MTX].op_ctx = &top;
+
+    strim_controller *c = build_controller(&s);
+    CHECK(c != NULL);
+    if (c == NULL) {
+        teardown_op_destroy(&top);
+        return;
+    }
+
+    pthread_t tid;
+    CHECK(pthread_create(&tid, NULL, run_thread, c) == 0);
+
+    CHECK(strim_controller_teardown(c) == 0);
+    CHECK(teardown_op_calls(&top) == 0); /* no stop for a non-running stage */
+
+    strim_controller_status st;
+    CHECK(strim_controller_submit_status(c, &st) == 0);
+    CHECK(st.stages[STRIM_STAGE_MEDIA_MTX].desired == STRIM_STAGE_STOPPED);
+    CHECK(st.stages[STRIM_STAGE_MEDIA_MTX].actual == STRIM_STAGE_STOPPED);
+
+    strim_controller_close(c);
+    pthread_join(tid, NULL);
+    strim_controller_destroy(c);
+    teardown_op_destroy(&top);
+}
+
 /* Construction validation (Go NewController's error paths). */
 static void test_construction_validation(void) {
     test_setup s;
@@ -990,12 +1646,24 @@ int main(void) {
     printf("[ok] test_inflight_timeout_no_concurrent_ops\n");
     test_inflight_timeout_supersedes_previous_op();
     printf("[ok] test_inflight_timeout_supersedes_previous_op\n");
+    test_inflight_timeout_stale_clear_no_third_op();
+    printf("[ok] test_inflight_timeout_stale_clear_no_third_op\n");
     test_stage_event_updates_actual();
     printf("[ok] test_stage_event_updates_actual\n");
     test_listeners();
     printf("[ok] test_listeners\n");
     test_submit_surface();
     printf("[ok] test_submit_surface\n");
+    test_shutdown_wait_for_ops_waits_for_running_op();
+    printf("[ok] test_shutdown_wait_for_ops_waits_for_running_op\n");
+    test_shutdown_close_suppresses_queued_reconcile_fires();
+    printf("[ok] test_shutdown_close_suppresses_queued_reconcile_fires\n");
+    test_teardown_stops_running_stage();
+    printf("[ok] test_teardown_stops_running_stage\n");
+    test_teardown_after_close_returns_closed();
+    printf("[ok] test_teardown_after_close_returns_closed\n");
+    test_teardown_skips_non_running_stage();
+    printf("[ok] test_teardown_skips_non_running_stage\n");
     test_construction_validation();
     printf("[ok] test_construction_validation\n");
 

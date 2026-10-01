@@ -16,19 +16,20 @@
  *     goroutine (Go: `for act := range c.actions { act(c) }`). Submit
  *     functions enqueue a closure and block until the controller has run it
  *     (Go's `submit`, controller.go:182-186); RequestReconcile enqueues
- *     WITHOUT blocking. WaitForOps drains the op WaitGroup; Close closes the
- *     queue. Teardown synchronously stops every running stage.
+ *     WITHOUT blocking. WaitForOps drains the op WaitGroup; begin_shutdown
+ *     suppresses new reconcile fires; Close closes the queue. Teardown
+ *     synchronously stops every running stage. Shutdown order is fixed:
+ *     begin_shutdown (suppress fires) -> WaitForOps -> Teardown -> Close ->
+ *     Run returns -> Destroy (see the API comments below).
  *
  *   - Reconcile semantics (the exactly-once contract): each stage carries an
  *     InFlight flag + timestamp. planReconcile (controller.go:316-320) fires
  *     the desired-state op only when NOT in flight, or when the previous op
  *     exceeded inflight_timeout (a timed-out retry). An op is fired exactly
  *     once per inflight period; a failed op clears InFlight so the next
- *     reconcile retries. A timed-out retry carries a cancellation/deadline
- *     handle (strim_stage_op_cancel, the C analogue of Go's context) that
- *     supersedes the previous op: the old op aborts at its next safe point
- *     and bounds its RPCs by the remaining deadline, so a stage never runs
- *     two ops concurrently (Go cancels the old op's context at the timeout).
+ *     reconcile retries. Cancellation, supersede, and the known
+ *     event-cleared-InFlight divergence from "never two ops concurrently"
+ *     are spelled out once, on strim_stage_op_superseded below.
  *
  *   - Prerequisite gating: a route's StageTarget may carry a prerequisite
  *     callback (Go: `Prerequisite func(c *Controller) error`). It is checked
@@ -178,15 +179,28 @@ typedef struct strim_controller strim_controller;
  * context.WithTimeout, controller.go:299). The controller creates one per
  * fired op and passes it to the op as the third argument; the op MUST NOT
  * retain the pointer after returning. The handle carries the fire's
- * generation (bumped when a timed-out retry supersedes an older op) and its
- * absolute deadline. Ops check strim_stage_op_superseded() at safe points
- * and bound every RPC by strim_stage_op_remaining_ms(). */
+ * op_generation and its absolute deadline. Ops check
+ * strim_stage_op_superseded() at safe points and bound every RPC by
+ * strim_stage_op_remaining_ms(). */
 typedef struct strim_stage_op_cancel strim_stage_op_cancel;
 
-/* Non-zero when a newer op was fired for the same stage (a timed-out retry
- * superseded this one); the op should stop at its next safe point. A NULL
- * handle (the Teardown path, which runs with no cancellation — Go's
- * context.WithoutCancel) is never superseded. */
+/* SUPERSEDE / TIMEOUT RATIONALE — authoritative. (The file-header block and
+ * the stage-op comment only point here.) Each fire carries a monotonically
+ * increasing op_generation; a timed-out retry bumps it and supersedes the
+ * previous op (Go cancels the old op's context at the timeout): the old op
+ * aborts at its next safe point and bounds its RPCs by the remaining
+ * deadline. The failed op's clear-inflight action is stamped with the FIRE
+ * generation and clears InFlight only if it is still the LIVE generation, so
+ * a stale clear can never unblock a THIRD op. This function returns non-zero
+ * when a newer op was fired for the same stage; the op should stop at its
+ * next safe point. A NULL handle (the Teardown path, which runs with no
+ * cancellation — Go's context.WithoutCancel) is never superseded; Teardown
+ * bumps the generation before each stop op so any lingering reconcile-fired
+ * op is superseded. KNOWN, GO-FAITHFUL DIVERGENCE from "never two ops
+ * concurrently": a stage event that clears in_flight_since does NOT bump
+ * op_generation, so a new fire can start while the old op is still running.
+ * The no-concurrency guarantee holds only for supersede-by-timeout, not for
+ * event-cleared InFlight. */
 int strim_stage_op_superseded(const strim_stage_op_cancel *cancel);
 
 /* The remaining budget in ms until the op's absolute deadline (0 or negative
@@ -205,16 +219,27 @@ int64_t strim_stage_op_remaining_ms(const strim_stage_op_cancel *cancel);
  *                strim_stage_op_superseded() at safe points and bounds RPCs
  *                by strim_stage_op_remaining_ms().
  * Returns 0 on success, non-zero on failure (failure clears InFlight so the
- * next reconcile retries — the Go controller.go:304-312 contract). A
- * superseded op returns 0: the newer retry owns the stage, and clearing
- * InFlight would unblock a THIRD concurrent op. */
+ * next reconcile retries — the Go controller.go:304-312 contract; see the
+ * generation-stamped clear in the supersede rationale above). Threading:
+ * reconcile-fired ops run on the WORKER POOL (the Go `go func()` launches in
+ * handleReconcile, controller.go:299-304); only the Teardown stop op runs on
+ * the action-queue thread. Re-entrancy: a worker op calling a blocking
+ * strim_controller_submit_* does NOT self-deadlock (the queue thread is free
+ * to service the submit) — but it CAN deadlock during Teardown, when the
+ * queue thread is blocked inside the synchronous stop op and cannot service
+ * the submit until that op returns. Ops should treat
+ * strim_stage_op_superseded() as the abort signal and avoid blocking submits
+ * while Teardown may be running. */
 typedef int (*strim_stage_op)(void *op_ctx, int64_t timeout_ms,
                               const strim_stage_op_cancel *cancel);
 
 /* Prerequisite gate for a route target (Go: `func(c *Controller) error`).
  * Called with the controller before the desired state is committed. Return 0
  * to allow the transition, non-zero to reject it (the stage's desired state
- * is then left unchanged and the submit returns an error). */
+ * is then left unchanged and the submit returns an error). Runs on the
+ * action-queue thread: it MUST NOT synchronously call any
+ * strim_controller_submit_* (it would self-deadlock); post that work
+ * asynchronously. */
 typedef int (*strim_prerequisite_fn)(strim_controller *c, void *userdata);
 
 /* One route entry. Exactly one of {path_event, control} is active, chosen by
@@ -251,8 +276,11 @@ typedef struct strim_stage_config {
 } strim_stage_config;
 
 /* Controller listener (Go: `type ControllerListener func(*ControllerStatus)`).
- * Invoked on the action-queue thread whenever the status changes. The HTTP
- * lane wraps this in the 1-deep drop-oldest/latest-wins ws send queue. */
+ * Invoked on the action-queue thread whenever the status changes. It runs on
+ * the action-queue thread, so it MUST NOT synchronously call any
+ * strim_controller_submit_* (it would self-deadlock); the ws lane uses the
+ * required pattern — an async 1-deep drop-oldest/latest-wins send queue that
+ * drains on its own thread. */
 typedef void (*strim_controller_listener)(const strim_controller_status *status,
                                           void *userdata);
 
@@ -297,12 +325,29 @@ int strim_controller_new(const strim_controller_config *cfg,
  * enqueue and (for the blocking submits) wait for their reply. */
 void strim_controller_run(strim_controller *c);
 
-/* strim_controller_close: close the queue; Run returns. No submits after
- * Close (same contract as Go's close(c.actions)). */
+/* strim_controller_begin_shutdown: shutdown step one — must be called BEFORE
+ * WaitForOps. Sets the internal shutting_down flag under the queue lock so it
+ * serializes against a reconcile fire mid-critical-section: from this point
+ * on, every fire that acquires the lock re-checks the flag and is suppressed,
+ * so no op can be launched while/after WaitForOps waits. It does NOT close
+ * the queue — Teardown still needs it open. Idempotent (safe to call more
+ * than once; close() also sets the same flag). */
+void strim_controller_begin_shutdown(strim_controller *c);
+
+/* strim_controller_close: close the action queue; Run returns. No submits
+ * after Close (same contract as Go's close(c.actions)). New-fire suppression
+ * is the job of begin_shutdown (shutdown step one, before WaitForOps); Close
+ * still sets the same shutting_down flag as idempotent belt-and-suspenders
+ * for callers that skip begin_shutdown. ENFORCED SHUTDOWN ORDER:
+ * begin_shutdown (suppress fires) -> WaitForOps -> Teardown -> Close -> Run
+ * returns -> Destroy. Teardown MUST complete before the queue closes (it
+ * needs the queue open). */
 void strim_controller_close(strim_controller *c);
 
-/* strim_controller_destroy: free the controller. Must be called after Run has
- * returned and WaitForOps/Teardown have completed. */
+/* strim_controller_destroy: free the controller. Final shutdown step: call
+ * only after Run has returned and WaitForOps/Teardown have completed — i.e.
+ * after the full begin_shutdown -> WaitForOps -> Teardown -> Close -> Run
+ * returns sequence (see the required order on strim_controller_close). */
 void strim_controller_destroy(strim_controller *c);
 
 /* --- Action-queue submit surface -----------------------------------------
@@ -345,12 +390,19 @@ int strim_controller_submit_remove_listener(strim_controller *c,
 void strim_controller_request_reconcile(strim_controller *c);
 
 /* WaitForOps: block until every in-flight stage op has finished (Go's
- * c.ops.Wait()). Used during shutdown before Teardown. */
+ * c.ops.Wait()). Shutdown step two, after begin_shutdown has suppressed new
+ * fires and before Teardown (see the required order on
+ * strim_controller_close). */
 void strim_controller_wait_for_ops(strim_controller *c);
 
 /* Teardown: synchronously stop every stage whose actual state is Running
  * (Go's Teardown, controller.go:331-348): fire the stage's stop op with the
- * inflight timeout, then mark desired/actual == Stopped and notify. */
+ * inflight timeout, then mark desired/actual == Stopped and notify. Bumps
+ * the stage's op_generation before each stop op so any lingering
+ * reconcile-fired op is superseded (see the supersede rationale on
+ * strim_stage_op_superseded). Shutdown step three, after WaitForOps; MUST
+ * complete while the queue is still open — i.e. before Close (see the
+ * required order on strim_controller_close). */
 int strim_controller_teardown(strim_controller *c);
 
 /* --- Internal handlers (exposed for tests and the action queue) ----------

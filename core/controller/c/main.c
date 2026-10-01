@@ -32,8 +32,8 @@
  *   - the reconcile ticker calling request_reconcile every interval.
  *
  *   - graceful shutdown on SIGINT/SIGTERM: HTTP shutdown → ticker → listener
- *     → WaitForOps → Teardown → Close → join controller → destroy (the Go
- *     ordering in main.go:344-365).
+ *     → begin_shutdown → WaitForOps → Teardown → Close → join controller →
+ *     destroy (the Go ordering in main.go:344-365).
  *
  * ENTRYPOINT CONTRACT: this binary IS the image entrypoint (no
  * /entrypoint.sh, no /bin/sh — the plan's design). main() sources
@@ -1947,10 +1947,12 @@ static int run(void) {
         pthread_join(ticker_tid, NULL);
         pthread_join(listener_tid, NULL);
 
-        /* -- controller teardown in Go order: WaitForOps → Teardown → Close
-         *    → Run returns. The controller thread is the ONLY ws_send
-         *    producer (notify_listeners runs on the action-queue thread), so
-         *    it MUST be joined before the HTTP server is destroyed. */
+        /* -- controller teardown in Go order: begin_shutdown (suppress new
+         *    reconcile fires) → WaitForOps → Teardown → Close → Run returns.
+         *    The controller thread is the ONLY ws_send producer
+         *    (notify_listeners runs on the action-queue thread), so it MUST
+         *    be joined before the HTTP server is destroyed. */
+        strim_controller_begin_shutdown(controller);
         strim_controller_wait_for_ops(controller);
         strim_controller_teardown(controller);
         strim_controller_close(controller);
