@@ -25,6 +25,10 @@ test --test_summary=terse
 
 common --noenable_workspace
 
+# Opt out of Aspect ruleset usage telemetry (aspect_tools_telemetry); the
+# industry-standard DO_NOT_TRACK env is read by the module's repository rule.
+common --repo_env=DO_NOT_TRACK=1
+
 build --disk_cache=~/.cache/strimserver-bazel-cache
 
 # =============================================================================
