@@ -257,6 +257,12 @@ if [ "$ENABLE_DDNS" = "true" ]; then
    #    bypasses AL2023's systemd-resolved cache (stale TTLs and negative-cached
    #    NXDOMAIN would otherwise produce false failures). c-ares applies its
    #    own internal query timeout, so no per-query timeout env is needed.
+   #    Invocation shape: the container command is `/strim-ddns check
+   #    <host> <domain>` -- NOT a bare `check`. `ctr run` treats the first
+   #    positional after the container name as the container command, which
+   #    overrides the image ENTRYPOINT (/strim-ddns); a bare `check` would
+   #    make runc exec a literal `check` binary that does not exist. The
+   #    leading /strim-ddns is required.
    #    Per-iteration invocation: `check` needs no DDNS password, so no
    #    password bind-mount or DDNS_PASSWORD_FILE env is passed. The
    #    resolv.conf + hosts bind-mounts mirror the strim-ddns unit and are
@@ -273,7 +279,7 @@ if [ "$ENABLE_DDNS" = "true" ]; then
       DDNS_RESOLVED_IP="$(sudo ctr -n "$CONTAINERD_NAMESPACE" run --rm --net-host \
          --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
          --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
-         docker.io/library/strim-ddns:latest strim-ddns check "$DDNS_HOST" "$DDNS_DOMAIN")" || DDNS_RESOLVED_IP=""
+         docker.io/library/strim-ddns:latest strim-ddns /strim-ddns check "$DDNS_HOST" "$DDNS_DOMAIN")" || DDNS_RESOLVED_IP=""
       if [ -n "$DDNS_RESOLVED_IP" ] && [ "$DDNS_RESOLVED_IP" = "$PUBLIC_IP" ]; then
          DDNS_VERIFIED=1
          break

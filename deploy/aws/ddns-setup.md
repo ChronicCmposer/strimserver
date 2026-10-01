@@ -112,7 +112,7 @@ you can confirm the same check directly:
 sudo ctr -n strimserver run --rm --net-host \
   --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
   --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
-  docker.io/library/strim-ddns:latest strim-ddns check strim example.com
+  docker.io/library/strim-ddns:latest strim-ddns /strim-ddns check strim example.com
 ```
 
 The DDNS timer and service remain the ongoing health signals:

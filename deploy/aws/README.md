@@ -318,7 +318,7 @@ task attached to the GPU via CDI.
 sudo ctr -n strimserver run --rm --net-host \
   --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
   --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
-  docker.io/library/strim-ddns:latest strim-ddns check strim example.com
+  docker.io/library/strim-ddns:latest strim-ddns /strim-ddns check strim example.com
 ```
 
 `deploy.sh` verified the record at deploy time the same way — in-container,
