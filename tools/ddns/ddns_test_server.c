@@ -3,11 +3,15 @@
  *
  * Binds 127.0.0.1 on an ephemeral port, prints the chosen port to stdout on
  * a single line (flushed), then serves argv[1] as the fixed response body to
- * every request until killed. Each request's first line is appended to the
- * log file given in argv[2], so the smoke test can assert the query params
- * (host/domain/password/ip) the client actually sent. Mirrors the repo's
- * notify_stub pattern (core/notify_stub.c): a tiny static C double built by
- * the same musl transition, runnable under qemu on any host.
+ * every request until killed. The same body serves both the update endpoint
+ * (/update, plain-text/XML replies) and the DoH endpoint (/resolve, JSON
+ * replies); the smoke test picks the URL and per-case body. Each request's
+ * full text (request line + headers) is appended to the log file given in
+ * argv[2], so the smoke test can assert the query params (host/domain/
+ * password/ip, or the DoH name=/type=A) and the Accept header the client
+ * actually sent. Mirrors the repo's notify_stub pattern
+ * (core/notify_stub.c): a tiny static C double built by the same musl
+ * transition, runnable under qemu on any host.
  */
 
 #include <arpa/inet.h>
@@ -97,11 +101,9 @@ int main(int argc, char **argv) {
             }
         }
         req[got] = '\0';
-        /* The request log captures the first line (method + target). */
-        char *nl = strchr(req, '\n');
-        if (nl) {
-            *nl = '\0';
-        }
+        /* The request log captures the whole request (request line +
+         * headers) so tests can assert the query params and the Accept
+         * header. */
         fprintf(logf, "%s\n", req);
         fflush(logf);
         (void)!write(cli, response, (size_t)n);

@@ -56,8 +56,14 @@ At the end of the deploy run `deploy.sh`:
 4. Runs a one-shot refresh passing `ip=$PUBLIC_IP` explicitly (`DDNS_IP=` via a
    temporary EnvironmentFile), so the record points at this box immediately;
    the env file is removed after the run.
-5. Verifies — up to 120s, ~24×5s retries — that `strim.example.com` resolves to
-   the box's public IP. On mismatch it fails loudly (`exit 1`).
+5. Verifies — up to ~24 retries with a 6s-per-query DoH timeout
+   (`DDNS_CHECK_TIMEOUT`) and 5s between retries, up to a few minutes
+   worst-case, failing loudly on mismatch — that `strim.example.com` resolves to
+   the box's public IP. The verification runs **inside** the `strim-ddns`
+   container via its `check` subcommand, which queries a public
+   DNS-over-HTTPS resolver (Google/Cloudflare); it is therefore immune to the
+   box's local resolver cache and needs no bind-utils/dnsutils installed on
+   the box. On mismatch it fails loudly (`exit 1`).
 
 Subsequent timer runs keep `ip=` omitted — the `strim-ddns` client then lets
 Namecheap use the requester IP (the instance's auto-assigned public IP):
@@ -84,10 +90,27 @@ access uses the hostname:
 
 ## 5. Verify after deploy
 
+From the operator's own machine, as a sanity check that the record is live:
+
 ```sh
 host strim.example.com          # -> should return the box's public IP
-getent ahostsv4 strim.example.com
+```
 
+That is an operator-side check only — `deploy.sh`'s own verification runs
+**inside** the `strim-ddns` container via its `check` subcommand, which
+queries a public DNS-over-HTTPS resolver (Google/Cloudflare). Being
+in-container and over HTTPS, it is authoritative and immune to the box's
+local resolver cache — the box needs no bind-utils/dnsutils installed. On the
+box you can confirm the same check directly:
+
+```sh
+sudo ctr -n strimserver run --rm --net-host \
+  docker.io/library/strim-ddns:latest strim-ddns check strim example.com
+```
+
+The DDNS timer and service remain the ongoing health signals:
+
+```sh
 systemctl status strim-ddns.timer    # active (waiting), next refresh in ~6h
 journalctl -u strim-ddns.service     # "Good <ip>" / "No change" on success
 ```

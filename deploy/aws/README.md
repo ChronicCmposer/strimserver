@@ -235,8 +235,13 @@ the GPU-runtime step:
     transferred password to `/etc/strim-ddns/password` (root:root `0600`,
     transfer file scrubbed), install + enable the `strim-ddns.timer` (6h,
     `Persistent=true`), import `strim-ddns-container.tar`, run a one-shot
-    refresh passing `ip=$PUBLIC_IP`, then verify — up to 120s, fail-loud —
-    that `strim.example.com` resolves to the box's public IP.
+    refresh passing `ip=$PUBLIC_IP`, then verify — up to ~24 retries with a
+    6s-per-query DoH timeout (`DDNS_CHECK_TIMEOUT`) and 5s between retries, up
+    to a few minutes worst-case, failing loudly on mismatch —
+    that `strim.example.com` resolves to the box's public IP. The
+    verification runs **inside** the `strim-ddns` container via its `check`
+    subcommand (DNS-over-HTTPS to Google/Cloudflare), so it is immune to the
+    box's local resolver cache and needs no bind-utils/dnsutils on the box.
 11. Print the next-step commands (SSH service start, encoder configuration).
 
 `deploy.sh` deliberately leaves the service stopped — the unit is installed and
@@ -304,6 +309,16 @@ sudo ctr -n strimserver run --rm \
 Expect `h264_nvenc` and `hevc_nvenc`. Option B — while a stage is live
 (`normalize` / `scale_and_egress`), `nvidia-smi` shows the controller's ffmpeg
 task attached to the GPU via CDI.
+
+**DNS (DDNS):**
+
+```sh
+sudo ctr -n strimserver run --rm --net-host \
+  docker.io/library/strim-ddns:latest strim-ddns check strim example.com
+```
+
+`deploy.sh` verified the record at deploy time the same way — in-container,
+DNS-over-HTTPS (Google/Cloudflare) — so the box needs no bind-utils/dnsutils.
 
 **Build-time gates on the arm64 build:**
 

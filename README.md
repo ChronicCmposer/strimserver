@@ -863,7 +863,11 @@ by Namecheap Dynamic DNS (`deploy/aws/ddns-setup.md` covers
 the one-time setup). Supply the DDNS password via
 `DDNS_PASSWORD` (or `DDNS_PASSWORD_FILE`) in `.env`; `launch`
 bootstraps by the box's raw public IP because the hostname
-does not resolve until `deploy.sh` registers it.
+does not resolve until `deploy.sh` registers it. `deploy.sh`
+verifies that registration in-container via the `strim-ddns`
+container's `check` subcommand (DNS-over-HTTPS to
+Google/Cloudflare), so the check is cache-independent and the
+box needs no bind-utils/dnsutils.
 
 After the instance is reachable over SSH, run the setup
 script from the local machine:

@@ -249,16 +249,32 @@ if [ "$ENABLE_DDNS" = "true" ]; then
    set +x
    printf "%s refresh done!\n" "$DDNS_FQDN"
 
-   # 5) verify the record resolves to this box (120s budget: ~24 x 5s retries)
+   # 5) verify the record resolves to this box (bounded: ~24 retries; each
+   #    check query is capped at 6s per DoH endpoint via DDNS_CHECK_TIMEOUT,
+   #    with 5s slept between retries, so an all-failures run takes a few
+   #    minutes worst-case rather than unbounded time).
+   #    Resolve via the strim-ddns container's DoH `check` subcommand so the
+   #    lookup bypasses AL2023's systemd-resolved cache (stale TTLs and
+   #    negative-cached NXDOMAIN would otherwise produce false failures).
+   #    Per-iteration invocation: `check` needs no DDNS password, so no
+   #    password bind-mount or DDNS_PASSWORD_FILE env is passed. The
+   #    resolv.conf + hosts bind-mounts mirror the strim-ddns unit and are
+   #    required: the FROM-scratch image has no /etc/resolv.conf, so without
+   #    them the container cannot resolve the DoH endpoint hostnames.
    printf "verifying %s -> %s...\n" "$DDNS_FQDN" "$PUBLIC_IP"
    DDNS_VERIFIED=0
    for attempt in $(seq 1 24); do
-      DDNS_RESOLVED_IP="$(getent ahostsv4 "$DDNS_FQDN" 2>/dev/null | awk 'NR==1 {print $1}')" || DDNS_RESOLVED_IP=""
+      DDNS_RESOLVED_IP="$(sudo ctr -n "$CONTAINERD_NAMESPACE" run --rm --net-host \
+         --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
+         --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
+         docker.io/library/strim-ddns:latest strim-ddns check "$DDNS_HOST" "$DDNS_DOMAIN" 2>/dev/null)" || DDNS_RESOLVED_IP=""
       if [ -n "$DDNS_RESOLVED_IP" ] && [ "$DDNS_RESOLVED_IP" = "$PUBLIC_IP" ]; then
          DDNS_VERIFIED=1
          break
       fi
-      sleep 5
+      if [ "$attempt" -lt 24 ]; then
+         sleep 5
+      fi
    done
    if [ "$DDNS_VERIFIED" -ne 1 ]; then
       printf "\n*** ERROR: %s did not resolve to %s. ***\n" "$DDNS_FQDN" "$PUBLIC_IP"
