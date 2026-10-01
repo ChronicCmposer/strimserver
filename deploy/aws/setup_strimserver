@@ -5,9 +5,18 @@ import sys
 from urllib.parse import urlparse
 
 
+def ssh_identity_flags():
+    """['-i', <path>] when SSH_IDENTITY is set, else [] - ssh/scp then rely
+    on the agent / default keys, exactly as before."""
+    identity = os.environ.get("SSH_IDENTITY", "").strip()
+    if not identity:
+        return []
+    return ["-i", identity]
+
+
 def ssh_run(hostname, username, port, cmd, capture=False):
     ssh_cmd = os.environ.get("SSH_CMD", "ssh")
-    full_cmd = ssh_cmd.split() + ["-t", f"{username}@{hostname}", "-p", f"{port}", cmd]
+    full_cmd = ssh_cmd.split() + ssh_identity_flags() + ["-t", f"{username}@{hostname}", "-p", f"{port}", cmd]
     print(f"\n>>> Running: {cmd}")
     try:
         result = subprocess.run(full_cmd, text=True, check=True, capture_output=capture)
@@ -26,7 +35,7 @@ def run_ssh_commands(hostname, username, port, commands):
 def scp_to_remote(local_path, hostname, username, port, remote_path):
     scp_cmd = os.environ.get("SCP_CMD", "scp")
     # scp uses -P (uppercase) for the port, unlike ssh's -p.
-    full_cmd = scp_cmd.split() + ["-P", f"{port}", local_path, f"{username}@{hostname}:{remote_path}"]
+    full_cmd = scp_cmd.split() + ssh_identity_flags() + ["-P", f"{port}", local_path, f"{username}@{hostname}:{remote_path}"]
     print(f"\n>>> Uploading: {local_path} -> {username}@{hostname}:{remote_path}")
     try:
         subprocess.run(full_cmd, text=True, check=True)

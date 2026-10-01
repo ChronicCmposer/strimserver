@@ -113,11 +113,19 @@ deploy/aws/deploy-infra
 `KEY_NAME` (the EC2 key pair) is **not** a stack parameter — it is set in
 `deploy/aws/.env` and consumed by `launch`.
 
+`SSH_IDENTITY` — also set in `deploy/aws/.env` — holds the full path to the
+operator's SSH private key. `launch`'s SSH probe, `setup_strimserver`, and the
+`scp` uploads append it to their ssh/scp invocations as `-i <path>`; when it is
+empty they omit `-i` entirely and rely on the agent / default keys, exactly as
+before. `SSH_CMD` stays a plain `ssh` — key selection is `SSH_IDENTITY`, not
+flags in `SSH_CMD`. The path is an operator secret: it lives only in your
+gitignored `deploy/aws/.env`, never in committed files.
+
 ## 4. Launch — staged cutover
 
 ```sh
 cp deploy/aws/.env.example deploy/aws/.env
-$EDITOR deploy/aws/.env   # KEY_NAME, DEPLOYMENT_SRC, DEPLOYMENT_SHA256, TWITCH_STREAM_KEY, DDNS_PASSWORD, INSTANCE_TYPE
+$EDITOR deploy/aws/.env   # KEY_NAME, SSH_IDENTITY, DEPLOYMENT_SRC, DEPLOYMENT_SHA256, TWITCH_STREAM_KEY, DDNS_PASSWORD, INSTANCE_TYPE
 set -a; . deploy/aws/.env; set +a
 ```
 

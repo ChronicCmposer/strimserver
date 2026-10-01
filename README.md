@@ -829,7 +829,7 @@ spot instance by default (`--no-spot` for on-demand):
 
 ```bash
 cp deploy/aws/.env.example deploy/aws/.env
-$EDITOR deploy/aws/.env          # set KEY_NAME, DEPLOYMENT_SRC, TWITCH_STREAM_KEY, etc.
+$EDITOR deploy/aws/.env          # set KEY_NAME, SSH_IDENTITY, DEPLOYMENT_SRC, TWITCH_STREAM_KEY, etc.
 set -a
 . deploy/aws/.env
 set +a

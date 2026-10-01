@@ -329,7 +329,8 @@ def _is_nonloopback_ip(value):
 
 @dataclass(frozen=True)
 class Ssh:
-    """SSH settings (client, user, port), read once from the environment.
+    """SSH settings (client, user, port, optional identity), read once from
+    the environment.
 
     SSH_HOST is deliberately not consulted: the bootstrap handoff always
     connects by the instance's raw public IP, because the DDNS name
@@ -341,8 +342,12 @@ class Ssh:
 
     @classmethod
     def from_env(cls):
+        cmd = os.environ.get("SSH_CMD", "ssh").split()
+        identity = os.environ.get("SSH_IDENTITY", "").strip()
+        if identity:
+            cmd += ["-i", identity]
         return cls(
-            cmd=os.environ.get("SSH_CMD", "ssh").split(),
+            cmd=cmd,
             user=os.environ.get("SSH_USER", "ec2-user"),
             port=os.environ.get("SSH_PORT", "22"),
         )
@@ -499,7 +504,7 @@ class Probe(enum.Enum):
 def wait_for_ssh(ssh, host, total=240, interval=5, connect_timeout=5):
     """Poll SSH reachability with the real client, so the handoff to setup does
     not race sshd coming up. Probes the exact path setup will use - same SSH_CMD,
-    user, port, and `host` (the raw public IP the bootstrap connects by, since
+    SSH_IDENTITY, user, port, and `host` (the raw public IP the bootstrap connects by, since
     the DDNS name isn't registered until deploy.sh). Because the probe carries
     StrictHostKeyChecking=accept-new, a successful poll also records `host` in
     known_hosts as a side effect, so setup's first ssh never stops to ask the
@@ -614,7 +619,7 @@ def post_launch(cfg, public_ip):
     elif status is Probe.REACHABLE:
         print("ssh is up but rejected key auth. If the instance just booted, the "
               "key may still be installing (retry shortly); otherwise check "
-              "SSH_CMD / the KEY_NAME used at launch.")
+              "SSH_CMD / SSH_IDENTITY and the KEY_NAME used at launch.")
 
     # Offer to hand straight off to setup by replacing this process. Returns only
     # if declined/unavailable; on accept it execs and the lines below never print.
