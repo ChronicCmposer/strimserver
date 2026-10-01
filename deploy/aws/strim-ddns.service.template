@@ -1,0 +1,23 @@
+[Unit]
+Description=strim Namecheap Dynamic DNS refresh (one-shot)
+After=containerd.service network-online.target
+Requires=containerd.service
+
+[Service]
+Type=oneshot
+# Runs as root so it can read the DDNS password (root:root 0600, installed by
+# deploy.sh to /etc/strim-ddns/password). The operator's DDNS_HOST / DDNS_DOMAIN
+# (and an optional explicit DDNS_IP) are read at runtime from the deployed
+# /mnt/nvme/config/strimserver.env (EnvironmentFile); timer runs leave DDNS_IP
+# empty so the client omits ip= and Namecheap uses the requester IP.
+EnvironmentFile=-/mnt/nvme/config/strimserver.env
+ExecStart=/usr/bin/ctr -n strimserver run --rm --net-host --read-only --cap-drop ALL \
+   --memory-limit 67108864 \
+   --env DDNS_HOST=${DDNS_HOST} \
+   --env DDNS_DOMAIN=${DDNS_DOMAIN} \
+   --env DDNS_PASSWORD_FILE=/etc/strim-ddns/password \
+    --env DDNS_IP=${DDNS_IP} \
+    --mount type=bind,src=/etc/strim-ddns/password,dst=/etc/strim-ddns/password,options=rbind:ro \
+    --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
+   --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
+   __IMAGE__ __CONTAINER__

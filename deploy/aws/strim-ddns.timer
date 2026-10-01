@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh strim DDNS record every 6h
+
+[Timer]
+OnCalendar=*-*-* 0/6:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

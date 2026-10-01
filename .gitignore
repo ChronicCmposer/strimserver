@@ -20,10 +20,11 @@ tools/ffmpeg-dist/1
 # stray duplicate copy of check-deps.sh (not source; the .sh file is canonical)
 tools/ffmpeg-dist/check-deps
 
-# python caches / local-only obs paths
+# python caches / local-only obs tooling (machine-specific paths, usernames, hostnames;
+# never committed — see tools/check-no-infra-identifiers.sh)
 deploy/aws/__pycache__/
 tools/local-obs/
-tools/stream-mode/__pycache__/
+tools/stream-mode/
 
 # Local implementation plans — throwaway working docs; not part of the repo.
 ideas/

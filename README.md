@@ -181,9 +181,10 @@ gracefully on shutdown.
   unit, importing the OCI images into containerd, generating
   the SRT passphrase, and preparing config/log/video
   directories.
-- Local encoder helper scripts for configuring `/etc/hosts`,
-  writing the SRT passphrase into a local env file, and
-  streaming an OBS-provided Unix socket to the EC2 ingest
+- Local encoder helper scripts for pointing the encoder at
+  the `strim.example.com` Dynamic DNS hostname (no `/etc/hosts`
+  edits), writing the SRT passphrase into a local env file,
+  and streaming an OBS-provided Unix socket to the EC2 ingest
   endpoint.
 - Offline "be right back" screen generation helpers for
   1080p60, 1440p60, and 2160p60 HEVC files.
@@ -856,6 +857,14 @@ Your Twitch stream key is supplied here via `TWITCH_STREAM_KEY`
 instance as a `0600` file at deploy time — it is never baked
 into the bundle.
 
+Once deployed, the box is exposed for SSH, the local encoder,
+and the Stream Deck plugin as `strim.example.com`, kept current
+by Namecheap Dynamic DNS (`deploy/aws/ddns-setup.md` covers
+the one-time setup). Supply the DDNS password via
+`DDNS_PASSWORD` (or `DDNS_PASSWORD_FILE`) in `.env`; `launch`
+bootstraps by the box's raw public IP because the hostname
+does not resolve until `deploy.sh` registers it.
+
 After the instance is reachable over SSH, run the setup
 script from the local machine:
 
@@ -936,12 +945,17 @@ Use the command printed by the EC2 deploy script to set the
 remote host and generated passphrase:
 
 ```bash
-configure-local-encoder.zsh --strimserver-host <public-ip> --passphrase <generated-passphrase>
+configure-local-encoder.zsh --strimserver-host strim.example.com --passphrase <generated-passphrase>
 ```
 
-This invokes `set-strimserver-host.zsh` (updates
-`/etc/hosts`) and `set-srt-passphrase.zsh` (writes the
-passphrase into the local env file).
+`--strimserver-host` is required — pass the operator's Dynamic
+DNS hostname (e.g. `strim.example.com`), which resolves the box
+through public DNS — nothing edits `/etc/hosts`, and the former
+`set-strimserver-host.zsh` helper is gone. The script writes
+`STRIMSERVER_HOST` into the local env file and invokes
+`set-srt-passphrase.zsh` for the passphrase. The one-time
+Namecheap setup for the `strim` Dynamic DNS host is documented
+in `deploy/aws/ddns-setup.md`.
 
 Run the local encoder:
 
@@ -962,9 +976,10 @@ plugin (`@elgato/streamdeck` v2, Node >= 24, built with
 Rollup) that adds a **Toggle Egress** action. The action
 subscribes to the controller's WebSocket status stream and
 sends start/stop control commands, reflecting live stage
-state on the button. By default it targets
-`http://strimserver:4000`, overridable via the
-`STRIMSERVER_URL` environment variable; the port must match
+state on the button. It targets the operator's Dynamic DNS
+hostname (e.g. `http://strim.example.com:4000`), injected via
+the `STRIMSERVER_URL` environment variable (defaulting to
+`http://localhost:4000`); the port must match
 `CONTROLLER_HTTP_PORT`. The plugin's wire types in
 `src/client/types.generated.ts` are produced by `make
 generate` from the controller's Go definitions.

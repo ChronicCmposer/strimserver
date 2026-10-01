@@ -42,6 +42,16 @@ mv /mnt/nvme/notify /mnt/nvme/bin/notify
 chmod +x /mnt/nvme/bin/transcode.sh
 chmod +x /mnt/nvme/bin/notify
 
+# --- Dynamic DNS config (from the on-box strimserver.env) ---------------------
+# The operator controls Dynamic DNS via ENABLE_DDNS (toggle), DDNS_HOST (default
+# "strim"), and DDNS_DOMAIN (the domain the record is registered under). Source
+# the config env file here so the DDNS block below reads the exact values the
+# strim-ddns unit will read at runtime via its EnvironmentFile.
+source /mnt/nvme/config/strimserver.env
+ENABLE_DDNS="${ENABLE_DDNS:-false}"
+DDNS_HOST="${DDNS_HOST:-strim}"
+DDNS_DOMAIN="${DDNS_DOMAIN:-}"
+
 # --- inject Twitch stream key ------
 ENV_FILE=/mnt/nvme/config/strimserver.env
 KEY_FILE=/mnt/nvme/twitch-stream-key
@@ -180,10 +190,94 @@ printf "logs directory created: %s\n" "$LOGS_DIRECTORY"
 
 printf "srt passphrase: %s\n\n" "$SRT_READ_PASSPHRASE"
 
-# printf "Services running on %s: %s \n\n" "$INSTANCE_TYPE" "$PUBLIC_IP"
-printf "ssh strimserver \"sudo systemctl start strimserver.service\"\n\n"
+# --- Namecheap Dynamic DNS (gated by ENABLE_DDNS) -----------------------------
+# Dynamic DNS is optional. When ENABLE_DDNS=true, the box is referenceable as
+# $DDNS_HOST.$DDNS_DOMAIN; the record is refreshed on a 6-hour timer and once
+# now so the hostname resolves to this box immediately. When disabled, the box
+# is reachable by its public IP only.
+if [ "$ENABLE_DDNS" = "true" ]; then
+   if [ -z "$DDNS_DOMAIN" ]; then
+      printf "\n*** ERROR: ENABLE_DDNS=true but DDNS_DOMAIN is not set. ***\n"
+      printf "Set DDNS_DOMAIN in %s so the Dynamic DNS record can be refreshed.\n\n" "$ENV_FILE"
+      exit 1
+   fi
+   DDNS_FQDN="$DDNS_HOST.$DDNS_DOMAIN"
+   printf "configuring %s dynamic DNS...\n" "$DDNS_FQDN"
 
-printf "configure-local-encoder.zsh --strimserver-host %s --passphrase %s\n\n" "$PUBLIC_IP" "$SRT_READ_PASSPHRASE"
+   # 1) install the DDNS password (root:root 0600) and scrub the transfer file
+   DDNS_PASSWORD_SRC=/mnt/nvme/ddns-password
+   DDNS_PASSWORD_DST=/etc/strim-ddns/password
+   if [ -s "$DDNS_PASSWORD_SRC" ]; then
+      printf "installing DDNS password...\n"
+      sudo install -D -m 600 -o root -g root "$DDNS_PASSWORD_SRC" "$DDNS_PASSWORD_DST"
+      # scrub the transfer file
+      if command -v shred >/dev/null 2>&1; then shred -u "$DDNS_PASSWORD_SRC"; else rm -f "$DDNS_PASSWORD_SRC"; fi
+      printf "DDNS password installed to %s\n" "$DDNS_PASSWORD_DST"
+   else
+      printf "\n*** ERROR: no DDNS password provided. ***\n"
+      printf "%s cannot be refreshed without the Namecheap Dynamic DNS\n" "$DDNS_FQDN"
+      printf "password in %s.\n\n" "$DDNS_PASSWORD_SRC"
+      exit 1
+   fi
+
+   # 2) install the strim-ddns unit + timer and arm the 6-hour refresh
+   printf "installing strim-ddns unit and timer...\n"
+   set -x
+   sudo install -D -m 644 /mnt/nvme/strim-ddns.service /etc/systemd/system/strim-ddns.service
+   sudo install -D -m 644 /mnt/nvme/strim-ddns.timer /etc/systemd/system/strim-ddns.timer
+   rm -f /mnt/nvme/strim-ddns.service /mnt/nvme/strim-ddns.timer
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now strim-ddns.timer
+   set +x
+   printf "strim-ddns unit and timer installed and enabled!\n"
+
+   # 3) import the strim-ddns image
+   printf "importing strim-ddns image...\n"
+   set -x
+   sudo ctr -n $CONTAINERD_NAMESPACE i import strim-ddns-container.tar
+   rm -f strim-ddns-container.tar
+   set +x
+   printf "strim-ddns image imported!\n"
+
+   # 4) one-shot refresh now so $DDNS_FQDN points at this box immediately. The
+   #    unit reads DDNS_HOST / DDNS_DOMAIN / DDNS_IP from
+   #    /mnt/nvme/config/strimserver.env via EnvironmentFile; DDNS_IP is left
+   #    empty so the client omits ip= and Namecheap uses the requester IP.
+   printf "refreshing %s -> %s...\n" "$DDNS_FQDN" "$PUBLIC_IP"
+   set -x
+   sudo systemctl start strim-ddns.service
+   set +x
+   printf "%s refresh done!\n" "$DDNS_FQDN"
+
+   # 5) verify the record resolves to this box (120s budget: ~24 x 5s retries)
+   printf "verifying %s -> %s...\n" "$DDNS_FQDN" "$PUBLIC_IP"
+   DDNS_VERIFIED=0
+   for attempt in $(seq 1 24); do
+      DDNS_RESOLVED_IP="$(getent ahostsv4 "$DDNS_FQDN" 2>/dev/null | awk 'NR==1 {print $1}')" || DDNS_RESOLVED_IP=""
+      if [ -n "$DDNS_RESOLVED_IP" ] && [ "$DDNS_RESOLVED_IP" = "$PUBLIC_IP" ]; then
+         DDNS_VERIFIED=1
+         break
+      fi
+      sleep 5
+   done
+   if [ "$DDNS_VERIFIED" -ne 1 ]; then
+      printf "\n*** ERROR: %s did not resolve to %s. ***\n" "$DDNS_FQDN" "$PUBLIC_IP"
+      printf "Expected: %s   Actual: %s\n" "$PUBLIC_IP" "${DDNS_RESOLVED_IP:-<not resolved>}"
+      exit 1
+   fi
+   printf "DDNS verified: %s -> %s\n" "$DDNS_FQDN" "$DDNS_RESOLVED_IP"
+
+   # printf "Services running on %s: %s \n\n" "$INSTANCE_TYPE" "$PUBLIC_IP"
+   printf "ssh %s \"sudo systemctl start strimserver.service\"\n\n" "$DDNS_FQDN"
+
+   printf "configure-local-encoder.zsh --strimserver-host %s --passphrase %s\n\n" "$DDNS_FQDN" "$SRT_READ_PASSPHRASE"
+else
+   printf "\nDDNS is disabled (ENABLE_DDNS is not \"true\" in %s).\n" "$ENV_FILE"
+   printf "The box is reachable by public IP only; no Dynamic DNS record is refreshed.\n\n"
+   printf "ssh %s \"sudo systemctl start strimserver.service\"\n\n" "$PUBLIC_IP"
+
+   printf "configure-local-encoder.zsh --strimserver-host %s --passphrase %s\n\n" "$PUBLIC_IP" "$SRT_READ_PASSPHRASE"
+fi
 
 rm -f /mnt/nvme/deploy.sh
 

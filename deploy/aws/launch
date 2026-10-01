@@ -47,8 +47,10 @@ Env vars (typically sourced from deploy/aws/.env):
                         is fetched from the published arm64 Go .sha256 release
                         asset
   AWS_REGION            optional; otherwise your CLI's configured region is used
-  SSH_HOST              hostname --wait offers to map in /etc/hosts (default:
-                        PROJECT_NAME; ignored when it is already an IP address)
+  SSH_HOST              ignored for the bootstrap target: the handoff to
+                        setup_strimserver always connects by the instance's raw
+                        public IP (strim.example.com doesn't resolve until
+                        deploy.sh registers it with Dynamic DNS)
 """
 import argparse
 import enum
@@ -285,11 +287,18 @@ def resolve_subnet(cfg, sg_id):
     return chosen
 
 
+# Legacy /etc/hosts markers from pre-DDNS launches: older launch versions wrote
+# a managed block ('# BEGIN strimserver (managed by deploy/aws/launch)' through
+# '# END strimserver') mapping the box's public IP to a hostname so the operator
+# could ssh by name. The box is now reached by its raw public IP until deploy.sh
+# registers strim.example.com with Dynamic DNS, so cleanup_stale_hosts_entries()
+# is the only remaining user of these strings.
 HOSTS_PATH = "/etc/hosts"
 HOSTS_BAK = HOSTS_PATH + ".strimserver.bak"
 HOSTS_NEW = HOSTS_PATH + ".strimserver.new"
 HOSTS_BEGIN = "# BEGIN strimserver (managed by deploy/aws/launch)"
 HOSTS_END = "# END strimserver"
+HOSTS_ALIAS = "strimserver"
 
 # Fixed script: the new hosts file arrives on stdin and the target/backup/temp
 # paths arrive as positional args ($1/$2/$3), so nothing is interpolated into
@@ -308,38 +317,34 @@ mv -f "$tmp" "$dst"
 """
 
 
-def _is_ip(value):
+def _is_nonloopback_ip(value):
+    """True when value is a valid IP that is not loopback. The stale /etc/hosts
+    alias always pointed at an EC2 public address, so a loopback mapping (e.g.
+    '127.0.0.1 strimserver') is treated as intentional and never removed."""
     try:
-        ipaddress.ip_address(value)
-        return True
+        return not ipaddress.ip_address(value).is_loopback
     except ValueError:
         return False
 
 
 @dataclass(frozen=True)
 class Ssh:
-    """SSH settings, read once from the environment.
+    """SSH settings (client, user, port), read once from the environment.
 
-    `host` is the operator's SSH_HOST only when it is a real hostname; an
-    IP-valued SSH_HOST is dropped to "" so it never competes with the hostname
-    we map in /etc/hosts (against a freshly launched instance it would be a
-    stale address anyway).
+    SSH_HOST is deliberately not consulted: the bootstrap handoff always
+    connects by the instance's raw public IP, because the DDNS name
+    (strim.example.com) doesn't resolve until deploy.sh registers it.
     """
     cmd: list
     user: str
     port: str
-    host: str
 
     @classmethod
     def from_env(cls):
-        host = os.environ.get("SSH_HOST", "").strip()
-        if host and _is_ip(host):
-            host = ""
         return cls(
             cmd=os.environ.get("SSH_CMD", "ssh").split(),
             user=os.environ.get("SSH_USER", "ec2-user"),
             port=os.environ.get("SSH_PORT", "22"),
-            host=host,
         )
 
 
@@ -400,84 +405,71 @@ def confirm(prompt):
         return False
 
 
-def hosts_alias(project, ssh):
-    """Hostname to map in /etc/hosts: the operator's SSH_HOST when it is a real
-    name, else the project name."""
-    return ssh.host or project
+def cleanup_stale_hosts_entries():
+    """One-time removal of pre-DDNS /etc/hosts leftovers.
 
-
-def strip_managed_block(text):
-    """Drop the BEGIN..END region (to EOF if END is missing)."""
-    out, inside = [], False
-    for line in text.splitlines(keepends=True):
-        stripped = line.strip()
-        if inside:
-            inside = stripped != HOSTS_END
-            continue
-        if stripped == HOSTS_BEGIN:
-            inside = True
-            continue
-        out.append(line)
-    return "".join(out)
-
-
-def unmanaged_entry(text, hostname):
-    """First line outside the managed block that already claims hostname."""
-    for line in text.splitlines():
-        fields = line.split("#", 1)[0].split()
-        if len(fields) >= 2 and hostname in fields[1:]:
-            return line.strip()
-    return None
-
-
-def render_hosts(current, ip, hostname):
-    body = strip_managed_block(current).rstrip("\n")
-    block = f"{HOSTS_BEGIN}\n{ip}\t{hostname}\n{HOSTS_END}\n"
-    return (body + "\n\n" if body else "") + block
-
-
-class HostsPlan(enum.Enum):
-    """What plan_hosts_change decided about the managed /etc/hosts block."""
-    CONFLICT = "conflict"  # an unmanaged entry already claims the hostname
-    NOOP = "noop"          # the managed block already maps it
-    WRITE = "write"        # payload is the new file text to write
-
-
-def plan_hosts_change(current, ip, hostname):
-    """Pure decision about mapping hostname -> ip in `current`. Returns a
-    (HostsPlan, payload) pair: the conflicting line for CONFLICT, the new file
-    text for WRITE, None for NOOP.
+    Older launch versions wrote a managed block ('# BEGIN strimserver (managed
+    by deploy/aws/launch)' ... '# END strimserver') mapping the box's public IP
+    to a hostname so the operator could ssh by name. The box is now reached by
+    its raw public IP until deploy.sh registers strim.example.com, so those
+    leftovers are stale and are removed here - and only those: content inside
+    the managed block (ours, by marker) and a standalone alias line whose only
+    hostname is the project alias. Anything else is left untouched; a line that
+    merely mentions 'strimserver' (loopback mapping, extra hostnames, ...) gets
+    a manual instruction instead of a guess. Idempotent: a second run finds
+    nothing and changes nothing.
     """
-    conflict = unmanaged_entry(strip_managed_block(current), hostname)
-    if conflict:
-        return HostsPlan.CONFLICT, conflict
-    new = render_hosts(current, ip, hostname)
-    if new == current:
-        return HostsPlan.NOOP, None
-    return HostsPlan.WRITE, new
-
-
-def upsert_hosts_entry(ip, hostname):
-    """Rewrite the managed block. True if /etc/hosts now maps hostname -> ip."""
+    if not sys.platform.startswith("linux"):
+        return
     try:
         with open(HOSTS_PATH) as f:
             current = f.read()
     except OSError as e:
         print(f"could not read {HOSTS_PATH}: {e}")
-        return False
+        return
 
-    plan, payload = plan_hosts_change(current, ip, hostname)
-    if plan is HostsPlan.CONFLICT:
-        print(f"\n{HOSTS_PATH} already has an unmanaged entry for '{hostname}':\n"
-              f"    {payload}\n"
-              f"Leaving it alone - it would shadow the managed block anyway.\n"
-              f"Edit or remove that line and re-run, or use SSH_HOST={ip} below.")
-        return False
-    if plan is HostsPlan.NOOP:
-        print(f"{HOSTS_PATH} already maps {hostname} -> {ip}")
-        return True
+    kept, removed = [], []
+    inside = False
+    for line in current.splitlines(keepends=True):
+        stripped = line.strip()
+        if inside:
+            removed.append(stripped)
+            inside = stripped != HOSTS_END
+            continue
+        if stripped == HOSTS_BEGIN:
+            inside = True
+            removed.append(stripped)
+            continue
+        fields = line.split("#", 1)[0].split()
+        if len(fields) == 2 and fields[1] == HOSTS_ALIAS and _is_nonloopback_ip(fields[0]):
+            removed.append(stripped)
+            continue
+        kept.append(line)
 
-    new = payload
+    # Any 'strimserver' line that survived the safe removal might be intentional
+    # (loopback mapping, extra hostnames, non-IP first field) - never guess.
+    for line in kept:
+        fields = line.split("#", 1)[0].split()
+        if HOSTS_ALIAS in fields[1:]:
+            print(f"note: this {HOSTS_PATH} line mentions '{HOSTS_ALIAS}' but was "
+                  f"left alone (it does not look like a stale launch mapping) - "
+                  f"remove it by hand if it is stale:\n    {line.strip()}")
+
+    if not removed:
+        print(f"{HOSTS_PATH} has no stale strimserver entries; nothing to clean up")
+        return
+
+    print(f"removing stale strimserver entries from {HOSTS_PATH}:")
+    for line in removed:
+        print(f"    {line}")
+
+    new = "".join(kept)
+    if not new.strip():
+        print(f"note: {HOSTS_PATH} would be left empty (it held only strimserver "
+              f"lines); refusing to write that. Remove the lines above by hand "
+              f"and re-add any localhost entries.")
+        return
+
     if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
         print("sudo may prompt for your password...")
     try:
@@ -486,74 +478,13 @@ def upsert_hosts_entry(ip, hostname):
                        input=new, text=True, check=True)
     except subprocess.CalledProcessError as e:
         print(f"failed to update {HOSTS_PATH} (exit {e.returncode}); "
-              f"nothing was changed.")
-        return False
+              f"nothing was changed. Remove the lines above by hand if needed.")
+        return
     except KeyboardInterrupt:
         print("\naborted; nothing was changed.")
-        return False
-    print(f"{HOSTS_PATH} updated: {hostname} -> {ip}  "
+        return
+    print(f"{HOSTS_PATH} cleaned of stale strimserver entries "
           f"(previous file saved as {HOSTS_BAK})")
-    return True
-
-
-def maybe_upsert_hosts(ip, hostname):
-    """Offer the /etc/hosts edit. Skips silently when it cannot apply."""
-    if not sys.platform.startswith("linux"):
-        return False
-    if not confirm(f"press enter to upsert '{ip} {hostname}' into {HOSTS_PATH} "
-                   f"(ctrl-c to skip): "):
-        return False
-    return upsert_hosts_entry(ip, hostname)
-
-
-# The box runs stock sshd on 22 and the experimental OpenSSH on this port
-# (tools/openssh/sshd_config); a relaunch can leave a stale key under either.
-EXPERIMENTAL_SSH_PORT = "2222"
-
-
-def scrub_known_hosts(hostname, port):
-    """Evict any stale host key for hostname from known_hosts, under every name
-    ssh could have filed it under: the bare name (the default port-22 form, e.g.
-    'strimserver') plus the bracketed [hostname]:PORT form for each non-22 port
-    we might connect on (SSH_PORT and the experimental OpenSSH port, e.g.
-    '[strimserver]:2222'). Same file ssh's accept-new and the exec'd setup use,
-    so the scrub, the poll, and the handoff all agree on one file.
-    """
-    kh = os.path.expanduser("~/.ssh/known_hosts")
-    if not os.path.exists(kh):
-        print(f"no {kh}; nothing to scrub")
-        return
-    names = [hostname]
-    for p in (port, EXPERIMENTAL_SSH_PORT):
-        if p and p != "22":
-            bracket = f"[{hostname}]:{p}"
-            if bracket not in names:
-                names.append(bracket)
-    for name in names:
-        try:
-            r = subprocess.run(["ssh-keygen", "-f", kh, "-R", name],
-                               capture_output=True, text=True)
-        except FileNotFoundError:
-            print("warning: ssh-keygen not found; skipping known_hosts cleanup")
-            return
-        if r.returncode != 0:
-            print(f"warning: ssh-keygen -R {name} failed: {(r.stderr or '').strip()}")
-    print(f"removed any stale host keys for {', '.join(names)} from {kh}  "
-          f"(previous file saved as {kh}.old)")
-
-
-def maybe_scrub_known_hosts(hostname, port, mapped):
-    """Offer to drop the old host key for hostname from known_hosts.
-
-    Only after /etc/hosts was just updated: the reused hostname now points at a
-    new instance, so a stale key (on either sshd port) would make SSH refuse to
-    connect.
-    """
-    if not mapped:
-        return
-    if confirm(f"press enter to drop the old host key for '{hostname}' from "
-               f"known_hosts (ctrl-c to skip): "):
-        scrub_known_hosts(hostname, port)
 
 
 class Probe(enum.Enum):
@@ -568,10 +499,11 @@ class Probe(enum.Enum):
 def wait_for_ssh(ssh, host, total=240, interval=5, connect_timeout=5):
     """Poll SSH reachability with the real client, so the handoff to setup does
     not race sshd coming up. Probes the exact path setup will use - same SSH_CMD,
-    user, port, and `host` (the name setup connects by, not the raw IP). Because
-    the probe carries StrictHostKeyChecking=accept-new, a successful poll also
-    records `host` in known_hosts as a side effect, so setup's first ssh never
-    stops to ask the operator to trust the host. Returns a Probe member.
+    user, port, and `host` (the raw public IP the bootstrap connects by, since
+    the DDNS name isn't registered until deploy.sh). Because the probe carries
+    StrictHostKeyChecking=accept-new, a successful poll also records `host` in
+    known_hosts as a side effect, so setup's first ssh never stops to ask the
+    operator to trust the host. Returns a Probe member.
     """
     probe = ssh.cmd + [
         "-o", "BatchMode=yes",
@@ -613,10 +545,11 @@ def wait_for_ssh(ssh, host, total=240, interval=5, connect_timeout=5):
     return Probe.TIMEOUT
 
 
-def effective_ssh_host(ssh, public_ip, hostname, mapped):
-    """The host setup_strimserver will connect to: the operator's SSH_HOST when
-    set, else the mapped hostname (when /etc/hosts was written), else the IP."""
-    return ssh.host or (hostname if mapped else public_ip)
+def effective_ssh_host(public_ip):
+    """The host setup_strimserver will connect to: always the instance's raw
+    public IP. The DDNS name (strim.example.com) doesn't resolve until deploy.sh
+    registers it, so it cannot be used for the bootstrap handoff."""
+    return public_ip
 
 
 def offer_exec_setup(setup_host):
@@ -653,24 +586,21 @@ def offer_exec_setup(setup_host):
         print(f"could not exec {setup}: {e}")
 
 
-def post_launch(cfg, public_ip, project):
+def post_launch(cfg, public_ip):
     """Configure local access to the new instance and offer the setup handoff:
-    map /etc/hosts, scrub the stale host key, poll ssh, then offer the execve
-    handoff. Falls through to printed next-steps if the handoff is declined or
-    unavailable.
+    remove stale /etc/hosts leftovers from prior deploys, poll ssh by the raw
+    public IP (the DDNS name strim.example.com doesn't resolve until deploy.sh
+    registers it), then offer the execve handoff. Falls through to printed
+    next-steps if the handoff is declined or unavailable.
     """
     ssh = cfg.ssh
-    hostname = hosts_alias(project, ssh)
-    mapped = maybe_upsert_hosts(public_ip, hostname)
-
-    # The reused hostname now points at a new box; offer to drop its old host key
-    # so SSH won't refuse to connect over a changed-key mismatch.
-    maybe_scrub_known_hosts(hostname, ssh.port, mapped)
+    cleanup_stale_hosts_entries()
 
     # Block until sshd answers so the handoff doesn't hit a refused connection.
-    # Poll by the exact name setup will connect to: accept-new then records that
-    # host in known_hosts, so a successful poll also means no trust prompt.
-    setup_host = effective_ssh_host(ssh, public_ip, hostname, mapped)
+    # Bootstrap by the raw public IP - the box is unreachable by name until
+    # deploy.sh registers it with Dynamic DNS. accept-new then records that IP
+    # in known_hosts, so a successful poll also means no trust prompt.
+    setup_host = effective_ssh_host(public_ip)
     status = wait_for_ssh(ssh, setup_host)
     if status is Probe.TIMEOUT:
         print(f"could not reach ssh; the instance is running but nothing answered "
@@ -678,9 +608,9 @@ def post_launch(cfg, public_ip, project):
               f"{ssh.port} from your IP, or EnableExperimentalSsh is false in the "
               f"stack. setup can be retried once ssh is reachable.")
     elif status is Probe.UNRESOLVED:
-        print(f"could not resolve '{setup_host}' - it has no /etc/hosts entry "
-              f"(did you skip the upsert?) and no DNS record. Set SSH_HOST to the "
-              f"public IP {public_ip}, or add the mapping, then retry setup.")
+        print(f"could not resolve '{setup_host}' - a public IP should connect "
+              f"directly; check the instance's networking and retry setup once "
+              f"ssh is reachable.")
     elif status is Probe.REACHABLE:
         print("ssh is up but rejected key auth. If the instance just booted, the "
               "key may still be installing (retry shortly); otherwise check "
@@ -691,12 +621,8 @@ def post_launch(cfg, public_ip, project):
     offer_exec_setup(setup_host)
 
     print("\nnext steps:")
-    if mapped:
-        print("  deploy/aws/setup_strimserver")
-    else:
-        print(f"  SSH_HOST={public_ip} deploy/aws/setup_strimserver")
-        print(f"  # or add '{public_ip} {hostname}' to /etc/hosts, then run "
-              f"deploy/aws/setup_strimserver")
+    print(f"  SSH_HOST={public_ip} deploy/aws/setup_strimserver")
+    print("  # after deploy.sh registers it, the box is also reachable at strim.example.com")
     print()
 
 
@@ -765,7 +691,7 @@ def launch_instance(cfg, use_spot, wait):
               "public subnet and relaunch.")
         return
     print(f"\npublic ip: {public_ip}\n")
-    post_launch(cfg, public_ip, project)
+    post_launch(cfg, public_ip)
 
 
 if __name__ == "__main__":
@@ -782,9 +708,10 @@ if __name__ == "__main__":
                         help="Use an on-demand instance instead of spot.")
     parser.add_argument(
         "--wait", action="store_true",
-        help="Wait for running state, print the public IP + next steps, offer to "
-             "upsert the IP/hostname pair into /etc/hosts, then offer to exec "
-             "into setup_strimserver (replacing this process).")
+        help="Wait for running state, clean up stale /etc/hosts entries from "
+             "prior deploys, print the public IP + next steps, then offer to "
+             "exec into setup_strimserver by the public IP (replacing this "
+             "process).")
     args = parser.parse_args()
 
     cfg = Config.from_env(instance_type=args.type)

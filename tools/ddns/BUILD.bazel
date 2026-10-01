@@ -1,0 +1,240 @@
+# strim-ddns: Namecheap dynamic-DNS update client.
+#
+# A new static C binary (musl, zig toolchain) that performs the Namecheap
+# dynamic-DNS HTTPS GET with libcurl + mbedTLS (both vendored under
+# third_party/curl and third_party/mbedtls) and reports success from the
+# response body (see main.c). The binary is `manual` like the mediamtx
+# entrypoint/notify helpers: it builds only on explicit request, through the
+# //tools/bazel:c_controller_transition wrappers below, which inject the
+# exact --config=amd64 / --config=arm64 zig musl flags. The :strim_ddns
+# filegroup then selects the arch-appropriate musl binary for the current
+# target platform -- the same pattern core/BUILD.bazel uses for :entrypoint.
+#
+# The oci_image is FROM-scratch: the static binary at /strim-ddns plus the
+# concatenated Mozilla CA bundle at /etc/ssl/certs/ca-certificates.crt (the
+# compiled-in CURL_CA_BUNDLE path). The image tar is wired into the
+# deployment bundles as strim-ddns-container.tar alongside the
+# controller/ffmpeg/mediamtx tars (root BUILD.bazel).
+
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/bazel:c_controller_transition.bzl", "c_controller_transition")
+
+# Static musl build for both target arches (via the c_controller_transition
+# below, which injects the zig musl platforms/toolchains): the repo's
+# -supports_dynamic_linker + linkstatic=True convention (core/controller/c).
+_MUSL_FEATURES = ["-supports_dynamic_linker"]
+
+# Both target arches build (amd64 target has no constraint, arm64 requires
+# aarch64, any third platform is arm64-only); mirrors core/controller/c.
+_TARGET_COMPAT = select({
+    "//tools/bazel:is_amd64_target": [],
+    "//tools/bazel:is_arm64_target": ["@platforms//cpu:aarch64"],
+    "//conditions:default": ["@platforms//cpu:aarch64"],
+})
+
+# Size-optimized like core/BUILD.bazel's entrypoint_bin: the shipped binary
+# is a FROM-scratch image entrypoint, so -Os + function-sections plus
+# --gc-sections (prunes the unused curl/mbedTLS protocol/TLS paths) and
+# -Wl,-s (strips the symtab) keep it small. The transition also injects
+# these flags via --copt/--linkopt; listing them here matches entrypoint_bin
+# and covers direct --config=amd64/--config=arm64 builds.
+cc_binary(
+    name = "strim_ddns_bin",
+    tags = ["manual"],
+    srcs = ["main.c"],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    target_compatible_with = _TARGET_COMPAT,
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+        "-Os",
+        "-ffunction-sections",
+        "-fdata-sections",
+    ],
+    linkopts = [
+        "-static",
+        "-Wl,--gc-sections",
+        "-Wl,-s",
+        "-Wl,--build-id=none",
+        # libcurl's threaded resolver + mbedTLS use pthreads (folded into
+        # musl libc; -lm defensive like the C controller).
+        "-lpthread",
+        "-lm",
+    ],
+    deps = [
+        "@curl//:curl",
+        "@mbedtls//:mbedtls",
+    ],
+)
+
+c_controller_transition(
+    name = "strim_ddns_amd64",
+    target = ":strim_ddns_bin",
+    to_arch = "amd64",
+    out = "strim-ddns-amd64",
+)
+
+c_controller_transition(
+    name = "strim_ddns_arm64",
+    target = ":strim_ddns_bin",
+    to_arch = "arm64",
+    out = "strim-ddns-arm64",
+)
+
+# Public label: the arch-appropriate musl strim-ddns binary for the current
+# target platform (feeds the image layer and the smoke test).
+filegroup(
+    name = "strim_ddns",
+    srcs = select({
+        "//tools/bazel:is_amd64_target": [":strim_ddns_amd64"],
+        "//tools/bazel:is_arm64_target": [":strim_ddns_arm64"],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+# =============================================================================
+# Loopback HTTP test double (smoke test only)
+# =============================================================================
+cc_binary(
+    name = "ddns_test_server_bin",
+    tags = ["manual"],
+    testonly = True,
+    srcs = ["ddns_test_server.c"],
+    features = _MUSL_FEATURES,
+    linkstatic = True,
+    target_compatible_with = _TARGET_COMPAT,
+    copts = [
+        "-std=gnu11",
+        "-Wall",
+        "-Wextra",
+        "-Os",
+        "-ffunction-sections",
+        "-fdata-sections",
+    ],
+    linkopts = [
+        "-static",
+        "-Wl,--gc-sections",
+        "-Wl,-s",
+        "-Wl,--build-id=none",
+    ],
+)
+
+c_controller_transition(
+    name = "ddns_test_server_amd64",
+    testonly = True,
+    target = ":ddns_test_server_bin",
+    to_arch = "amd64",
+    out = "ddns-test-server-amd64",
+)
+
+c_controller_transition(
+    name = "ddns_test_server_arm64",
+    testonly = True,
+    target = ":ddns_test_server_bin",
+    to_arch = "arm64",
+    out = "ddns-test-server-arm64",
+)
+
+filegroup(
+    name = "ddns_test_server",
+    testonly = True,
+    srcs = select({
+        "//tools/bazel:is_amd64_target": [":ddns_test_server_amd64"],
+        "//tools/bazel:is_arm64_target": [":ddns_test_server_arm64"],
+    }),
+)
+
+# The smoke test runs the binary against the loopback test double and
+# exercises the body-based success detection: "Good 1.2.3.4", "No change",
+# XML <ErrCount>0</ErrCount>, and failure bodies (see ddns_smoke_test.sh).
+sh_test(
+    name = "ddns_smoke_test",
+    srcs = ["ddns_smoke_test.sh"],
+    args = [
+        "$(location :strim_ddns)",
+        "$(location :ddns_test_server)",
+    ],
+    data = [
+        ":strim_ddns",
+        ":ddns_test_server",
+    ],
+)
+
+# =============================================================================
+# strim-ddns image (FROM scratch): the static binary + the CA bundle.
+# =============================================================================
+# The ca-certificates deb ships the individual Mozilla root certs under
+# usr/share/ca-certificates/mozilla/ (121 of them) and generates the
+# concatenated bundle at postinst time via update-ca-certificates -- the deb
+# has no prebuilt ca-certificates.crt. Concatenate the certs in archive
+# order (the same sorted order update-ca-certificates uses) into the classic
+# bundle, exactly the way deb_file pulls a single member out of the same
+# @trixie content tar.
+genrule(
+    name = "ca_certificates_bundle",
+    srcs = ["@trixie//ca-certificates:data"],
+    outs = ["ca-certificates.crt"],
+    cmd = """
+set -eu
+tmp="$(RULEDIR)/ca_bundle.extract_tmp"
+rm -rf "$$tmp" && mkdir -p "$$tmp"
+tar -xzf $(location @trixie//ca-certificates:data) -C "$$tmp" ./usr/share/ca-certificates/mozilla
+cat "$$tmp"/usr/share/ca-certificates/mozilla/*.crt > $@
+rm -rf "$$tmp"
+""",
+)
+
+pkg_files(
+    name = "ddns_root",
+    srcs = [":strim_ddns"],
+    attributes = pkg_attributes(mode = "0755"),
+    prefix = "/",
+    renames = {":strim_ddns": "strim-ddns"},
+)
+
+pkg_files(
+    name = "ddns_ca_bundle",
+    srcs = [":ca_certificates_bundle"],
+    attributes = pkg_attributes(mode = "0644"),
+    prefix = "/etc/ssl/certs",
+)
+
+pkg_tar(
+    name = "ddns_files_tar",
+    srcs = [
+        ":ddns_ca_bundle",
+        ":ddns_root",
+    ],
+)
+
+oci_image(
+    name = "strim_ddns_image",
+    architecture = select({
+        "//tools/bazel:is_amd64_target": "amd64",
+        "//tools/bazel:is_arm64_target": "arm64",
+    }),
+    entrypoint = ["/strim-ddns"],
+    os = "linux",
+    tars = [":ddns_files_tar"],
+)
+
+oci_load(
+    name = "strim_ddns_image_tarball",
+    image = ":strim_ddns_image",
+    repo_tags = ["docker.io/library/strim-ddns:latest"],
+)
+
+# The bundle member: the loadable docker-style tar, renamed to
+# strim-ddns-container.tar in the root BUILD.bazel bundle assembly.
+filegroup(
+    name = "strim_ddns_image_tar_file",
+    srcs = [":strim_ddns_image_tarball"],
+    output_group = "tarball",
+    visibility = ["//visibility:public"],
+)

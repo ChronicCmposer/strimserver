@@ -19,8 +19,8 @@
 # The scan is limited to files git would actually commit: tracked files plus
 # untracked non-ignored files (`git ls-files -c -o --exclude-standard`).
 # Gitignored local files (.env, deploy/aws/__pycache__/, go/, tools/local-obs/,
-# bazel-*, build artifacts like tools/ffmpeg-dist/out.log) hold real
-# identifiers but can never be committed, so they must not block commits.
+# tools/stream-mode/, bazel-*, build artifacts like tools/ffmpeg-dist/out.log)
+# hold real identifiers but can never be committed, so they must not block commits.
 #
 # Excluded path: the guard's own file (its pattern configuration must be able
 # to mention example identifiers without tripping the scan it runs).

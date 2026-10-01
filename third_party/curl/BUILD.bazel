@@ -1,0 +1,9 @@
+# In-repo package marker for the vendored libcurl sources.
+#
+# BUILD.curl is the build file applied to the @curl external repo (pinned in
+# MODULE.bazel with build_file = "//third_party/curl:BUILD.curl"); this
+# BUILD.bazel only exists so the label resolves. The strim-ddns binary
+# (//tools/ddns) links the musl-static @curl//:curl library with the mbedTLS
+# TLS backend. No in-repo targets live here.
+
+exports_files(["BUILD.curl"])

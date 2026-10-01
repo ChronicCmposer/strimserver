@@ -117,7 +117,7 @@ deploy/aws/deploy-infra
 
 ```sh
 cp deploy/aws/.env.example deploy/aws/.env
-$EDITOR deploy/aws/.env   # KEY_NAME, DEPLOYMENT_SRC, DEPLOYMENT_SHA256, TWITCH_STREAM_KEY, INSTANCE_TYPE
+$EDITOR deploy/aws/.env   # KEY_NAME, DEPLOYMENT_SRC, DEPLOYMENT_SHA256, TWITCH_STREAM_KEY, DDNS_PASSWORD, INSTANCE_TYPE
 set -a; . deploy/aws/.env; set +a
 ```
 
@@ -172,8 +172,10 @@ INSTANCE_TYPE=g5g.2xlarge deploy/aws/launch --wait
 AMI selection order in `launch`: `AMI_ID` → explicit `DLAMI_SSM_PARAM` → the
 architecture default. The arm64 default resolves the SSM float
 (`resolve:ssm:<arm64 param>`), so no pin goes stale. `--wait` prints the public
-IP, offers `/etc/hosts` upsert + stale host-key scrub, polls SSH, and hands off
-to `setup_strimserver` (execve).
+IP, cleans up stale `/etc/hosts` entries left by pre-DDNS launches (the old
+`/etc/hosts` upsert is gone — the box is bootstrapped by its raw public IP
+because `strim.example.com` doesn't resolve until `deploy.sh` registers it),
+polls SSH, and hands off to `setup_strimserver` (execve).
 
 `launch` also defaults the **unset** deployment vars on arm64 (amd64 is
 untouched): `DEPLOYMENT=strimserver-deployment-go-arm64.tar` (the Go controller
@@ -190,7 +192,9 @@ applies when `DEPLOYMENT_SRC` is unset and `S3_BUCKET` is configured — with
 format (default `/dev/nvme1n1`; destructive). It formats ext4, mounts
 `/mnt/nvme`, places the bundle from `DEPLOYMENT_SRC` (`s3://`, `https://`, or a
 local file), optionally verifies `DEPLOYMENT_SHA256`, transfers the Twitch key
-as a `0600` file, extracts the tar, and runs `deploy.sh`.
+and the Namecheap Dynamic DNS password (`DDNS_PASSWORD` / `DDNS_PASSWORD_FILE`
+in `.env`, mirroring the Twitch key flow) as `0600` files, extracts the tar,
+and runs `deploy.sh`.
 
 `deploy.sh` runs the same flow on both architectures; the arm64 rollout adds
 the GPU-runtime step:
@@ -219,12 +223,24 @@ the GPU-runtime step:
    arm64 expect the skip warning until an arm64 RPM is published (Section 7).
 9. Set hostname, create `/mnt/nvme/{video-files,logs}`, move the offline
    segment into `video-files`.
-10. Print the next-step commands (SSH service start, encoder configuration).
+10. Configure Namecheap Dynamic DNS (`strim.example.com`): install the
+    transferred password to `/etc/strim-ddns/password` (root:root `0600`,
+    transfer file scrubbed), install + enable the `strim-ddns.timer` (6h,
+    `Persistent=true`), import `strim-ddns-container.tar`, run a one-shot
+    refresh passing `ip=$PUBLIC_IP`, then verify — up to 120s, fail-loud —
+    that `strim.example.com` resolves to the box's public IP.
+11. Print the next-step commands (SSH service start, encoder configuration).
 
 `deploy.sh` deliberately leaves the service stopped — the unit is installed and
 enabled, but the first start stays an explicit operator action. Start it with
-`deploy/aws/start_strimserver` or `ssh strimserver 'sudo systemctl start
-strimserver.service'`.
+`deploy/aws/start_strimserver` or `ssh ec2-user@strim.example.com 'sudo
+systemctl start strimserver.service'`.
+
+After `deploy.sh` completes, the box is reachable as `strim.example.com` (DDNS):
+SSH, the local encoder (`STRIMSERVER_HOST=strim.example.com`), and the Stream
+Deck plugin all use the hostname. The one-time Namecheap `strim` host +
+dedicated password setup is in `deploy/aws/ddns-setup.md`; supply the password
+at deploy time via `DDNS_PASSWORD` / `DDNS_PASSWORD_FILE`.
 
 **Tag/upgrade note:** the Go controller image tag gained the `-go` suffix —
 `strimserver-controller-go:latest` replaces the previous bare

@@ -1,0 +1,9 @@
+# In-repo package marker for the vendored mbedTLS sources.
+#
+# BUILD.mbedtls is the build file applied to the @mbedtls external repo
+# (pinned in MODULE.bazel with build_file = "//third_party/mbedtls:BUILD.mbedtls");
+# this BUILD.bazel only exists so the label resolves. The strim-ddns binary
+# (//tools/ddns) links the musl-static @mbedtls//:mbedtls library as
+# libcurl's TLS backend. No in-repo targets live here.
+
+exports_files(["BUILD.mbedtls"])

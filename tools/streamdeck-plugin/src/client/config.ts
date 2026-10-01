@@ -1,4 +1,4 @@
-const DEFAULT_BASE = "http://strimserver:4000";
+const DEFAULT_BASE = "http://localhost:4000";
 
 function baseHTTP(): string {
    return process.env.STRIMSERVER_URL?.replace(/\/+$/, "") ?? DEFAULT_BASE;

@@ -32,6 +32,23 @@ if [ -n "$$key" ]; then
   echo ":publish_strimserver for a private, single-tenant build that bakes your own key." >&2
   exit 1
 fi
+ddns_enabled="$$(set -a; . $(location //core:strimserver.env); set +a; printf '%s' "$$ENABLE_DDNS")"
+if [ "$$ddns_enabled" = "true" ]; then
+  echo "ERROR: ENABLE_DDNS is 'true' in core/strimserver.env." >&2
+  echo "Redistributable bundles must ship DDNS disabled (box reachable by IP only)." >&2
+  echo "Set ENABLE_DDNS=false for :strimserver_deployment_tar_go_amd64 / :release, or use" >&2
+  echo ":publish_strimserver for a private, single-tenant build that bakes your own domain." >&2
+  exit 1
+fi
+ddns_domain="$$(set -a; . $(location //core:strimserver.env); set +a; printf '%s' "$$DDNS_DOMAIN")"
+if [ -n "$$ddns_domain" ]; then
+  echo "ERROR: DDNS_DOMAIN is set in core/strimserver.env." >&2
+  echo "Redistributable bundles must ship an EMPTY domain (the real domain is an" >&2
+  echo "operator secret injected at deploy time)." >&2
+  echo "Empty it for :strimserver_deployment_tar_go_amd64 / :release, or use" >&2
+  echo ":publish_strimserver for a private, single-tenant build that bakes your own domain." >&2
+  exit 1
+fi
 touch $@
 """,
 )
@@ -113,17 +130,39 @@ pkg_files(
     strip_prefix = strip_prefix.files_only(),
 )
 
+# The strim-ddns unit is GENERATED (//deploy/aws:strim_ddns_unit, an
+# expand_template expansion of strim-ddns.service.template that bakes in only
+# the image ref and container name; the operator's DDNS_HOST / DDNS_DOMAIN are
+# injected at runtime via the unit's EnvironmentFile, so the unit itself
+# contains no domain) while the timer is static. Both are arch-independent and
+# shared by the Go and C bundles (both reference the same
+# docker.io/library/strim-ddns:latest image), so a single pkg_files feeds both
+# tars. strip_prefix.files_only() drops the deploy/aws path so the members land
+# at the bundle root as strim-ddns.service / strim-ddns.timer -- exactly the
+# paths deploy.sh installs from /mnt/nvme.
+pkg_files(
+    name = "bundle_unit_ddns",
+    srcs = [
+        "//deploy/aws:strim_ddns_unit",
+        "//deploy/aws:strim-ddns.timer",
+    ],
+    attributes = pkg_attributes(mode = "0644"),
+    strip_prefix = strip_prefix.files_only(),
+)
+
 pkg_files(
     name = "bundle_images",
     srcs = [
         "//core:ffmpeg_image_tar_file",
         "//core:mediamtx_image_tar_file",
         "//core/controller:controller_image_tar_file",
+        "//tools/ddns:strim_ddns_image_tar_file",
     ],
     renames = {
         "//core:ffmpeg_image_tar_file": "ffmpeg-container.tar",
         "//core:mediamtx_image_tar_file": "mediamtx-container.tar",
         "//core/controller:controller_image_tar_file": "controller-container.tar",
+        "//tools/ddns:strim_ddns_image_tar_file": "strim-ddns-container.tar",
     },
     strip_prefix = strip_prefix.files_only(),
 )
@@ -140,11 +179,13 @@ pkg_files(
         "//core:ffmpeg_image_tar_file",
         "//core:mediamtx_image_tar_file",
         "//core/controller:controller_image_c_tar_file",
+        "//tools/ddns:strim_ddns_image_tar_file",
     ],
     renames = {
         "//core:ffmpeg_image_tar_file": "ffmpeg-container.tar",
         "//core:mediamtx_image_tar_file": "mediamtx-container.tar",
         "//core/controller:controller_image_c_tar_file": "controller-container.tar",
+        "//tools/ddns:strim_ddns_image_tar_file": "strim-ddns-container.tar",
     },
     strip_prefix = strip_prefix.files_only(),
     tags = ["manual"],
@@ -213,6 +254,7 @@ pkg_tar(
     srcs = [
         ":bundle_images",
         ":bundle_unit_go",
+        ":bundle_unit_ddns",
         ":bundle_offline_segment",
         ":bundle_openssh_rpm",
         ":bundle_exec_scripts",
@@ -284,6 +326,7 @@ pkg_tar(
     srcs = [
         ":bundle_images_c",
         ":bundle_unit_c",
+        ":bundle_unit_ddns",
         ":bundle_offline_segment",
         ":bundle_openssh_rpm",
         ":bundle_exec_scripts",

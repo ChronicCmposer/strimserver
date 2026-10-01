@@ -4,6 +4,8 @@ exports_files([
     "imdslib.sh",
     "prompt_login.fish",
     "setup-gpu.sh",
+    "strim-ddns.service.template",
+    "strim-ddns.timer",
 ])
 
 # --- Generated systemd units (Go / C controller variants) --------------------
@@ -49,6 +51,28 @@ expand_template(
     substitutions = {
         "__IMAGE__": "docker.io/library/strimserver-controller-c:latest",
         "__CONTAINER__": "strimserver-controller-c",
+    },
+    visibility = ["//visibility:public"],
+)
+
+# --- Generated DDNS unit -----------------------------------------------------
+# The strim-ddns unit was a static, committed file that HARDCODED the operator's
+# domain (DDNS_HOST=strim / DDNS_DOMAIN=example.com). It is now generated from
+# strim-ddns.service.template, mirroring the strimserver unit pattern: only the
+# OCI image ref and container name are baked in at build time (__IMAGE__ /
+# __CONTAINER__); the operator's DDNS_HOST / DDNS_DOMAIN (and optional DDNS_IP)
+# are injected at runtime via the EnvironmentFile
+# (/mnt/nvme/config/strimserver.env), so the unit itself contains no domain.
+# Single target: no per-language variants, and the former static source file is
+# gone, so `out = "strim-ddns.service"` emits the canonical basename directly
+# (no rename needed at the bundle consumer).
+expand_template(
+    name = "strim_ddns_unit",
+    template = "strim-ddns.service.template",
+    out = "strim-ddns.service",
+    substitutions = {
+        "__IMAGE__": "docker.io/library/strim-ddns:latest",
+        "__CONTAINER__": "strim-ddns",
     },
     visibility = ["//visibility:public"],
 )

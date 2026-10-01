@@ -87,6 +87,39 @@ def transfer_twitch_key(key, hostname, username, port):
     ssh_run(hostname, username, port, "chmod 600 /mnt/nvme/twitch-stream-key")
 
 
+def resolve_ddns_password():
+    """Operator-supplied Namecheap Dynamic DNS password (secret), or None.
+
+    Precedence: DDNS_PASSWORD env, then DDNS_PASSWORD_FILE contents.
+    """
+    password = os.environ.get("DDNS_PASSWORD", "").strip()
+    if password:
+        return password
+    password_file = os.environ.get("DDNS_PASSWORD_FILE", "").strip()
+    if password_file:
+        path = os.path.expanduser(password_file)
+        if not os.path.isfile(path):
+            sys.exit(f"DDNS_PASSWORD_FILE not found: {path}")
+        with open(path) as fh:
+            return fh.read().strip()
+    return None
+
+
+def transfer_ddns_password(password, hostname, username, port):
+    """Write the password to a local 0600 temp file, scp it to the box, then scrub locally."""
+    import stat
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="ddns-password-")
+    try:
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+        with os.fdopen(fd, "w") as fh:
+            fh.write(password + "\n")
+        scp_to_remote(tmp, hostname, username, port, "/mnt/nvme/ddns-password")
+    finally:
+        os.remove(tmp)
+    ssh_run(hostname, username, port, "chmod 600 /mnt/nvme/ddns-password")
+
+
 def interactive():
     """True when a human is on both ends of the pipe."""
     return sys.stdin.isatty() and sys.stdout.isatty()
@@ -186,6 +219,15 @@ if __name__ == "__main__":
     else:
         print("\nNote: no TWITCH_STREAM_KEY provided; deploying without an egress key.\n"
               "Ingest/normalize/offline will work; set the key later for Twitch egress.\n")
+
+    # 2d) transfer the operator's Namecheap Dynamic DNS password (secret), if provided
+    ddns_password = resolve_ddns_password()
+    if ddns_password:
+        transfer_ddns_password(ddns_password, HOST, USER, PORT)
+    else:
+        print("\nNote: no DDNS_PASSWORD provided; deploying without Dynamic DNS registration.\n"
+              "strim.example.com will not resolve to this box; set the password later\n"
+              "to register it with Namecheap Dynamic DNS.\n")
 
     # 3) extract + hand off to deploy.sh
     run_ssh_commands(HOST, USER, PORT, [
