@@ -11,7 +11,9 @@ Type=oneshot
 # /mnt/nvme/config/strimserver.env (EnvironmentFile); timer runs leave DDNS_IP
 # empty so the client omits ip= and Namecheap uses the requester IP.
 EnvironmentFile=-/mnt/nvme/config/strimserver.env
-ExecStart=/usr/bin/ctr -n strimserver run --rm --net-host --read-only --cap-drop ALL \
+# No explicit capability flags: ctr accepts only CAP_-prefixed names (no bare
+# ALL), and this static HTTPS client needs none (--net-host, binds no ports).
+ExecStart=/usr/bin/ctr -n strimserver run --rm --net-host --read-only \
    --memory-limit 67108864 \
    --env DDNS_HOST=${DDNS_HOST} \
    --env DDNS_DOMAIN=${DDNS_DOMAIN} \
