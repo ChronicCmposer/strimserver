@@ -24,7 +24,6 @@ tools/ffmpeg-dist/check-deps
 # never committed — see tools/check-no-infra-identifiers.sh)
 deploy/aws/__pycache__/
 tools/local-obs/
-tools/stream-mode/
 
 # Local implementation plans — throwaway working docs; not part of the repo.
 ideas/
