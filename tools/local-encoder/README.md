@@ -22,13 +22,13 @@ runs OBS and the Elgato Stream Deck app.
 
 All scripts read and write a single env file referenced via
 `$LOCAL_ENCODER_ENV` — the operator sets it, conventionally to
-`$HOME/.strimserver-local-encoder.env` (gitignored). Copy the
+`$HOME/.config/local-encoder/local-encoder.env` (gitignored). Copy the
 example and export the variable before running anything:
 
 ```bash
-cp tools/local-encoder/local-encoder.env.example ~/.strimserver-local-encoder.env
-$EDITOR ~/.strimserver-local-encoder.env
-export LOCAL_ENCODER_ENV="$HOME/.strimserver-local-encoder.env"
+cp tools/local-encoder/local-encoder.env.example ~/.config/local-encoder/local-encoder.env
+$EDITOR ~/.config/local-encoder/local-encoder.env
+export LOCAL_ENCODER_ENV="$HOME/.config/local-encoder/local-encoder.env"
 ```
 
 ## 3. Configuring the encoder and Stream Deck URL
@@ -71,7 +71,7 @@ Then run it manually to pick up a changed URL:
 ```
 
 The wrapper reads `LOCAL_ENCODER_ENV` from its own environment
-(`export LOCAL_ENCODER_ENV="$HOME/.strimserver-local-encoder.env"`
+(`export LOCAL_ENCODER_ENV="$HOME/.config/local-encoder/local-encoder.env"`
 first, or prefix the command with it).
 
 ## 5. LaunchAgent: start the Stream Deck app with the URL set

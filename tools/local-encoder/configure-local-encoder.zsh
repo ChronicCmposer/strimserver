@@ -12,14 +12,26 @@ is_valid_hostname() {
   [[ "$1" =~ '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$' ]]
 }
 
+# Replaces the KEY=... line if present, else appends it. Env files that
+# predate a given key (e.g. STRIMSERVER_URL) would otherwise be silently
+# left unchanged by a plain `sed s/KEY=.../` with no match.
+set_env_key() {
+  local key="$1" value="$2"
+  if grep -q -E "^${key}=" "$LOCAL_ENCODER_ENV"; then
+    sed -i '' -E "s|^${key}=.*|${key}=${value}|" "$LOCAL_ENCODER_ENV"
+  else
+    print -r -- "${key}=${value}" >> "$LOCAL_ENCODER_ENV"
+  fi
+}
+
 write_strimserver_host() {
   : "${LOCAL_ENCODER_ENV:?LOCAL_ENCODER_ENV is not set}"
-  sed -i '' -E "s/STRIMSERVER_HOST=.*/STRIMSERVER_HOST=${1}/" "$LOCAL_ENCODER_ENV"
+  set_env_key STRIMSERVER_HOST "$1"
 }
 
 write_strimserver_url() {
   : "${LOCAL_ENCODER_ENV:?LOCAL_ENCODER_ENV is not set}"
-  sed -i '' -E "s/STRIMSERVER_URL=.*/STRIMSERVER_URL=http:\/\/${1}:4000/" "$LOCAL_ENCODER_ENV"
+  set_env_key STRIMSERVER_URL "http://${1}:4000"
 }
 
 # Prefer the repo-independent /usr/local/bin install (the LaunchAgent's

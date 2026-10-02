@@ -24,7 +24,7 @@
     rm "$HOME/Library/LaunchAgents/com.chroniccmposer.strimserver.streamdeck.plist"
 
   On-demand relaunch (after quitting the app manually):
-    LOCAL_ENCODER_ENV="$HOME/.strimserver-local-encoder.env" /usr/local/bin/launch-streamdeck.zsh
+    LOCAL_ENCODER_ENV="$HOME/.config/local-encoder/local-encoder.env" /usr/local/bin/launch-streamdeck.zsh
 -->
 <plist version="1.0">
 <dict>
@@ -41,7 +41,7 @@
 		<key>PATH</key>
 		<string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
 		<key>LOCAL_ENCODER_ENV</key>
-		<string>/Users/USERNAME/.strimserver-local-encoder.env</string>
+		<string>/Users/USERNAME/.config/local-encoder/local-encoder.env</string>
 	</dict>
 	<key>StandardOutPath</key>
 	<string>/Users/USERNAME/Library/Logs/com.chroniccmposer.strimserver.streamdeck.log</string>

@@ -12,6 +12,11 @@ fi
 passphrase_value="$1"
 env_file="$LOCAL_ENCODER_ENV"
 
+# Escape sed's replacement metacharacters (\, &, and the s/// delimiter) so an
+# arbitrary passphrase can't corrupt the substitution or the env file.
+escaped_passphrase="${passphrase_value//\\/\\\\}"
+escaped_passphrase="${escaped_passphrase//&/\\&}"
+escaped_passphrase="${escaped_passphrase//\//\\/}"
 
-sed -i '' -E "s/SRT_PASSPHRASE=.*/SRT_PASSPHRASE=${passphrase_value}/" "$env_file"
+sed -i '' -E "s/SRT_PASSPHRASE=.*/SRT_PASSPHRASE=${escaped_passphrase}/" "$env_file"
 
