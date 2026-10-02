@@ -34,6 +34,43 @@ write_strimserver_url() {
   set_env_key STRIMSERVER_URL "http://${1}:4000"
 }
 
+# macOS split-DNS: /etc/resolver/<domain> sends all queries for that domain
+# straight to the given nameservers, bypassing the LAN router's resolver (and
+# its slow-to-expire cache) entirely. pdns1/pdns2.registrar-servers.com are
+# Namecheap's authoritative servers for cmposer.cc, so this is a direct
+# authoritative lookup rather than a recursive one.
+SPLIT_DNS_DOMAIN="cmposer.cc"
+SPLIT_DNS_NAMESERVER_HOSTS=(pdns1.registrar-servers.com pdns2.registrar-servers.com)
+
+configure_split_dns() {
+  local resolver_dir="/etc/resolver"
+  local resolver_file="${resolver_dir}/${SPLIT_DNS_DOMAIN}"
+  local ns ip
+  local -a ns_ips
+
+  for ns in "${SPLIT_DNS_NAMESERVER_HOSTS[@]}"; do
+    ip=$(dig +short A "$ns" | tail -1)
+    if [[ -z "$ip" ]]; then
+      print -u2 "error: could not resolve ${ns} to configure split DNS for ${SPLIT_DNS_DOMAIN}"
+      return 1
+    fi
+    ns_ips+=("$ip")
+  done
+
+  local content
+  content=$(for ip in "${ns_ips[@]}"; do print -r -- "nameserver ${ip}"; done)
+
+  if [[ -f "$resolver_file" ]] && [[ "$(cat "$resolver_file" 2>/dev/null)" == "$content" ]]; then
+    print -u2 "split DNS for ${SPLIT_DNS_DOMAIN} already up to date (${resolver_file})"
+    return 0
+  fi
+
+  sudo mkdir -p "$resolver_dir"
+  print -r -- "$content" | sudo tee "$resolver_file" >/dev/null
+  sudo chmod 644 "$resolver_file"
+  print -u2 "configured split DNS: ${SPLIT_DNS_DOMAIN} -> ${ns_ips[*]} (${resolver_file})"
+}
+
 # Prefer the repo-independent /usr/local/bin install (the LaunchAgent's
 # ProgramArguments) so configure and launchctl agree; fall back to the
 # checkout copy so configure still works before the wrapper is installed.
@@ -159,4 +196,6 @@ fi
 write_strimserver_host "$strimserver_host"
 write_strimserver_url "$strimserver_host"
 set-srt-passphrase.zsh "$passphrase_value"
+configure_split_dns
+flush_dns_cache
 maybe_relaunch_streamdeck
