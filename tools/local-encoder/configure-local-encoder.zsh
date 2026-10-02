@@ -53,11 +53,37 @@ is_streamdeck_running() {
   pgrep -x "Stream Deck" >/dev/null 2>&1 || pgrep -f "Elgato Stream Deck" >/dev/null 2>&1
 }
 
+flush_dns_cache() {
+  # Stale resolver cache could mean the relaunched app's first connection
+  # still hits an old IP for STRIMSERVER_HOST; HUP makes mDNSResponder drop it.
+  if ! sudo killall -HUP mDNSResponder 2>/dev/null; then
+    print -u2 "warning: could not HUP mDNSResponder to flush the DNS cache"
+  fi
+}
+
+kill_streamdeck() {
+  # `open -a` on an already-running app just focuses it rather than
+  # restarting it, so a stale process would keep its old STRIMSERVER_URL.
+  if can_detect_streamdeck && is_streamdeck_running; then
+    pkill -x "Stream Deck" 2>/dev/null
+    pkill -f "Elgato Stream Deck" 2>/dev/null
+    for _ in {1..20}; do
+      is_streamdeck_running || break
+      sleep 0.25
+    done
+    if can_detect_streamdeck && is_streamdeck_running; then
+      print -u2 "warning: Elgato Stream Deck did not exit in time; relaunching anyway"
+    fi
+  fi
+}
+
 launch_streamdeck() {
   if [[ ! -x "$streamdeck_wrapper" ]]; then
     print -u2 "error: cannot relaunch Stream Deck: wrapper not found or not executable: ${streamdeck_wrapper}"
     return 1
   fi
+  flush_dns_cache
+  kill_streamdeck
   "$streamdeck_wrapper"
 }
 
