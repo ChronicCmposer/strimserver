@@ -17,6 +17,63 @@ write_strimserver_host() {
   sed -i '' -E "s/STRIMSERVER_HOST=.*/STRIMSERVER_HOST=${1}/" "$LOCAL_ENCODER_ENV"
 }
 
+write_strimserver_url() {
+  : "${LOCAL_ENCODER_ENV:?LOCAL_ENCODER_ENV is not set}"
+  sed -i '' -E "s/STRIMSERVER_URL=.*/STRIMSERVER_URL=http:\/\/${1}:4000/" "$LOCAL_ENCODER_ENV"
+}
+
+# Prefer the repo-independent /usr/local/bin install (the LaunchAgent's
+# ProgramArguments) so configure and launchctl agree; fall back to the
+# checkout copy so configure still works before the wrapper is installed.
+if [[ -x /usr/local/bin/launch-streamdeck.zsh ]]; then
+  streamdeck_wrapper=/usr/local/bin/launch-streamdeck.zsh
+else
+  streamdeck_wrapper="${0:A:h}/launch-streamdeck.zsh"
+fi
+
+can_detect_streamdeck() {
+  command -v pgrep >/dev/null 2>&1
+}
+
+is_streamdeck_running() {
+  # Elgato's process is named "Stream Deck"; also match the app bundle path so
+  # version differences in the executable name don't cause a false negative.
+  pgrep -x "Stream Deck" >/dev/null 2>&1 || pgrep -f "Elgato Stream Deck" >/dev/null 2>&1
+}
+
+launch_streamdeck() {
+  if [[ ! -x "$streamdeck_wrapper" ]]; then
+    print -u2 "error: cannot relaunch Stream Deck: wrapper not found or not executable: ${streamdeck_wrapper}"
+    return 1
+  fi
+  "$streamdeck_wrapper"
+}
+
+maybe_relaunch_streamdeck() {
+  # Non-interactive: never block; just print the manual relaunch command.
+  if [[ ! -t 0 ]]; then
+    print -u2 "relaunch Elgato Stream Deck manually: ${streamdeck_wrapper}"
+    return 0
+  fi
+
+  # App not running: launch directly instead of asking for a restart.
+  # Without pgrep we cannot detect it, so fall back to prompting.
+  if can_detect_streamdeck && ! is_streamdeck_running; then
+    launch_streamdeck
+    return 0
+  fi
+
+  print -u2 ""
+  print -u2 "press enter to relaunch Elgato Stream Deck, or type 'skip' to skip:"
+  local response=""
+  read -r response || true
+  if [[ -z "$response" ]]; then
+    launch_streamdeck
+  else
+    print -u2 "relaunch Elgato Stream Deck manually: ${streamdeck_wrapper}"
+  fi
+}
+
 strimserver_host=""
 passphrase_value=""
 
@@ -62,4 +119,6 @@ if ! is_valid_hostname "$strimserver_host"; then
 fi
 
 write_strimserver_host "$strimserver_host"
+write_strimserver_url "$strimserver_host"
 set-srt-passphrase.zsh "$passphrase_value"
+maybe_relaunch_streamdeck

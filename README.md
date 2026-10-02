@@ -959,10 +959,61 @@ configure-local-encoder.zsh --strimserver-host strim.example.com --passphrase <g
 DNS hostname (e.g. `strim.example.com`), which resolves the box
 through public DNS — nothing edits `/etc/hosts`, and the former
 `set-strimserver-host.zsh` helper is gone. The script writes
-`STRIMSERVER_HOST` into the local env file and invokes
-`set-srt-passphrase.zsh` for the passphrase. The one-time
-Namecheap setup for the `strim` Dynamic DNS host is documented
-in `deploy/aws/ddns-setup.md`.
+`STRIMSERVER_HOST` into the local env file, derives
+`STRIMSERVER_URL` as `http://$STRIMSERVER_HOST:4000` (the
+controller HTTP port, `CONTROLLER_HTTP_PORT` — not the SRT
+ingest port, 9000), and invokes `set-srt-passphrase.zsh` for
+the passphrase. After writing the env file it offers an
+interactive relaunch prompt: press **Enter** to relaunch the
+Elgato Stream Deck app (launching it directly if it isn't
+already running), or **skip** to print the manual relaunch
+command. The one-time Namecheap setup for the `strim` Dynamic
+DNS host is documented in `deploy/aws/ddns-setup.md`.
+
+### Stream Deck plugin controller URL
+
+The Stream Deck plugin reads `process.env.STRIMSERVER_URL` at
+runtime (falling back to `http://localhost:4000`) and inherits
+its environment from the Elgato Stream Deck app, so the app
+must be started with `STRIMSERVER_URL` exported for the plugin
+to reach the controller on the operator's real hostname.
+`configure-local-encoder.zsh` writes that variable; two helpers
+make sure the app picks it up:
+
+- `tools/local-encoder/launch-streamdeck.zsh` sources
+  `$LOCAL_ENCODER_ENV` and launches the Elgato Stream Deck app
+  with `STRIMSERVER_URL` exported. Install it to `/usr/local/bin`
+  (the location the LaunchAgent and `configure-local-encoder.zsh`
+  expect), then relaunch manually with:
+
+  ```bash
+  install -m 0755 tools/local-encoder/launch-streamdeck.zsh /usr/local/bin/
+  /usr/local/bin/launch-streamdeck.zsh
+  ```
+
+- `tools/local-encoder/com.chroniccmposer.strimserver.streamdeck.plist`
+  is a login LaunchAgent that runs the wrapper at login, so the
+  app always starts with the URL set. Its `ProgramArguments`
+  points at `/usr/local/bin/launch-streamdeck.zsh`, so install
+  the wrapper first, then the plist with:
+
+  ```bash
+  install -m 0755 tools/local-encoder/launch-streamdeck.zsh /usr/local/bin/
+  sed "s/USERNAME/$USER/g" tools/local-encoder/com.chroniccmposer.strimserver.streamdeck.plist \
+    > ~/Library/LaunchAgents/com.chroniccmposer.strimserver.streamdeck.plist
+  plutil -lint ~/Library/LaunchAgents/com.chroniccmposer.strimserver.streamdeck.plist
+  launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.chroniccmposer.strimserver.streamdeck.plist
+  ```
+
+  (The plist's `LOCAL_ENCODER_ENV` and log paths contain a
+  `USERNAME` placeholder; the `sed` above substitutes your macOS
+  username from `$USER`.)
+
+  and uninstall with:
+
+  ```bash
+  launchctl bootout gui/$UID/com.chroniccmposer.strimserver.streamdeck
+  ```
 
 Run the local encoder:
 
