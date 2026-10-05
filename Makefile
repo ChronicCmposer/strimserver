@@ -70,6 +70,10 @@ package-all:
 # Release/publish builds must be stamped with real provenance: a vX.Y.Z tag
 # (GIT_TAG) and a commit SHA (GIT_COMMIT). Shared prerequisite for release and
 # every publish-* target.
+# aspect_rules_js js_run_binary runs with use_default_shell_env=False and only
+# receives explicit --action_env=NAME=VALUE entries. Pass-through
+# --action_env=NAME reaches genrules but NOT the rollup action, so release and
+# every publish-* recipe MUST pass the values explicitly.
 require-build-info:
 	@if [ -z "$(GIT_TAG)" ]; then \
 	  echo "ERROR: GIT_TAG is empty; release/publish requires a vX.Y.Z tag." >&2; \
@@ -83,7 +87,7 @@ require-build-info:
 
 GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null)
 release: require-build-info
-	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) bazel run --action_env=GIT_TAG --action_env=GIT_COMMIT //:release
+	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) bazel run --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:release
 
 # Bump the latest vX.Y.Z git tag and push it (tag-based versioning; git tags
 # are the source of truth). Guards: clean tree, on `dev`, synced with
@@ -100,7 +104,7 @@ bump-version:
 # S3_BUCKET. Runs a single bazel target rather than the individual publish-*
 # targets (one server/analysis pass).
 publish-all: require-build-info
-	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG --action_env=GIT_COMMIT //:publish_all
+	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:publish_all
 
 publish-strimserver: require-build-info
 # The offline fallback clip is bundled directly from MODULE.bazel's
@@ -109,7 +113,7 @@ publish-strimserver: require-build-info
 # Also uploads ALL FOUR deployment tars (strimserver-deployment-{go,c}-{amd64,arm64}.tar
 # + .sha256) and the Stream Deck plugin bundle (strimserver-streamdeck-plugin.zip
 # and .tar.gz).
-	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG --action_env=GIT_COMMIT //:publish_strimserver
+	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:publish_strimserver
 
 publish-iperf3:
 	S3_BUCKET=$(S3_BUCKET) bazel run //tools/bandwidth-test:publish_iperf3
@@ -117,7 +121,7 @@ publish-iperf3:
 # Publish ONLY the Stream Deck plugin bundle to S3 (same object keys as
 # publish-strimserver). Publishes both the .zip and .tar.gz variants.
 publish-streamdeck: require-build-info
-	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG --action_env=GIT_COMMIT //tools/streamdeck-plugin:publish_streamdeck
+	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //tools/streamdeck-plugin:publish_streamdeck
 
 check-ffmpeg-dist-deps:
 	./tools/ffmpeg-dist/check-deps.sh
