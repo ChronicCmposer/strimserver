@@ -124,9 +124,20 @@ typedef struct strim_http_callbacks {
 typedef struct strim_http_server strim_http_server;
 
 /* Start the server: bind addr (Go's ":port" form, e.g. ":4000") and register
- * the callbacks. Returns 0 + *out, or a negative error. */
+ * the callbacks. Returns 0 + *out, or a negative error.
+ *
+ * build_version / build_commit are the binary's build provenance (the C
+ * controller passes the generated STRIMSERVER_VERSION / STRIMSERVER_COMMIT).
+ * The HTTP lane stays generic: it formats the values as-is and attaches them
+ * to every response as X-Strimserver-Version / X-Strimserver-Commit (including
+ * the /subscribe 101). A NULL or empty value becomes the "unknown" sentinel,
+ * so the headers are always present and never empty. The strings are NOT
+ * copied — they must remain valid for the server's lifetime (string literals
+ * satisfy this). */
 int strim_http_server_start(strim_http_server **out, const char *addr,
-                            const strim_http_callbacks *cbs, void *userdata);
+                            const strim_http_callbacks *cbs, void *userdata,
+                            const char *build_version,
+                            const char *build_commit);
 
 /* Run the event loop.
  *   timeout_ms < 0: loop until shutdown_request, then close every ws client

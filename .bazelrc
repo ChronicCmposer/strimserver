@@ -1,16 +1,13 @@
-# strimserver only ever ships linux/amd64 (see README: "Architecture: x86_64 only").
-build --platforms=//tools/bazel:linux_amd64
-
-# Non-x86_64 hosts (e.g. aarch64 with qemu-user binfmt): the stock default
-# test toolchain forces the test execution platform to satisfy the linux/amd64
-# target constraints, so tests fail analysis with "No matching toolchains
-# found" when the only execution platform is the host. Registering a
-# hypothetical x86_64 execution platform globally would fix that but also
-# makes Bazel prefer the amd64 Go SDK under qemu for ALL Go compilation and
-# breaks C++ toolchain
-# resolution for @bazel_tools//src/tools/launcher:launcher_maker. Instead,
-# run test actions on the target platform (linux/amd64) via qemu-user binfmt;
-# compile/genrule actions keep running natively on the host.
+# Default builds/tests run natively on the HOST architecture: there is NO
+# global --platforms override. Cross-arch artifacts are produced explicitly via
+# the arch configs below (--config=amd64 / --config=arm64), which force the
+# target platform and scope --use_target_platform_for_tests to that config so
+# test actions execute on the target platform (needs qemu-user binfmt on a host
+# whose arch differs, e.g. amd64 tests on this arm64 host). Registering an
+# x86_64 execution platform globally is still deliberately avoided: it makes
+# Bazel prefer the amd64 Go SDK under qemu for ALL Go compilation and breaks
+# C++ toolchain resolution for
+# @bazel_tools//src/tools/launcher:launcher_maker.
 # NOTE: --use_target_platform_for_tests is deprecated in Bazel 9.2.0 (emits a
 # non-fatal WARNING on every invocation). The suggested replacement --
 # registering the target platform as an execution platform, e.g.
@@ -18,7 +15,8 @@ build --platforms=//tools/bazel:linux_amd64
 # NOT used: it would reintroduce the amd64 Go SDK preference under qemu and
 # the C++ launcher_maker toolchain failure above. The linux_x86_64_exec
 # platform target was removed as dead code; do not "fix" this deprecation.
-build --use_target_platform_for_tests=true
+build:amd64 --use_target_platform_for_tests=true
+build:arm64 --use_target_platform_for_tests=true
 
 test --test_output=errors
 test --test_summary=terse
@@ -41,8 +39,8 @@ common --enable_platform_specific_config
 build:linux --sandbox_add_mount_pair=/home
 
 # Opt-in musl C builds for both target arches. NOT the default: a plain
-# `bazel build` keeps --platforms=//tools/bazel:linux_amd64 and the existing
-# clang/glibc toolchain (the pure-Go controller needs no C toolchain at all).
+# `bazel build` targets the host platform and the existing clang/glibc
+# toolchain (the pure-Go controller needs no C toolchain at all).
 # zig cc enables UBSan by default; -fno-sanitize=undefined turns it off for
 # these hermetic builds.
 #

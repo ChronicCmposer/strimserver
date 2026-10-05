@@ -12,6 +12,16 @@ load("//tools/bazel:go_bin.bzl", "go_bin")
 
 exports_files(["go.mod", "go.sum"])
 
+# Build provenance (Version + Commit) injected as a generated Go source. The
+# genrule reads GIT_TAG / GIT_COMMIT from the action env (--action_env in the
+# Makefile); unset -> 0.0.0 / unknown.
+genrule(
+    name = "build_info_go",
+    outs = ["version.go"],
+    cmd = "$(location //:gen_build_info) go $@",
+    tools = ["//:gen_build_info"],
+)
+
 go_library(
     name = "controller_lib",
     srcs = [
@@ -21,6 +31,7 @@ go_library(
         "main.go",
         "names.go",
         "paths.go",
+        "version.go",
     ],
     importpath = "strimserver-controller",
     visibility = ["//visibility:private"],
@@ -64,6 +75,7 @@ go_test(
     srcs = [
         "container_factory_test.go",
         "controller_test.go",
+        "main_test.go",
     ],
     embed = [":controller_lib"],
     # pure = "on" matches the binary: this package is pure Go (verified: no
@@ -71,6 +83,7 @@ go_test(
     # statically instead of dragging in the host C toolchain/libgcc.
     pure = "on",
     deps = [
+        "@com_github_coder_websocket//:websocket",
         "@com_github_containerd_containerd_v2//client",
         "@com_github_containerd_containerd_v2//core/content",
         "@com_github_containerd_containerd_v2//core/containers",
@@ -152,6 +165,7 @@ sh_test(
     data = [
         ":golangci_lint_tool",
         ":go_bin",
+        ":build_info_go",
         ".golangci.yml",
         "container_factory.go",
         "container_factory_test.go",
@@ -161,6 +175,7 @@ sh_test(
         "go.mod",
         "go.sum",
         "main.go",
+        "main_test.go",
         "names.go",
         "paths.go",
     ],

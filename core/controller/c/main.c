@@ -56,6 +56,7 @@
  * License: project code (see LICENSE). No GPL.
  */
 
+#include "build_info.h"
 #include "cdi.h"
 #include "containerd_client.h"
 #include "controller.h"
@@ -659,6 +660,18 @@ static const strim_env_var g_env_spec[] = {
      "deploy.sh", NULL},
     {"BANDWIDTH_TEST", "Twitch / egress", true, "false",
      "true appends ?bandwidthtest=true to the RTMP URL", NULL},
+
+    /* ---------------- Dynamic DNS (Namecheap) (docs guards; bind == NULL) */
+    {"ENABLE_DDNS", "Dynamic DNS (Namecheap)", false, "false",
+     "Feature toggle: when false, deploy.sh skips DDNS entirely (box reachable "
+     "by IP only).", NULL},
+    {"DDNS_HOST", "Dynamic DNS (Namecheap)", false, "strim",
+     "Namecheap Dynamic DNS host label (matches the DDNS host created in "
+     "Namecheap).", NULL},
+    {"DDNS_DOMAIN", "Dynamic DNS (Namecheap)", false, "",
+     "Namecheap Dynamic DNS domain (OPERATOR MUST FILL IN; leave empty for "
+     "published builds).\n# Example: DDNS_DOMAIN=\"example.com\"  ->  box is "
+     "referenceable as strim.example.com", NULL},
 
     /* ---------------- Secrets */
     {"SRT_PUBLISH_PASSPHRASE", "Secrets", false, "",
@@ -1875,7 +1888,8 @@ static int run(void) {
     fill_http_callbacks(&cbs);
     snprintf(addr, sizeof addr, ":%s", cfg.controller_http_port);
 
-    rc = strim_http_server_start(&server, addr, &cbs, &hctx);
+    rc = strim_http_server_start(&server, addr, &cbs, &hctx,
+                                 STRIMSERVER_VERSION, STRIMSERVER_COMMIT);
     if (rc != 0) {
         logmsg("could not start http server on %s: %d", addr, rc);
         strim_controller_destroy(controller);
@@ -1886,6 +1900,7 @@ static int run(void) {
     }
 
     /* -- spawn the threads (main.go:313-342) */
+    logmsg("strimserver %s (commit %.12s)", STRIMSERVER_VERSION, STRIMSERVER_COMMIT);
     logmsg("starting control plane...");
 
     {

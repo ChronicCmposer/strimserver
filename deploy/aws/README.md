@@ -51,8 +51,10 @@ same unchecked tar under `//tools/bazel:linux_arm64` via a platform transition
 (`tools/bazel/platform_transition.bzl`). The C bundles are built only through
 `//:package_all` (they need the zig musl transition
 `//:c_controller_transition`). Bundle builds refuse to run while
-`TWITCH_STREAM_KEY` is set in `core/strimserver.env` — the key is injected at
-deploy time, never baked into the bundle.
+`TWITCH_STREAM_KEY` is set, `ENABLE_DDNS` is `true`, or `DDNS_DOMAIN` is
+non-empty in `core/strimserver.env` — the key and the Dynamic DNS settings are
+injected at deploy time, never baked into the bundle (the redistributable
+bundle ships DDNS disabled).
 
 Publish to GitHub (requires `gh auth login` and a pushed tag); `//:release`
 uploads all four tars and all four `.sha256` assets:
@@ -125,7 +127,7 @@ gitignored `deploy/aws/.env`, never in committed files.
 
 ```sh
 cp deploy/aws/.env.example deploy/aws/.env
-$EDITOR deploy/aws/.env   # KEY_NAME, SSH_IDENTITY, DEPLOYMENT_SRC, DEPLOYMENT_SHA256, TWITCH_STREAM_KEY, DDNS_PASSWORD, INSTANCE_TYPE
+$EDITOR deploy/aws/.env   # KEY_NAME, SSH_IDENTITY, DEPLOYMENT_SRC, DEPLOYMENT_SHA256, TWITCH_STREAM_KEY, DDNS_PASSWORD, ENABLE_DDNS, DDNS_HOST, DDNS_DOMAIN, INSTANCE_TYPE
 set -a; . deploy/aws/.env; set +a
 ```
 
@@ -199,13 +201,22 @@ applies when `DEPLOYMENT_SRC` is unset and `S3_BUCKET` is configured — with
 `setup_strimserver` lists the block devices and prompts for the NVMe device to
 format (default `/dev/nvme1n1`; destructive). It formats ext4, mounts
 `/mnt/nvme`, places the bundle from `DEPLOYMENT_SRC` (`s3://`, `https://`, or a
-local file), optionally verifies `DEPLOYMENT_SHA256`, transfers the Twitch key
-and the Namecheap Dynamic DNS password (`DDNS_PASSWORD` / `DDNS_PASSWORD_FILE`
-in `.env`, mirroring the Twitch key flow) as `0600` files, extracts the tar,
-and runs `deploy.sh`.
+local file), optionally verifies `DEPLOYMENT_SHA256`, transfers the Twitch key,
+the Namecheap Dynamic DNS password (`DDNS_PASSWORD` / `DDNS_PASSWORD_FILE` in
+`.env`, mirroring the Twitch key flow), and the Dynamic DNS settings
+(`ENABLE_DDNS` / `DDNS_HOST` / `DDNS_DOMAIN` in `.env`) as `0600` files,
+extracts the tar, and runs `deploy.sh`. The redistributable bundle ships DDNS
+disabled; the operator's settings are propagated to the box at deploy time and
+written into the on-box `strimserver.env`, exactly like the Twitch key.
 
 `deploy.sh` runs the same flow on both architectures; the arm64 rollout adds
 the GPU-runtime step:
+
+Before sourcing the on-box config, `deploy.sh` merges the transferred
+`ENABLE_DDNS` / `DDNS_HOST` / `DDNS_DOMAIN` (from `/mnt/nvme/ddns-config`) into
+`config/strimserver.env`, so both its own DDNS block and the `strim-ddns`
+unit's `EnvironmentFile` see the operator values; with no transfer file the
+bundled defaults (DDNS disabled) stay in effect.
 
 1. Inject `TWITCH_STREAM_KEY` into `config/strimserver.env` (then scrub the
    transfer file). No key → warning, egress disabled until one is set.
@@ -231,9 +242,10 @@ the GPU-runtime step:
    arm64 expect the skip warning until an arm64 RPM is published (Section 7).
 9. Set hostname, create `/mnt/nvme/{video-files,logs}`, move the offline
    segment into `video-files`.
-10. Configure Namecheap Dynamic DNS (`strim.example.com`): install the
-    transferred password to `/etc/strim-ddns/password` (root:root `0600`,
-    transfer file scrubbed), install + enable the `strim-ddns.timer` (6h,
+10. Configure Namecheap Dynamic DNS (`$DDNS_HOST.$DDNS_DOMAIN`, from the
+    operator settings injected above): install the transferred password to
+    `/etc/strim-ddns/password` (root:root `0600`, transfer file scrubbed),
+    install + enable the `strim-ddns.timer` (6h,
     `Persistent=true`), import `strim-ddns-container.tar`, run a one-shot
     refresh passing `ip=$PUBLIC_IP`, then verify — retrying ~24 times with 5s
     sleeps, up to a few minutes worst-case, failing loudly on mismatch —

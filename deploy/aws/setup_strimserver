@@ -129,6 +129,49 @@ def transfer_ddns_password(password, hostname, username, port):
     ssh_run(hostname, username, port, "chmod 600 /mnt/nvme/ddns-password")
 
 
+def resolve_ddns_config():
+    """Operator-supplied Dynamic DNS settings, with the bundled defaults.
+
+    Returns (ENABLE_DDNS, DDNS_HOST, DDNS_DOMAIN). These are non-secret operator
+    settings (root .env) injected at deploy time, mirroring the Twitch stream key.
+    """
+    enable_ddns = os.environ.get("ENABLE_DDNS", "").strip() or "false"
+    ddns_host = os.environ.get("DDNS_HOST", "").strip() or "strim"
+    ddns_domain = os.environ.get("DDNS_DOMAIN", "").strip()
+    return enable_ddns, ddns_host, ddns_domain
+
+
+def _ddns_quote(value):
+    """Double-quote a value for the on-box env file.
+
+    The on-box parser strips surrounding double quotes, so double quotes (not
+    single) are required; escaping backslash, double-quote, '$' and backtick
+    additionally keeps the file safe to source (entrypoint.sh).
+    """
+    escaped = (value.replace("\\", "\\\\")
+                    .replace('"', '\\"')
+                    .replace("$", "\\$")
+                    .replace("`", "\\`"))
+    return f'"{escaped}"'
+
+
+def transfer_ddns_config(enable_ddns, ddns_host, ddns_domain, hostname, username, port):
+    """Write the settings to a local 0600 temp file, scp it to the box, then scrub locally."""
+    import stat
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="ddns-config-")
+    try:
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+        with os.fdopen(fd, "w") as fh:
+            fh.write(f"ENABLE_DDNS={_ddns_quote(enable_ddns)}\n")
+            fh.write(f"DDNS_HOST={_ddns_quote(ddns_host)}\n")
+            fh.write(f"DDNS_DOMAIN={_ddns_quote(ddns_domain)}\n")
+        scp_to_remote(tmp, hostname, username, port, "/mnt/nvme/ddns-config")
+    finally:
+        os.remove(tmp)
+    ssh_run(hostname, username, port, "chmod 600 /mnt/nvme/ddns-config")
+
+
 def interactive():
     """True when a human is on both ends of the pipe."""
     return sys.stdin.isatty() and sys.stdout.isatty()
@@ -237,6 +280,15 @@ if __name__ == "__main__":
         print("\nNote: no DDNS_PASSWORD provided; deploying without Dynamic DNS registration.\n"
               "strim.example.com will not resolve to this box; set the password later\n"
               "to register it with Namecheap Dynamic DNS.\n")
+
+    # 2e) transfer the operator's Dynamic DNS settings (non-secret), if configured
+    enable_ddns, ddns_host, ddns_domain = resolve_ddns_config()
+    if enable_ddns == "true" or ddns_domain:
+        transfer_ddns_config(enable_ddns, ddns_host, ddns_domain, HOST, USER, PORT)
+    else:
+        print("\nNote: no ENABLE_DDNS / DDNS_DOMAIN provided; deploying with Dynamic DNS\n"
+              "disabled (the bundled default). The box is reachable by public IP only;\n"
+              "set ENABLE_DDNS / DDNS_HOST / DDNS_DOMAIN to register a Dynamic DNS record.\n")
 
     # 3) extract + hand off to deploy.sh
     run_ssh_commands(HOST, USER, PORT, [

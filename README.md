@@ -220,27 +220,27 @@ gracefully on shutdown.
 > target (`GENCODE`) in `tools/ffmpeg-dist` when rebuilding
 > the artifact, or run on a matching instance type.
 
-> **Architecture: x86_64 only.** Every image is built
-> exclusively for the `linux/amd64` (x86_64) architecture,
-> and the deployment target is the **AMD EPYC 7R13**
+> **Architecture: host-native by default, dual-arch from any
+> host.** The `strimserver` targets build for the architecture
+> of whatever host runs Bazel — amd64 on an x86_64 host, arm64
+> on an aarch64 host. Both the Go and C controller bundles are
+> produced for **amd64 and arm64 from any host**, and
+> cross-compiling needs no emulator: the Go controller
+> cross-compiles, and the C controller uses the hermetic zig
+> musl toolchains. `--config=amd64` / `--config=arm64` select
+> the zig musl toolchain for C and set the target platform. On
+> an arm64 host, for example, `--config=amd64` builds and tests
+> the amd64 artifacts; *running* amd64 test binaries
+> additionally requires `qemu-user` binfmt registered on the
+> host (an OS-level setup, not a Bazel one).
+>
+> `//:package` is the amd64 primary bundle, `//:package_arm64`
+> is the Go arm64 bundle, and `//:package_all` builds all four
+> bundles (Go + C x amd64 + arm64). With no config, tests run
+> natively on the host, and the Stream Deck plugin builds and
+> tests natively (it is architecture-independent JavaScript).
+> The default amd64 deployment target is the **AMD EPYC 7R13**
 > processor used in current-generation AWS GPU instances.
-> The scratch images copy shared libraries from
-> `x86_64-linux-gnu` paths, the Fish and MediaMTX binaries
-> are `linux-x86_64`/`linux_amd64` releases, and Bazel
-> (`--platforms=//tools/bazel:linux_amd64`) builds the
-> `linux/amd64` platform. On non-x86_64 development hosts
-> (e.g. aarch64), the Bazel test suite can still be run:
-> `.bazelrc` sets `--use_target_platform_for_tests=true`,
-> which runs test actions on the target platform via
-> qemu-user binfmt (install `qemu-user` and
-> `qemu-user-binfmt`) while compile/genrule actions stay
-> native; this does not add arm64 build support. Building
-> artifacts for `arm64`/`aarch64` is still unsupported
-> today; building for ARM (e.g. AWS Graviton with NVIDIA,
-> or the `g5g` family) or other architectures would require
-> parameterizing the build platform, the FFmpeg `-gencode`
-> target, the library copy paths, and the upstream binary
-> URLs (see *Possible future enhancements*).
 
 ### Host build and deployment tools
 
@@ -263,12 +263,11 @@ pinned by the source tree:
 - Python 3, used by EC2 launch/setup helpers.
 - `tar`, `sudo`, OpenSSH client, and standard POSIX shell
   tooling.
-- On non-x86_64 hosts (e.g. aarch64), `qemu-user` and
-  `qemu-user-binfmt` (Debian/Ubuntu) must be installed and
-  registered so the test suite (`make test-controller` /
-  `bazel test //core/controller:all`) can run the
-  linux/amd64 test binaries under emulation; on x86_64 hosts
-  this is unnecessary.
+- `qemu-user` and `qemu-user-binfmt` (Debian/Ubuntu) are
+  needed only to *run* cross-arch test binaries — e.g.
+  `--config=amd64` on an arm64 host. Install and register them
+  at the OS level (not via Bazel); default (no config) tests
+  run natively on the host and need no emulator.
 - An NVIDIA-capable build environment (CUDA toolchain) is
   required only when **rebuilding** the GPU FFmpeg artifact
   via `tools/ffmpeg-dist`; a normal `make package` /
@@ -342,6 +341,14 @@ key is a secret injected at deploy time by
 and `make package` / `make release` refuse to build if it is
 non-empty. A private, single-tenant S3 build (`make
 publish-strimserver`) may bake your own key instead.
+
+The redistributable bundle likewise ships DDNS disabled: leave
+`ENABLE_DDNS="false"` and `DDNS_DOMAIN=""` in
+`core/strimserver.env` (the same gate refuses to build with DDNS
+enabled or a domain set). The operator sets `ENABLE_DDNS` /
+`DDNS_HOST` / `DDNS_DOMAIN` in the root `.env`, and
+`setup_strimserver` / `deploy.sh` propagate them to the box at
+deploy time, exactly like the Twitch key.
 
 `core/strimserver.env.example` is generated from the
 controller's environment spec. If you change that spec,
@@ -588,9 +595,10 @@ segment into the deployment tars.
 `make package` and `make release` also produce `.sha256`
 checksums for the tars they build (consumers verify them via
 `DEPLOYMENT_SHA256`; see *AWS EC2 deployment target*) and
-require `TWITCH_STREAM_KEY` to be empty in
+require `TWITCH_STREAM_KEY` to be empty and DDNS disabled
+(`ENABLE_DDNS="false"`, `DDNS_DOMAIN=""`) in
 `core/strimserver.env`; `make publish-strimserver` does not,
-and bakes whatever key is present. The experimental OpenSSH
+and bakes whatever key and DDNS settings are present. The experimental OpenSSH
 RPM is always included: it is fetched from the pinned
 `@openssh_dist` (amd64) / `@openssh_dist_arm64` (aarch64)
 artifacts (built out-of-band by `tools/openssh/publish.sh`).
@@ -658,16 +666,51 @@ Then `make release GIT_TAG=v1.0.0` (or `bazel run //:release`)
 attaches all four deployment bundles + checksums (and the Stream Deck
 plugin bundles) to the GitHub release.
 
-On non-x86_64 hosts, `make test-controller` additionally
-requires `qemu-user`/`qemu-user-binfmt` to be installed and
-registered, as described in *Host build and deployment
-tools*.
+`make test-controller` runs natively on the host by default.
+To build and test the amd64 artifacts on an arm64 host, pass
+`--config=amd64`; *running* those amd64 test binaries also
+requires `qemu-user`/`qemu-user-binfmt` registered on the host,
+as described in *Host build and deployment tools*.
 
 `bazel test //...` runs every test in the repo: controller unit tests,
 lint, generated-file staleness, and the image smoke tests
 (`//core/controller:image_smoke_test`, `//core:mediamtx_smoke_test`,
 and `//core:ffmpeg_smoke_test` — the latter also asserts every
 `DT_NEEDED` library is packaged in the image).
+
+### Version provenance and mismatch troubleshooting
+
+Build provenance comes from two environment variables, passed to
+Bazel via `--action_env` (see the top of the `Makefile`):
+
+- `GIT_TAG` — the git tag, normalized (`v1.2.3` -> `1.2.3`).
+- `GIT_COMMIT` — the full 40-hex commit SHA.
+
+Ordinary `make` targets supply them automatically; `make release`
+and every `make publish-*` **require both** and fail if either is
+empty. Untagged/dev builds report version `0.0.0` and commit
+`unknown`.
+
+The Go and C controllers stamp this provenance onto **all** HTTP
+responses, including `404`/`405` and the WebSocket `101` upgrade:
+
+```text
+X-Strimserver-Version: X.Y.Z
+X-Strimserver-Commit: <full 40-hex sha>
+```
+
+The headers are always present (dev builds included). Both
+controllers also log `strimserver <version> (commit <short12>)` to
+stderr at startup, on the normal run path and before `starting
+control plane`.
+
+The Stream Deck plugin logs its own version+commit at init. On each
+WebSocket connect it probes the server (`GET /healthz`, falling back
+to `GET /status`) and logs the server's version+commit at INFO. If
+either side is a dev build (`0.0.0`/`unknown`) it logs INFO only; if
+both are real and their `major.minor.patch` differ it logs a WARNING
+(repeated on each reconnect); the same semver with a different
+commit logs INFO.
 
 ## Dependency check
 
@@ -829,7 +872,7 @@ spot instance by default (`--no-spot` for on-demand):
 
 ```bash
 cp deploy/aws/.env.example deploy/aws/.env
-$EDITOR deploy/aws/.env          # set KEY_NAME, SSH_IDENTITY, DEPLOYMENT_SRC, TWITCH_STREAM_KEY, etc.
+$EDITOR deploy/aws/.env          # set KEY_NAME, SSH_IDENTITY, DEPLOYMENT_SRC, TWITCH_STREAM_KEY, ENABLE_DDNS, DDNS_HOST, DDNS_DOMAIN, etc.
 set -a
 . deploy/aws/.env
 set +a
@@ -855,7 +898,12 @@ to verify the download against the checksum produced by
 Your Twitch stream key is supplied here via `TWITCH_STREAM_KEY`
 (or `TWITCH_STREAM_KEY_FILE`) and transferred to the
 instance as a `0600` file at deploy time — it is never baked
-into the bundle.
+into the bundle. The Dynamic DNS settings are propagated the
+same way: set `ENABLE_DDNS` / `DDNS_HOST` / `DDNS_DOMAIN` in
+`.env` and `setup_strimserver` transfers them as a `0600` file;
+`deploy.sh` writes them into the on-box `strimserver.env` before
+it runs. The redistributable bundle ships DDNS disabled, so
+these operator settings are what enable it.
 
 Once deployed, the box is exposed for SSH, the local encoder,
 and the Stream Deck plugin as `strim.example.com`, kept current
@@ -1078,11 +1126,11 @@ generate` from the controller's Go definitions.
   distro-installed runtime packages.
 - Parameterize the FFmpeg CUDA `-gencode` target to support
   additional NVIDIA architectures (e.g. `sm_89` for `g6`).
-- Support building for `arm64`/`aarch64` (e.g. AWS Graviton
-  with NVIDIA, such as the `g5g` family) and other
-  architectures by parameterizing the Bazel build platform,
-  the library copy paths, the `-gencode` target, and the
-  upstream binary download URLs (MediaMTX, etc.).
+- Extend the parameterized build platform beyond
+  amd64/arm64 (the two supported today) to further CPU/GPU
+  combinations, along with the library copy paths, the
+  `-gencode` target, and the upstream binary download URLs
+  (MediaMTX, etc.).
 - Add safer secret handling for Twitch stream keys and SRT
   passphrases through AWS Secrets Manager or SSM Parameter
   Store.

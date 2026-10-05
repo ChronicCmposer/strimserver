@@ -717,6 +717,11 @@ s3_http_file(
 # package.json's ">=24".
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version_from_nvmrc = "//tools/streamdeck-plugin:.nvmrc")
+# Surface the generated per-platform Node repos under their apparent names so
+# tools/streamdeck-plugin's host_node select can reference
+# @nodejs_linux_{arm64,amd64} instead of canonical
+# @@rules_nodejs++node+... labels.
+use_repo(node, "nodejs_linux_amd64", "nodejs_linux_arm64")
 
 # npm_translate_lock uses pnpm_lock (pnpm-lock.yaml) because aspect_rules_js
 # 3.4.1's npm_package_lock path is broken in two distinct ways: the bzlmod

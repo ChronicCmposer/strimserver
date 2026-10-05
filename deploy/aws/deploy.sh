@@ -42,6 +42,35 @@ mv /mnt/nvme/notify /mnt/nvme/bin/notify
 chmod +x /mnt/nvme/bin/transcode.sh
 chmod +x /mnt/nvme/bin/notify
 
+# --- inject Dynamic DNS settings (ENABLE_DDNS / DDNS_HOST / DDNS_DOMAIN) ------
+# The operator's Dynamic DNS settings (root .env) are transferred as a 0600 file
+# by setup_strimserver, mirroring the Twitch stream key. Merge them into the
+# on-box strimserver.env BEFORE sourcing it below, so both deploy.sh's DDNS block
+# and the strim-ddns unit's EnvironmentFile see the operator values. With no
+# file, the bundled defaults (DDNS disabled) stay in effect.
+ENV_FILE=/mnt/nvme/config/strimserver.env
+DDNS_CONFIG_FILE=/mnt/nvme/ddns-config
+if [ -s "$DDNS_CONFIG_FILE" ]; then
+   printf "injecting Dynamic DNS settings...\n"
+   for ddns_key in ENABLE_DDNS DDNS_HOST DDNS_DOMAIN; do
+      ddns_assignment="$(grep -m1 "^${ddns_key}=" "$DDNS_CONFIG_FILE" || true)"
+      if [ -n "$ddns_assignment" ]; then
+         tmp="$(mktemp)"
+         # drop any existing assignment, then append the injected one
+         grep -v "^[[:space:]]*${ddns_key}=" "$ENV_FILE" > "$tmp" || true
+         printf '%s\n' "$ddns_assignment" >> "$tmp"
+         mv "$tmp" "$ENV_FILE"
+      fi
+   done
+   chmod 600 "$ENV_FILE"
+   # scrub the transfer file
+   if command -v shred >/dev/null 2>&1; then shred -u "$DDNS_CONFIG_FILE"; else rm -f "$DDNS_CONFIG_FILE"; fi
+   printf "Dynamic DNS settings injected into %s\n" "$ENV_FILE"
+else
+   printf "\nNote: no Dynamic DNS settings transferred; using the bundled values in %s.\n" "$ENV_FILE"
+fi
+# ------------------------------------------------------------------------------
+
 # --- Dynamic DNS config (from the on-box strimserver.env) ---------------------
 # The operator controls Dynamic DNS via ENABLE_DDNS (toggle), DDNS_HOST (default
 # "strim"), and DDNS_DOMAIN (the domain the record is registered under). Source

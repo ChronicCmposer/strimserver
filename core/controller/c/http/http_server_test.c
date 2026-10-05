@@ -50,6 +50,11 @@
 
 #include <yyjson.h>
 
+/* Build provenance the stub servers are started with (the real binary passes
+ * the generated STRIMSERVER_VERSION / STRIMSERVER_COMMIT). */
+#define TEST_BUILD_VERSION "1.2.3"
+#define TEST_BUILD_COMMIT "0123456789abcdef0123456789abcdef01234567"
+
 /* =========================================================================
  * Test harness
  * ========================================================================= */
@@ -632,6 +637,7 @@ struct ws_client_ctx {
   int close_received;
   uint8_t last_msg[STRIM_HTTP_STATUS_MAX];
   size_t last_msg_len;
+  char handshake_resp[4096]; /* raw 101 response, for header assertions */
 };
 
 static ssize_t ws_cli_recv_cb(wslay_event_context_ptr ctx, uint8_t *buf,
@@ -798,6 +804,8 @@ static int ws_client_open(struct ws_client_ctx *cl,
 
   if (!ws_read_handshake_response(srv, fd, resp, sizeof(resp)))
     goto fail;
+
+  snprintf(cl->handshake_resp, sizeof(cl->handshake_resp), "%s", resp);
 
   /* RFC 6455 example: this key yields exactly this accept value. */
   {
@@ -1170,6 +1178,107 @@ static void test_ws_cycle(struct strim_http_server *srv,
   ws_client_close(&cl);
 }
 
+/* Issue-1 regression: after the 101 handshake the server must keep the
+ * connection open (no immediate TCP drop) and deliver the current status as a
+ * text frame. The buggy handshake (duplicate "Connection: Upgrade") makes the
+ * strict client reject the 101; an app-side close drops the socket right
+ * after upgrade. Both show up here as either a handshake failure in
+ * ws_client_open or EOF within the interval below. */
+static void test_ws_stays_open(struct strim_http_server *srv) {
+  struct ws_client_ctx cl;
+  char tmp[8];
+  ssize_t r;
+
+  CHECK(ws_client_open(&cl, srv, (uint16_t) strim_http_server_bound_port(srv))
+            == 0,
+        "ws stays-open: open");
+  if (cl.fd < 0)
+    return;
+
+  /* >100ms of service passes: the connection must survive and a status
+   * frame must arrive (Go handleAddListener's immediate snapshot). */
+  pump(srv, &cl, 200);
+  CHECK(cl.status_frames >= 1, "ws stays-open: status frame arrives");
+  CHECK(cl.last_msg_len > 0 && strstr((char *) cl.last_msg, "\"paths\"") != NULL,
+        "ws stays-open: frame is status JSON");
+
+  r = recv(cl.fd, tmp, sizeof(tmp), MSG_DONTWAIT);
+  CHECK(r != 0, "ws stays-open: connection must not be closed after upgrade");
+
+  ws_client_close(&cl);
+}
+
+/* A normal HTTP response must carry the build-provenance headers. */
+static void test_build_headers_http(struct strim_http_server *srv) {
+  char resp[2048];
+
+  CHECK(http_exchange(srv, strim_http_server_bound_port(srv), "GET", "/healthz",
+                      NULL, NULL, resp, sizeof(resp)) == 0,
+        "build-headers http exchange");
+  CHECK(resp_has_header(resp, "X-Strimserver-Version", TEST_BUILD_VERSION),
+        "build-headers http version (resp:\n%s\n)", resp);
+  CHECK(resp_has_header(resp, "X-Strimserver-Commit", TEST_BUILD_COMMIT),
+        "build-headers http commit (resp:\n%s\n)", resp);
+}
+
+/* The /subscribe 101 upgrade response must carry the same headers. */
+static void test_build_headers_ws(struct strim_http_server *srv) {
+  struct ws_client_ctx cl;
+
+  CHECK(ws_client_open(&cl, srv, (uint16_t) strim_http_server_bound_port(srv))
+            == 0,
+        "build-headers ws open");
+  if (cl.fd < 0)
+    return;
+  CHECK(resp_has_header(cl.handshake_resp, "X-Strimserver-Version",
+                        TEST_BUILD_VERSION),
+        "build-headers 101 version (resp:\n%s\n)", cl.handshake_resp);
+  CHECK(resp_has_header(cl.handshake_resp, "X-Strimserver-Commit",
+                        TEST_BUILD_COMMIT),
+        "build-headers 101 commit (resp:\n%s\n)", cl.handshake_resp);
+  ws_client_close(&cl);
+}
+
+/* NULL/empty build provenance is normalized to "unknown" on both the normal
+ * and the 101 path (the header is always present and never empty). */
+static void test_build_headers_unknown(void) {
+  strim_http_callbacks cbs;
+  strim_http_server *srv = NULL;
+  struct ws_client_ctx cl;
+  char resp[2048];
+
+  stub_reset(&g_stub);
+  g_stub.cbs = &cbs;
+  g_stub.userdata = &g_stub;
+  stub_fill_callbacks(&cbs);
+
+  CHECK(strim_http_server_start(&srv, ":0", &cbs, &g_stub, NULL, "") == 0,
+        "build-headers unknown start");
+  if (srv == NULL)
+    return;
+
+  CHECK(http_exchange(srv, strim_http_server_bound_port(srv), "GET", "/healthz",
+                      NULL, NULL, resp, sizeof(resp)) == 0,
+        "build-headers unknown exchange");
+  CHECK(resp_has_header(resp, "X-Strimserver-Version", "unknown"),
+        "build-headers unknown version (resp:\n%s\n)", resp);
+  CHECK(resp_has_header(resp, "X-Strimserver-Commit", "unknown"),
+        "build-headers unknown commit (resp:\n%s\n)", resp);
+
+  CHECK(ws_client_open(&cl, srv, (uint16_t) strim_http_server_bound_port(srv))
+            == 0,
+        "build-headers unknown ws open");
+  if (cl.fd >= 0) {
+    CHECK(resp_has_header(cl.handshake_resp, "X-Strimserver-Version", "unknown"),
+          "build-headers unknown 101 version (resp:\n%s\n)", cl.handshake_resp);
+    CHECK(resp_has_header(cl.handshake_resp, "X-Strimserver-Commit", "unknown"),
+          "build-headers unknown 101 commit (resp:\n%s\n)", cl.handshake_resp);
+    ws_client_close(&cl);
+  }
+
+  strim_http_server_destroy(srv);
+}
+
 static void test_ws_reject_no_upgrade(struct strim_http_server *srv) {
   char resp[2048];
   char body[1024];
@@ -1222,7 +1331,8 @@ static void test_shutdown_loop(void) {
   g_stub.userdata = &g_stub;
   stub_fill_callbacks(&cbs);
 
-  CHECK(strim_http_server_start(&srv, ":0", &cbs, &g_stub) == 0,
+  CHECK(strim_http_server_start(&srv, ":0", &cbs, &g_stub, TEST_BUILD_VERSION,
+                                TEST_BUILD_COMMIT) == 0,
         "shutdown-loop start");
   if (srv == NULL)
     return;
@@ -1274,7 +1384,8 @@ int main(void) {
    * a 2s budget keeps the ws write-timeout from interfering with the test. */
   setenv("WEBSOCKET_WRITE_TIMEOUT", "2s", 1);
 
-  if (strim_http_server_start(&srv, ":0", &cbs, &g_stub) != 0)
+  if (strim_http_server_start(&srv, ":0", &cbs, &g_stub, TEST_BUILD_VERSION,
+                              TEST_BUILD_COMMIT) != 0)
   {
     fprintf(stderr, "FAIL: strim_http_server_start\n");
     return 1;
@@ -1295,10 +1406,14 @@ int main(void) {
   RUN(test_ws_reject_no_upgrade, "subscribe-426", srv);
   RUN(test_ws_reject_bad_method, "subscribe-405", srv);
   RUN(test_ws_cycle, "ws-subscribe-push-close", srv, &g_stub);
+  RUN(test_ws_stays_open, "ws-stays-open", srv);
+  RUN(test_build_headers_http, "build-headers-http", srv);
+  RUN(test_build_headers_ws, "build-headers-101", srv);
 
   strim_http_server_destroy(srv);
 
   RUN(test_shutdown_loop, "shutdown-loop");
+  RUN(test_build_headers_unknown, "build-headers-unknown");
 
   if (failures != 0)
   {

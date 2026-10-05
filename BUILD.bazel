@@ -4,7 +4,7 @@ load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files", "strip_prefi
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("//tools/bazel:c_controller_transition.bzl", "c_controller_transition")
-load("//tools/bazel:platform_transition.bzl", "platform_transition")
+load("//tools/bazel:platform_transition.bzl", "arch_transition")
 
 # --- Offline fallback segment --------------------------------------------
 # The fallback clip is fetched by default through MODULE.bazel's
@@ -243,10 +243,12 @@ pkg_files(
 #
 # Arch handling stays entirely inside Bazel: one `bazel build //:package_all`
 # (or one `bazel run //:release` / //:publish_all) produces all four from a
-# single analysis pass. The Go arm64 bundle goes through
-# //tools/bazel:platform_transition (unchanged behavior); the C bundles go
-# through //:c_controller_transition. The C graph is `manual`-tagged: it pulls
-# the C controller into the graph, and a plain `bazel build //...` (default
+# single analysis pass. BOTH Go bundles go through the arch_transition rule
+# (//tools/bazel:platform_transition.bzl): the default invocation now builds
+# natively for the HOST, so the amd64 bundle is forced to //tools/bazel:linux_amd64
+# and the arm64 bundle to //tools/bazel:linux_arm64. The C bundles go through
+# //:c_controller_transition. The C graph is `manual`-tagged: it pulls the C
+# controller into the graph, and a plain `bazel build //...` (default
 # clang/glibc toolchain) must never build it.
 
 pkg_tar(
@@ -261,16 +263,35 @@ pkg_tar(
         ":bundle_scripts",
     ],
     out = "strimserver-deployment-go-amd64.unchecked.tar",
+    # Manual: the base tar is built ONLY inside the two arch transitions below.
+    # A wildcard `bazel build //...` must not expand it in the host config, or
+    # its go-amd64.unchecked.tar output collides with deployment_go_amd64_transition's
+    # same-named symlink (the transition rule's own output lives in the parent
+    # config). Mirrors the manual-tagged C base tar.
+    tags = ["manual"],
+)
+
+# The base tar is reachable ONLY through the two arch transitions below: the
+# default invocation targets the HOST platform, so each bundle must force its
+# own target platform explicitly.
+arch_transition(
+    name = "deployment_go_amd64_transition",
+    target = ":_strimserver_deployment_go_tar_unchecked",
+    to_arch = "amd64",
+    # Distinct basename from the arm64 transition's output (the underlying
+    # pkg_tar keeps strimserver-deployment-go-amd64.unchecked.tar in BOTH
+    # configurations) so the two never collide in sh_binary runfiles.
+    out = "strimserver-deployment-go-amd64.unchecked.tar",
 )
 
 genrule(
     name = "strimserver_deployment_tar_go_amd64",
     srcs = [
-        ":_strimserver_deployment_go_tar_unchecked",
+        ":deployment_go_amd64_transition",
         ":check_no_twitch_key",
     ],
     outs = ["strimserver-deployment-go-amd64.tar"],
-    cmd = "cp $(location :_strimserver_deployment_go_tar_unchecked) $@",
+    cmd = "cp $(location :deployment_go_amd64_transition) $@",
 )
 
 genrule(
@@ -282,12 +303,13 @@ genrule(
 )
 
 # --- Go arm64 bundle (the same graph rebuilt under //tools/bazel:linux_arm64)
-# via a platform transition, so one `bazel build` produces BOTH Go tars from a
+# via the arch transition, so one `bazel build` produces BOTH Go tars from a
 # single analysis pass. The transition output carries the -go-arm64 basename so
 # the four bundles never collide on a GitHub release, S3, or sh_binary runfiles.
-platform_transition(
+arch_transition(
     name = "deployment_go_arm64_transition",
     target = ":_strimserver_deployment_go_tar_unchecked",
+    to_arch = "arm64",
     # Distinct basename: the underlying pkg_tar keeps
     # strimserver-deployment-go-amd64.unchecked.tar in BOTH configurations, so
     # this symlink name is what keeps the amd64/arm64 tars from colliding in
@@ -399,10 +421,10 @@ genrule(
 # still name the published basenames.
 genrule(
     name = "strimserver_deployment_sha256_go_amd64_unchecked",
-    srcs = [":_strimserver_deployment_go_tar_unchecked"],
+    srcs = [":deployment_go_amd64_transition"],
     outs = ["strimserver-deployment-go-amd64.unchecked.tar.sha256"],
     cmd = "printf '%s  strimserver-deployment-go-amd64.tar\\n' " +
-          "\"$$(sha256sum $(location :_strimserver_deployment_go_tar_unchecked) | cut -d' ' -f1)\" > $@",
+          "\"$$(sha256sum $(location :deployment_go_amd64_transition) | cut -d' ' -f1)\" > $@",
 )
 
 genrule(
@@ -519,7 +541,7 @@ sh_binary(
     name = "publish_strimserver",
     srcs = ["scripts/publish_strimserver.sh"],
     data = [
-        ":_strimserver_deployment_go_tar_unchecked",
+        ":deployment_go_amd64_transition",
         ":deployment_go_arm64_transition",
         ":deployment_c_amd64_transition",
         ":deployment_c_arm64_transition",
@@ -531,7 +553,7 @@ sh_binary(
         "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz",
     ],
     args = [
-        "$(rootpath :_strimserver_deployment_go_tar_unchecked)",
+        "$(rootpath :deployment_go_amd64_transition)",
         "$(rootpath :deployment_go_arm64_transition)",
         "$(rootpath :deployment_c_amd64_transition)",
         "$(rootpath :deployment_c_arm64_transition)",
@@ -559,7 +581,7 @@ sh_binary(
     name = "publish_all",
     srcs = ["scripts/publish_all.sh"],
     data = [
-        ":_strimserver_deployment_go_tar_unchecked",
+        ":deployment_go_amd64_transition",
         ":deployment_go_arm64_transition",
         ":deployment_c_amd64_transition",
         ":deployment_c_arm64_transition",
@@ -572,7 +594,7 @@ sh_binary(
         "//tools/streamdeck-plugin:streamdeck_plugin_tar_gz",
     ],
     args = [
-        "$(rootpath :_strimserver_deployment_go_tar_unchecked)",
+        "$(rootpath :deployment_go_amd64_transition)",
         "$(rootpath :deployment_go_arm64_transition)",
         "$(rootpath :deployment_c_amd64_transition)",
         "$(rootpath :deployment_c_arm64_transition)",
@@ -595,5 +617,17 @@ sh_binary(
 sh_binary(
     name = "bump_version",
     srcs = ["scripts/bump-version.sh"],
+    visibility = ["//visibility:public"],
+)
+
+# Build provenance generator: emits a Go source file or a C header embedding
+# the semver (from GIT_TAG) and commit SHA (from GIT_COMMIT). Both env vars
+# reach the genrule actions via --action_env (see the Makefile); their values
+# are part of the action key, so dev and tagged builds never share a cache
+# entry. Consumers: //core/controller:build_info_go and
+# //core/controller/c:build_info_c.
+sh_binary(
+    name = "gen_build_info",
+    srcs = ["scripts/gen-build-info.sh"],
     visibility = ["//visibility:public"],
 )

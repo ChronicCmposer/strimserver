@@ -38,6 +38,19 @@ type Config struct {
    MediaMTX, Normalize, ScaleAndEgress, SingleStageEgress ContainerConfig
 }
 
+func withBuildHeaders(next http.Handler) http.Handler {
+   return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+      w.Header().Set("X-Strimserver-Version", Version)
+      w.Header().Set("X-Strimserver-Commit", Commit)
+      next.ServeHTTP(w, r)
+   })
+}
+
+func shortCommit(commit string) string {
+   if len(commit) <= 12 { return commit }
+   return commit[:12]
+}
+
 func checkEnv() error {
    var errs []error
    for _, v := range envSpec() {
@@ -308,6 +321,7 @@ func run() error {
    listenForContainerdEvents := containerFactory.CreateContainerdEventListener(
       topicFilters, eventTypeToStageState)
 
+   log.Printf("strimserver %s (commit %s)", Version, shortCommit(Commit))
    log.Printf("starting control plane...")
 
    // Start the controller loop
@@ -331,7 +345,7 @@ func run() error {
    // Start the HTTP server loop
    addr := fmt.Sprintf(":%s", config.ControllerHTTPPort)
 
-   srv := &http.Server{ Addr: addr, Handler: mux }
+   srv := &http.Server{ Addr: addr, Handler: withBuildHeaders(mux) }
    go func() {
       log.Printf("controller listening on %s", addr)
       err := srv.ListenAndServe()

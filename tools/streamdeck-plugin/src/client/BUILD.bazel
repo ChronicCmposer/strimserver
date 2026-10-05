@@ -1,7 +1,7 @@
 load("@aspect_bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
 load("@aspect_bazel_lib//lib:write_source_files.bzl", "write_source_files")
 
-exports_files(["types.generated.ts"])
+exports_files(["types.generated.ts", "version.ts", "version.test.ts"])
 
 # This directory has its own BUILD.bazel (for :write_ts_types below), which
 # makes it a separate Bazel package -- glob(["src/**/*.ts"]) in the parent

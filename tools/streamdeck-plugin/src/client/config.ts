@@ -5,6 +5,7 @@ function baseHTTP(): string {
 }
 
 export const Endpoints = {
+   healthz:   () => `${baseHTTP()}/healthz`,
    control:   () => `${baseHTTP()}/control`,
    status:    () => `${baseHTTP()}/status`,
    subscribe: () => baseHTTP().replace(/^http/, "ws") + "/subscribe",

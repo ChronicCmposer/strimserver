@@ -19,28 +19,36 @@ cannot find the DDNS password.
 4. Save. Namecheap now serves `strim.example.com` through
    `dynamicdns.park-your-domain.com`.
 
-> The host must be exactly `strim` — it matches the `DDNS_HOST` baked into the
-> `strim-ddns` unit (domain is `example.com` = `DDNS_DOMAIN`). Namecheap DDNS
-> records expire if not refreshed (~30d), which is why `strim-ddns.timer`
-> refreshes every 6h (`Persistent=true`).
+> The host must match the `DDNS_HOST` operator setting (default `strim`); the
+> domain is `DDNS_DOMAIN`. Namecheap DDNS records expire if not refreshed
+> (~30d), which is why `strim-ddns.timer` refreshes every 6h
+> (`Persistent=true`).
 
-## 2. Supply the password at deploy time
+## 2. Supply the password and settings at deploy time
 
 The password is an operator secret, injected at deploy time like the Twitch
-stream key — it is never baked into the deployment bundle. Put it in
-`deploy/aws/.env`:
+stream key — it is never baked into the deployment bundle. The three Dynamic
+DNS settings are non-secret operator settings, propagated the same way. Put
+them in `deploy/aws/.env`:
 
 ```sh
 DDNS_PASSWORD="the-namecheap-ddns-password"
 # or point at a file containing only the password
 # (overridden by the inline value above if both are set):
 DDNS_PASSWORD_FILE="$HOME/.config/strimserver/ddns-password"
+
+ENABLE_DDNS="true"          # toggle; the redistributable bundle ships false
+DDNS_HOST="strim"           # Namecheap DDNS host label
+DDNS_DOMAIN="example.com"   # the domain the record lives under
 ```
 
-`setup_strimserver` transfers it to the instance over scp as a `0600` file at
-`/mnt/nvme/ddns-password`; `deploy.sh` installs it to
-`/etc/strim-ddns/password` (root:root `0600`) and scrubs the transfer file. No
-password → `deploy.sh` exits loudly and `strim.example.com` is not registered.
+`setup_strimserver` transfers the password to the instance over scp as a `0600`
+file at `/mnt/nvme/ddns-password`, and the settings as a `0600` file at
+`/mnt/nvme/ddns-config`; `deploy.sh` installs the password to
+`/etc/strim-ddns/password` (root:root `0600`), merges the settings into the
+on-box `strimserver.env`, and scrubs both transfer files. No password →
+`deploy.sh` exits loudly and `strim.example.com` is not registered. With no
+settings transferred, the bundled defaults (DDNS disabled) stay in effect.
 
 ## 3. How deploy.sh wires it up
 

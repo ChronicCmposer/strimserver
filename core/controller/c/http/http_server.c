@@ -67,6 +67,12 @@
 /* Bound on the service-loop shutdown latency (MHD_run_wait per pass). */
 #define SERVICE_PASS_MS 250
 
+/* Build-provenance header values. The HTTP lane is generic: the binary passes
+ * its version/commit in at runtime (see strim_http_server_start). A NULL or
+ * empty value is normalized to this sentinel at start, so the attach helper
+ * never emits an empty header (http_server.h contract). */
+#define STRIM_BUILD_UNKNOWN "unknown"
+
 /* HTTP method / route enums (session-scoped). */
 enum http_method { HTTP_M_NONE = 0, HTTP_M_GET, HTTP_M_POST, HTTP_M_OTHER };
 
@@ -137,6 +143,10 @@ struct strim_http_server {
   uint64_t ws_write_timeout_ms;
   strim_http_callbacks cbs;
   void *userdata;
+  /* Build provenance attached to every response (never NULL: NULL/empty is
+   * normalized to STRIM_BUILD_UNKNOWN at start). Borrowed, not owned. */
+  const char *build_version;
+  const char *build_commit;
   volatile int shutdown_requested;  /* async-signal-safe flag */
   struct ws_client clients[STRIM_HTTP_MAX_WS_CLIENTS];
 };
@@ -387,7 +397,18 @@ static uint64_t ws_write_timeout_from_env(void) {
  * HTTP responses
  * ========================================================================= */
 
-static enum MHD_Result respond(struct MHD_Connection *connection,
+/* Attach the build-provenance headers to a response. The values were
+ * normalized to STRIM_BUILD_UNKNOWN at start, so this is unconditional and
+ * never emits an empty header. The single helper shared by every non-WS
+ * response (respond) and the /subscribe 101 (dispatch_subscribe). */
+static void attach_build_headers(const struct strim_http_server *srv,
+                                 struct MHD_Response *resp) {
+  MHD_add_response_header(resp, "X-Strimserver-Version", srv->build_version);
+  MHD_add_response_header(resp, "X-Strimserver-Commit", srv->build_commit);
+}
+
+static enum MHD_Result respond(const struct strim_http_server *srv,
+                               struct MHD_Connection *connection,
                                unsigned int status, const char *content_type,
                                int nosniff, const void *body, size_t body_len,
                                int close) {
@@ -403,6 +424,7 @@ static enum MHD_Result respond(struct MHD_Connection *connection,
     MHD_add_response_header(resp, "X-Content-Type-Options", "nosniff");
   if (close)
     MHD_add_response_header(resp, MHD_HTTP_HEADER_CONNECTION, "close");
+  attach_build_headers(srv, resp);
   {
     enum MHD_Result r = MHD_queue_response(connection, status, resp);
     MHD_destroy_response(resp);
@@ -514,20 +536,24 @@ static void ws_begin_close(struct ws_client *c, struct strim_http_server *srv,
  * shutting down and nothing is pending). Runs only when no frame is
  * in flight, preserving the Go sendChannel(1) latest-wins semantics. */
 static void ws_drain_slot(struct strim_http_server *srv, struct ws_client *c) {
-  uint8_t *frame = NULL;
+  uint8_t frame[STRIM_HTTP_STATUS_MAX];
   size_t frame_len = 0;
   struct wslay_event_msg msg;
 
+  /* Copy the latest frame out while holding slot_mutex: a concurrent
+   * strim_http_ws_send (controller thread) may overwrite c->pending at any
+   * moment, and wslay_event_queue_msg only copies the bytes after this
+   * function has already released the lock. */
   pthread_mutex_lock(&c->slot_mutex);
   if (c->has_pending)
   {
-    frame = c->pending;
+    memcpy(frame, c->pending, c->pending_len);
     frame_len = c->pending_len;
     c->has_pending = 0;
   }
   pthread_mutex_unlock(&c->slot_mutex);
 
-  if (frame == NULL)
+  if (frame_len == 0)
   {
     if (srv->shutdown_requested && !c->closing)
       ws_begin_close(c, srv, WSLAY_CODE_NORMAL_CLOSURE, NULL, 0);
@@ -538,10 +564,7 @@ static void ws_drain_slot(struct strim_http_server *srv, struct ws_client *c) {
   msg.msg = frame;
   msg.msg_length = frame_len;
   if (wslay_event_queue_msg(c->wctx, &msg) != 0)
-  {
-    c->has_pending = 0; /* queue rejected (closing): drop the frame */
-    return;
-  }
+    return; /* queue rejected (closing): drop the frame */
   c->frame_inflight = 1;
   c->frame_deadline_ms = mono_ms() + srv->ws_write_timeout_ms;
 }
@@ -622,8 +645,16 @@ static void ws_cleanup_slot(struct strim_http_server *srv, struct ws_client *c,
   if (!c->in_use || c->session != session)
     return; /* already cleaned, or the slot was reused */
 
+  /* Unpublish under slot_mutex so a concurrent strim_http_ws_send either
+   * queues before this point (then the pending frame is discarded below) or
+   * sees in_use == 0 and fails cleanly. */
+  pthread_mutex_lock(&c->slot_mutex);
   c->in_use = 0;
   c->closed = 1;
+  c->has_pending = 0;
+  c->pending_len = 0;
+  pthread_mutex_unlock(&c->slot_mutex);
+
   if (session != NULL)
     session->client_idx = -1;
   if (c->wctx != NULL)
@@ -728,9 +759,14 @@ static void ws_upgrade_handler(void *cls, struct MHD_Connection *connection,
   }
   c = &srv->clients[idx];
 
-  /* The slot's mutex is initialized once at server start and reused; do not
-   * re-init or memset it here (a stale ws_send may be locking it). */
-  c->in_use = 1; /* before ws_subscribe: the listener fires synchronously */
+  /* Publish the fully-initialized slot under slot_mutex: a concurrent
+   * strim_http_ws_send (controller thread) must never observe a
+   * half-initialized slot, and its queued frame must not be clobbered by the
+   * field resets below. The mutex is initialized once at server start and
+   * reused; do not re-init or memset it here (a stale ws_send may be locking
+   * it). session->client_idx is recorded now so MHD's completion callback
+   * still frees the slot if the handoff fails below. */
+  pthread_mutex_lock(&c->slot_mutex);
   c->idx = idx;
   c->closed = 0;
   c->closing = 0;
@@ -744,6 +780,9 @@ static void ws_upgrade_handler(void *cls, struct MHD_Connection *connection,
   c->close_deadline_ms = 0;
   c->extra_in = NULL;
   c->extra_in_len = c->extra_in_off = 0;
+  c->in_use = 1; /* before ws_subscribe: the listener fires synchronously */
+  session->client_idx = idx;
+  pthread_mutex_unlock(&c->slot_mutex);
 
   if (extra_in_size > 0)
   {
@@ -766,8 +805,6 @@ static void ws_upgrade_handler(void *cls, struct MHD_Connection *connection,
     return;
   }
   wslay_event_config_set_max_recv_msg_length(c->wctx, STRIM_HTTP_BODY_MAX);
-
-  session->client_idx = idx;
 
   if (srv->cbs.ws_subscribe(srv->userdata, idx) != 0)
   {
@@ -795,13 +832,13 @@ static enum MHD_Result dispatch_post(struct strim_http_server *srv,
 
   if (s->method != HTTP_M_POST)
   {
-    return respond(connection, MHD_HTTP_METHOD_NOT_ALLOWED,
+    return respond(srv, connection, MHD_HTTP_METHOD_NOT_ALLOWED,
                    "text/plain; charset=utf-8", 1, "method not allowed\n", 19,
                    close);
   }
   if (s->body_overflow)
   {
-    return respond(connection, MHD_HTTP_CONTENT_TOO_LARGE,
+    return respond(srv, connection, MHD_HTTP_CONTENT_TOO_LARGE,
                    "text/plain; charset=utf-8", 1, NULL, 0, close);
   }
 
@@ -818,7 +855,7 @@ static enum MHD_Result dispatch_post(struct strim_http_server *srv,
     {
       /* Go: http.Error(w, fmt.Sprintf("bad json: %v", err), 400). */
       bl = snprintf(body, sizeof(body), "bad json: %s\n", err);
-      return respond(connection, MHD_HTTP_BAD_REQUEST,
+      return respond(srv, connection, MHD_HTTP_BAD_REQUEST,
                      "text/plain; charset=utf-8", 1, body, (size_t) bl, close);
     }
     /* Go: http.Error(w, err.Error(), 500) — error text + trailing '\n'. */
@@ -829,12 +866,12 @@ static enum MHD_Result dispatch_post(struct strim_http_server *srv,
       err[bl + 1] = '\0';
       bl++;
     }
-    return respond(connection, MHD_HTTP_INTERNAL_SERVER_ERROR,
+    return respond(srv, connection, MHD_HTTP_INTERNAL_SERVER_ERROR,
                    "text/plain; charset=utf-8", 1, err, (size_t) bl, close);
   }
 
   srv->cbs.request_reconcile(srv->userdata);
-  return respond(connection, MHD_HTTP_NO_CONTENT, NULL, 0, NULL, 0, close);
+  return respond(srv, connection, MHD_HTTP_NO_CONTENT, NULL, 0, NULL, 0, close);
 }
 
 static enum MHD_Result dispatch_subscribe(struct strim_http_server *srv,
@@ -867,7 +904,7 @@ static enum MHD_Result dispatch_subscribe(struct strim_http_server *srv,
                   "WebSocket protocol violation: Connection header %s does "
                   "not contain Upgrade\n",
                   quoted_value(conn_hdr, qbuf, sizeof(qbuf)));
-    return respond(connection, MHD_HTTP_UPGRADE_REQUIRED,
+    return respond(srv, connection, MHD_HTTP_UPGRADE_REQUIRED,
                    "text/plain; charset=utf-8", 1, body, (size_t) bl, close);
   }
   if (!header_contains_token(upg_hdr, "websocket"))
@@ -876,7 +913,7 @@ static enum MHD_Result dispatch_subscribe(struct strim_http_server *srv,
                   "WebSocket protocol violation: Upgrade header %s does not "
                   "contain websocket\n",
                   quoted_value(upg_hdr, qbuf, sizeof(qbuf)));
-    return respond(connection, MHD_HTTP_UPGRADE_REQUIRED,
+    return respond(srv, connection, MHD_HTTP_UPGRADE_REQUIRED,
                    "text/plain; charset=utf-8", 1, body, (size_t) bl, close);
   }
   if (s->method != HTTP_M_GET)
@@ -885,7 +922,7 @@ static enum MHD_Result dispatch_subscribe(struct strim_http_server *srv,
                   "WebSocket protocol violation: handshake request method is "
                   "not GET but \"%s\"\n",
                   method_name(s->method));
-    return respond(connection, MHD_HTTP_METHOD_NOT_ALLOWED,
+    return respond(srv, connection, MHD_HTTP_METHOD_NOT_ALLOWED,
                    "text/plain; charset=utf-8", 1, body, (size_t) bl, close);
   }
   if (version_hdr == NULL || strcmp(version_hdr, "13") != 0)
@@ -893,12 +930,12 @@ static enum MHD_Result dispatch_subscribe(struct strim_http_server *srv,
     bl = snprintf(body, sizeof(body),
                   "WebSocket protocol violation: unsupported WebSocket "
                   "version requested (only 13 is supported)\n");
-    return respond(connection, MHD_HTTP_UPGRADE_REQUIRED,
+    return respond(srv, connection, MHD_HTTP_UPGRADE_REQUIRED,
                    "text/plain; charset=utf-8", 1, body, (size_t) bl, close);
   }
   if (key_hdr == NULL || key_hdr[0] == '\0')
   {
-    return respond(connection, MHD_HTTP_BAD_REQUEST,
+    return respond(srv, connection, MHD_HTTP_BAD_REQUEST,
                    "text/plain; charset=utf-8", 1,
                    "WebSocket protocol violation: missing Sec-WebSocket-Key\n",
                    58, close);
@@ -907,7 +944,7 @@ static enum MHD_Result dispatch_subscribe(struct strim_http_server *srv,
                           sizeof(key_bytes), &key_len) != 0
       || key_len != 16)
   {
-    return respond(connection, MHD_HTTP_BAD_REQUEST,
+    return respond(srv, connection, MHD_HTTP_BAD_REQUEST,
                    "text/plain; charset=utf-8", 1,
                    "WebSocket protocol violation: invalid Sec-WebSocket-Key\n",
                    59, close);
@@ -935,6 +972,7 @@ static enum MHD_Result dispatch_subscribe(struct strim_http_server *srv,
      * adding it again makes MHD emit "Connection: Upgrade, Upgrade", which
      * strict clients like undici reject with close code 1006. */
     MHD_add_response_header(resp, "Sec-WebSocket-Accept", accept_buf);
+    attach_build_headers(srv, resp);
     r = MHD_queue_response(connection, MHD_HTTP_SWITCHING_PROTOCOLS, resp);
     MHD_destroy_response(resp);
     return r;
@@ -953,13 +991,13 @@ static enum MHD_Result dispatch(struct strim_http_server *srv,
   {
     case ROUTE_UNKNOWN:
       /* Go mux default NotFound: "404 page not found\n". */
-      return respond(connection, MHD_HTTP_NOT_FOUND,
+      return respond(srv, connection, MHD_HTTP_NOT_FOUND,
                      "text/plain; charset=utf-8", 1, "404 page not found\n",
                      19, close);
 
     case ROUTE_HEALTHZ:
       /* main.go:293-299: any method -> 200 "ok\n". */
-      return respond(connection, MHD_HTTP_OK, "text/plain; charset=utf-8", 0,
+      return respond(srv, connection, MHD_HTTP_OK, "text/plain; charset=utf-8", 0,
                      "ok\n", 3, close);
 
     case ROUTE_STATUS:
@@ -968,7 +1006,7 @@ static enum MHD_Result dispatch(struct strim_http_server *srv,
        * json.NewEncoder). */
       if (s->method != HTTP_M_GET)
       {
-        return respond(connection, MHD_HTTP_METHOD_NOT_ALLOWED,
+        return respond(srv, connection, MHD_HTTP_METHOD_NOT_ALLOWED,
                        "text/plain; charset=utf-8", 1, "method not allowed\n",
                        19, close);
       }
@@ -976,10 +1014,10 @@ static enum MHD_Result dispatch(struct strim_http_server *srv,
                                   sizeof(status_json), &status_len);
       if (rc != 0 || status_len == 0)
       {
-        return respond(connection, MHD_HTTP_INTERNAL_SERVER_ERROR,
+        return respond(srv, connection, MHD_HTTP_INTERNAL_SERVER_ERROR,
                        "text/plain; charset=utf-8", 1, NULL, 0, close);
       }
-      return respond(connection, MHD_HTTP_OK, "application/json", 0,
+      return respond(srv, connection, MHD_HTTP_OK, "application/json", 0,
                      status_json, status_len, close);
 
     case ROUTE_EVENT:
@@ -1068,8 +1106,17 @@ static void request_completed_cb(void *cls, struct MHD_Connection *connection,
  * API — http_server.h
  * ========================================================================= */
 
+/* Parse the caller's build provenance into trusted state: a NULL or empty
+ * value becomes the STRIM_BUILD_UNKNOWN sentinel so attach_build_headers can
+ * emit the headers unconditionally. */
+static const char *normalize_build_value(const char *value) {
+  return (value == NULL || value[0] == '\0') ? STRIM_BUILD_UNKNOWN : value;
+}
+
 int strim_http_server_start(strim_http_server **out, const char *addr,
-                            const strim_http_callbacks *cbs, void *userdata) {
+                            const strim_http_callbacks *cbs, void *userdata,
+                            const char *build_version,
+                            const char *build_commit) {
   struct strim_http_server *srv;
   const union MHD_DaemonInfo *info;
   int port;
@@ -1096,6 +1143,8 @@ int strim_http_server_start(strim_http_server **out, const char *addr,
   srv->userdata = userdata;
   srv->ws_write_timeout_ms = ws_write_timeout_from_env();
   srv->port = port;
+  srv->build_version = normalize_build_value(build_version);
+  srv->build_commit = normalize_build_value(build_commit);
 
   for (i = 0; i < STRIM_HTTP_MAX_WS_CLIENTS; i++)
     pthread_mutex_init(&srv->clients[i].slot_mutex, NULL);

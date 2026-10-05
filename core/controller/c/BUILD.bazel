@@ -30,6 +30,17 @@ load("//tools/bazel:deb_file.bzl", "deb_file")
 
 package(default_visibility = ["//visibility:public"])
 
+# Build provenance (STRIMSERVER_VERSION + STRIMSERVER_COMMIT) injected as a
+# generated C header. main.c can `#include "build_info.h"` (same package dir).
+# The genrule reads GIT_TAG / GIT_COMMIT from the action env (--action_env in
+# the Makefile); unset -> 0.0.0 / unknown.
+genrule(
+    name = "build_info_c",
+    outs = ["build_info.h"],
+    cmd = "$(location //:gen_build_info) c $@",
+    tools = ["//:gen_build_info"],
+)
+
 # Static musl build for both target arches (via --config=amd64 / --config=arm64
 # in .bazelrc, which select the zig musl toolchains). -supports_dynamic_linker
 # + linkstatic=True force fully static binaries; zig cc's default UBSan is
@@ -128,7 +139,10 @@ cc_library(
 cc_binary(
     name = "strimserver-controller",
     tags = ["manual"],
-    srcs = ["main.c"],
+    srcs = [
+        "build_info.h",
+        "main.c",
+    ],
     copts = [
         "-std=gnu11",
         "-Wall",

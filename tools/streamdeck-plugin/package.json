@@ -6,6 +6,7 @@
   "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "rollup -c",
+    "test": "node --test src/client/version.test.ts",
     "watch": "rollup -c -w"
   },
   "engines": {
@@ -18,7 +19,6 @@
     "@rollup/plugin-commonjs": "29.0.3",
     "@rollup/plugin-node-resolve": "^16",
     "@rollup/plugin-typescript": "^12",
-    "@rollup/rollup-linux-arm64-gnu": "4.63.3",
     "@types/node": "24.13.3",
     "rollup": "4.63.3",
     "tslib": "^2",

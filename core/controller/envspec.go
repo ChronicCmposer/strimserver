@@ -12,6 +12,7 @@ const (
    GroupStage      Group = "Stage containers"
    GroupMedia      Group = "Media / ffmpeg"
    GroupTwitch     Group = "Twitch / egress"
+   GroupDDNS       Group = "Dynamic DNS (Namecheap)"
    GroupSecret     Group = "Secrets"
 )
 
@@ -280,6 +281,22 @@ func envSpec() []EnvVar {
       {
          Name: "BANDWIDTH_TEST", Group: GroupTwitch, Required: true, Example: "false",
          Comment: "true appends ?bandwidthtest=true to the RTMP URL",
+      },
+
+      // --------------------------------------------------- Dynamic DNS (Namecheap)
+      // Documentation-only guards consumed by deploy.sh, never by the controller,
+      // so Bind is nil. Not Required: a deploy without DDNS is valid.
+      {
+         Name: "ENABLE_DDNS", Group: GroupDDNS, Required: false, Example: "false",
+         Comment: "Feature toggle: when false, deploy.sh skips DDNS entirely (box reachable by IP only).",
+      },
+      {
+         Name: "DDNS_HOST", Group: GroupDDNS, Required: false, Example: "strim",
+         Comment: "Namecheap Dynamic DNS host label (matches the DDNS host created in Namecheap).",
+      },
+      {
+         Name: "DDNS_DOMAIN", Group: GroupDDNS, Required: false, Example: "",
+         Comment: "Namecheap Dynamic DNS domain (OPERATOR MUST FILL IN; leave empty for published builds).\n# Example: DDNS_DOMAIN=\"example.com\"  ->  box is referenceable as strim.example.com",
       },
 
       // -------------------------------------------------------------------- Secrets
