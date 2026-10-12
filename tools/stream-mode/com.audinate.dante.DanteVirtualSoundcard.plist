@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.audinate.dante.DanteVirtualSoundcard</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<string>com.audinate.DanteVirtualSoundcard</string>
+	<key>OnDemand</key>
+	<false/>
+	<!-- stream-mode (plans/stream-mode.md 3.2 step 3): lift the daemons out of the utility band -->
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Application Support/Audinate/DanteVirtualSoundcard/dvsd</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Library/Application Support/Audinate/DanteVirtualSoundcard</string>
+</dict>
+</plist>

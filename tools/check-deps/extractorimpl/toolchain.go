@@ -2,7 +2,9 @@ package extractorimpl
 
 import (
 	"encoding/json"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"strimserver-check-deps/common"
@@ -77,13 +79,22 @@ func parseNvmrc(data []byte, file string) ([]common.Dependency, []common.Extract
 	}}, nil
 }
 
+// packageManifest is the subset of a package.json this extractor reads: the
+// packageManager toolchain pin plus the declared npm dependency ranges and the
+// Node engine requirement.
 type packageManifest struct {
-	PackageManager string `json:"packageManager"`
+	PackageManager  string            `json:"packageManager"`
+	Dependencies    map[string]string `json:"dependencies"`
+	DevDependencies map[string]string `json:"devDependencies"`
+	Engines         struct {
+		Node string `json:"node"`
+	} `json:"engines"`
 }
 
-// parsePackageJSON extracts the pnpm toolchain pin from a package.json that is
-// expected to carry a packageManager field; a manifest without the field is an
-// unknown. It is the strict parser for a known-managed manifest.
+// parsePackageJSON extracts the npm dependency ranges and the pnpm toolchain
+// pin from a package.json that is expected to carry a packageManager field; a
+// manifest without the field is an unknown. It is the strict parser for a
+// known-managed manifest.
 func parsePackageJSON(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
 	var manifest packageManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
@@ -92,23 +103,61 @@ func parsePackageJSON(data []byte, file string) ([]common.Dependency, []common.E
 	if manifest.PackageManager == "" {
 		return nil, []common.ExtractionUnknown{{File: file, Reason: "no packageManager field"}}
 	}
-	return pnpmToolchainFinding(manifest.PackageManager, file)
+	return manifestFindings(manifest, file)
 }
 
-// parseManagedPackageJSON extracts the pnpm toolchain pin from a discovered
-// package.json, silently skipping a manifest without a packageManager field: a
-// node sub-repo discovered via its package.json may legitimately use a
-// different package manager, and that is not an extraction failure. A genuinely
-// malformed manifest still surfaces as an unknown.
+// parseManagedPackageJSON extracts the npm dependency ranges and the pnpm
+// toolchain pin from a discovered package.json, silently skipping the pnpm
+// finding for a manifest without a packageManager field: a node sub-repo
+// discovered via its package.json may legitimately use a different package
+// manager, and that is not an extraction failure. The declared npm dependencies
+// are still reported, since they are a real dependency tree regardless of the
+// package manager. A genuinely malformed manifest still surfaces as an unknown.
 func parseManagedPackageJSON(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
 	var manifest packageManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return nil, []common.ExtractionUnknown{{File: file, Reason: "invalid JSON: " + err.Error()}}
 	}
 	if manifest.PackageManager == "" {
-		return nil, nil
+		return npmDependencyFindings(manifest, file), nil
 	}
-	return pnpmToolchainFinding(manifest.PackageManager, file)
+	return manifestFindings(manifest, file)
+}
+
+// manifestFindings combines the npm dependency findings with the pnpm toolchain
+// finding for a manifest known to carry a packageManager pin.
+func manifestFindings(manifest packageManifest, file string) ([]common.Dependency, []common.ExtractionUnknown) {
+	pnpmDeps, unknowns := pnpmToolchainFinding(manifest.PackageManager, file)
+	return append(npmDependencyFindings(manifest, file), pnpmDeps...), unknowns
+}
+
+// npmDependencyFindings returns one npm-category finding per declared package
+// range in the manifest's dependencies and devDependencies, plus engines.node,
+// each tagged with the manifest file. The version is the declared range exactly
+// as written; resolution is a later phase. Findings are ordered deterministically
+// (dependencies before devDependencies, names sorted) so output is stable.
+func npmDependencyFindings(manifest packageManifest, file string) []common.Dependency {
+	var deps []common.Dependency
+	for _, group := range []map[string]string{manifest.Dependencies, manifest.DevDependencies} {
+		for _, name := range slices.Sorted(maps.Keys(group)) {
+			deps = append(deps, common.Dependency{
+				Category: common.CategoryNPM,
+				Name:     name,
+				Version:  group[name],
+				File:     file,
+			})
+		}
+	}
+	if manifest.Engines.Node != "" {
+		deps = append(deps, common.Dependency{
+			Category: common.CategoryNPM,
+			Name:     "node",
+			Version:  manifest.Engines.Node,
+			File:     file,
+			Note:     "engines.node requirement",
+		})
+	}
+	return deps
 }
 
 // pnpmToolchainFinding builds the pnpm toolchain finding from a non-empty

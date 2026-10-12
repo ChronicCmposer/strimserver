@@ -1,0 +1,7 @@
+{
+  "name": "libmicrohttpd",
+  "version": "1.0.10",
+  "upstream": "https://ftp.gnu.org/gnu/libmicrohttpd/libmicrohttpd-1.0.10.tar.gz",
+  "sha256": "04bfe8ef75db7d629a33de767599765cecadc56274a39822d5d081030d577685",
+  "owner_repo": null
+}

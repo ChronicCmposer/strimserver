@@ -6,4 +6,4 @@
 # (//tools/ddns) links the musl-static @curl//:curl library with the mbedTLS
 # TLS backend. No in-repo targets live here.
 
-exports_files(["BUILD.curl"])
+exports_files(["BUILD.curl", "pin.json"])

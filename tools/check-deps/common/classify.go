@@ -46,6 +46,15 @@ func (c *Classifier) Classify(dep Dependency, vi VersionInfo) Resolved {
 		Metadata: maps.Clone(vi.Metadata),
 	}
 
+	// Integrity pins carry a hash, not a comparable version: classify them as
+	// integrity before either resolution guard (error, empty version) so a
+	// hash pin never surfaces as unknown. The resting tier and any infos are
+	// preserved.
+	if dep.IsIntegrity() {
+		r.Status = StatusIntegrity
+		return r
+	}
+
 	// Resolution failure: never fatal, surface the reason.
 	if vi.Err != nil {
 		r.Status = StatusUnknown

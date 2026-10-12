@@ -32,8 +32,8 @@
 # the GitHub Release mirror (tag openssh-dist).
 #
 # Env vars (defaults mirror the build.sh pins):
-#   OPENSSH_TAG        default V_10_5_P1
-#   OPENSSH_VERSION    default 10.5p1
+#   OPENSSH_TAG        default V_10_6_P1
+#   OPENSSH_VERSION    default 10.6p1
 #   OPENSSH_ARCH       default amd64; amd64|arm64 selects the guest/rootfs
 #                      arch, the -aarch64 artifact-name discriminator, and the
 #                      MODULE.bazel stanza name (openssh_dist /
@@ -82,8 +82,8 @@
 set -euo pipefail
 
 # --- inputs (defaults mirror the build.sh pins) ---
-OPENSSH_TAG="${OPENSSH_TAG:-V_10_5_P1}"
-OPENSSH_VERSION="${OPENSSH_VERSION:-10.5p1}"
+OPENSSH_TAG="${OPENSSH_TAG:-V_10_6_P1}"
+OPENSSH_VERSION="${OPENSSH_VERSION:-10.6p1}"
 OPENSSH_ARCH="${OPENSSH_ARCH:-amd64}"
 AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023.12.20260817.0}"
 S3_BUCKET="${S3_BUCKET:-s3://<bucket-name>}"
@@ -97,11 +97,11 @@ OPENSSH_DIST_CACHE="${OPENSSH_DIST_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/openss
 
 # --- guard clauses: refuse to build with a malformed pin ---
 if [[ -z "$OPENSSH_TAG" ]]; then
-  echo "error: OPENSSH_TAG must be a git tag/branch (e.g. V_10_5_P1), got ''" >&2
+  echo "error: OPENSSH_TAG must be a git tag/branch (e.g. V_10_6_P1), got ''" >&2
   exit 1
 fi
 if [[ -z "$OPENSSH_VERSION" ]]; then
-  echo "error: OPENSSH_VERSION must be a version string (e.g. 10.5p1), got ''" >&2
+  echo "error: OPENSSH_VERSION must be a version string (e.g. 10.6p1), got ''" >&2
   exit 1
 fi
 

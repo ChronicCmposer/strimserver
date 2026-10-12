@@ -1,0 +1,7 @@
+{
+  "name": "containerd-api",
+  "version": "1.12.0",
+  "upstream": "https://github.com/containerd/containerd/archive/refs/tags/api/v1.12.0.tar.gz",
+  "sha256": "6978892e8ab09b36f5c09311f856ae07411cd9efd76a5213d125a733f08753fa",
+  "owner_repo": "containerd/containerd"
+}

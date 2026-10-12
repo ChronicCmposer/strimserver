@@ -39,6 +39,8 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
+exports_files(["pin.json"])
+
 # The library sources. Listed explicitly rather than globbed: the committed
 # tree still carries the feature-disabled sources (basicauth.c, digestauth.c,
 # gen_auth.c, connection_https.c, postprocessor.c, md5*.c, sha*.c,

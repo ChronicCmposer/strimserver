@@ -104,20 +104,41 @@ oci.pull(
 	}
 }
 
-func TestParseModuleBazelSkipsS3Artifacts(t *testing.T) {
+// TestParseModuleBazelExtractsS3ArtifactsAsIntegrity asserts the reversed
+// contract: self-published s3_http_archive/s3_http_file artifacts ARE extracted,
+// each as an integrity pin whose identity is the sha256 (the S3 key carries no
+// upstream version to compare against).
+func TestParseModuleBazelExtractsS3ArtifactsAsIntegrity(t *testing.T) {
 	const module = `
 s3_http_archive(
     name = "ffmpeg_dist",
     mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/ffmpeg-artifacts/ffmpeg-8.0.tar.gz"],
+    s3_key = "ffmpeg/ffmpeg-8.0.tar.gz",
+    sha256 = "44021ca11d9c5a3f1921b57150dfe68562cb291658afbef40b231a3554a82120",
 )
 s3_http_file(
     name = "openssh_dist",
     mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental.rpm"],
+    s3_key = "openssh/openssh-experimental.rpm",
+    sha256 = "05a2869d27c59c22aaccbad738a91b08f397a82a066c2d6ade4ed68ac00cc8fd",
 )
 `
 	deps, unknowns := parseModuleBazel([]byte(module), "MODULE.bazel")
-	if len(deps) != 0 || len(unknowns) != 0 {
-		t.Fatalf("s3 artifacts must be excluded, got deps=%v unknowns=%v", deps, unknowns)
+	if len(unknowns) != 0 {
+		t.Fatalf("parseModuleBazel unknowns = %v, want none", unknowns)
+	}
+	cases := []struct {
+		category string
+		name     string
+	}{
+		{"tool-binary", "ffmpeg_dist"},
+		{"runtime", "openssh_dist"},
+	}
+	for _, tc := range cases {
+		got := findDep(t, deps, tc.category, tc.name)
+		if got == nil || !got.IsIntegrity() {
+			t.Errorf("s3 %s %q not extracted as an integrity pin: %v", tc.category, tc.name, got)
+		}
 	}
 }
 
@@ -232,9 +253,10 @@ func TestParseWorkflow(t *testing.T) {
 	}
 }
 
-// TestScrapeQemu proves build-qemu.sh now yields only the distlib wheel pin:
-// qemu versions are tracked per consumer (their publish scripts), not scraped
-// out of the shared build script.
+// TestScrapeQemu proves build-qemu.sh yields the shared default QEMU_VERSION,
+// the distlib wheel version + sha256, and one qemu-source-sha256 dependency per
+// supported case arm. Per-consumer qemu pins still live in each consumer's own
+// publish script (TestScrapeQemuConsumer).
 func TestScrapeQemu(t *testing.T) {
 	const script = `
 QEMU_VERSION="${QEMU_VERSION:-8.2.2}"
@@ -243,19 +265,28 @@ case "$QEMU_VERSION" in
   9.2.4) QEMU_SOURCE_SHA256="${QEMU_SOURCE_SHA256:-f3cc1c4eabfdb288218ac3e33763dbe9e276d8bc890b867a2335d58de2ddd39a}" ;;
 esac
 QEMU_DISTLIB_URL="${QEMU_DISTLIB_URL:-https://files.pythonhosted.org/packages/02/08/9c41fb51ab5b43eb21674aff13df270e8ba6c4b29c8624e328dc7a9482af/distlib-0.4.3-py2.py3-none-any.whl}"
+QEMU_DISTLIB_SHA256="${QEMU_DISTLIB_SHA256:-4b0ce306c966eb73bc3a7b6abad017c556dadd92c44701562cd528ac7fde4d5b}"
 `
 	deps, unknowns := scrapeQemu([]byte(script), "tools/qemu/build-qemu.sh")
 	if len(unknowns) != 0 {
 		t.Fatalf("scrapeQemu unknowns = %v, want none", unknowns)
 	}
-	if findDep(t, deps, "script-pin", "qemu") != nil {
-		t.Errorf("scrapeQemu must not emit a qemu dependency from build-qemu.sh: %v", deps)
-	}
-	if len(deps) != 1 {
-		t.Fatalf("scrapeQemu deps = %v, want exactly the distlib dependency", deps)
+	if got := findDepVersion(t, deps, "script-pin", "qemu", "8.2.2"); got == nil || got.File != "tools/qemu/build-qemu.sh" {
+		t.Errorf("build-qemu.sh default qemu not extracted: %v", got)
 	}
 	if got := findDep(t, deps, "script-pin", "distlib"); got == nil || got.Version != "0.4.3" {
 		t.Errorf("distlib not extracted: %v", got)
+	}
+	if got := findDep(t, deps, "script-pin", "distlib-sha256"); got == nil || got.Version != "4b0ce306c966eb73bc3a7b6abad017c556dadd92c44701562cd528ac7fde4d5b" {
+		t.Errorf("distlib-sha256 not extracted: %v", got)
+	}
+	for version, hash := range map[string]string{
+		"8.2.2": "847346c1b82c1a54b2c38f6edbd85549edeb17430b7d4d3da12620e2962bc4f3",
+		"9.2.4": "f3cc1c4eabfdb288218ac3e33763dbe9e276d8bc890b867a2335d58de2ddd39a",
+	} {
+		if got := findDepVersion(t, deps, "script-pin", "qemu-source-sha256", version); got == nil || got.Source != hash {
+			t.Errorf("qemu-source-sha256 %s not extracted: %v", version, got)
+		}
 	}
 }
 
@@ -407,14 +438,16 @@ func TestScrapeOpenssh(t *testing.T) {
 OPENSSH_TAG="${OPENSSH_TAG:-V_10_5_P1}"
 OPENSSH_VERSION="${OPENSSH_VERSION:-10.5p1}"
 M4_SOURCE_URL="${M4_SOURCE_URL:-https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.gz}"
+M4_SOURCE_SHA256="${M4_SOURCE_SHA256:-38ae59f7a30bf9c108193cc5c25fbb06014f21e230c7ede2eff614f7b7c37ed8}"
+SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1786924800}"
 AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023.12.20260817.0}"
 `
 	deps, unknowns := scrapeOpenssh([]byte(script), "tools/openssh/build.sh", opensshBuildSpecs)
 	if len(unknowns) != 0 {
 		t.Fatalf("scrapeOpenssh build.sh unknowns = %v, want none", unknowns)
 	}
-	if got := findDep(t, deps, "script-pin", "openssh-portable"); got == nil || got.Version != "10.5p1" || got.Note != "git tag V_10_5_P1" {
-		t.Errorf("openssh-portable not extracted: %v", got)
+	if got := findDepVersion(t, deps, "script-pin", "openssh-portable", "10.5p1"); got == nil || got.Note != "" {
+		t.Errorf("numeric openssh-portable not extracted with an empty note: %v", got)
 	}
 	if got := findDep(t, deps, "script-pin", "GNU m4"); got == nil || got.Version != "1.4.21" {
 		t.Errorf("m4 not extracted: %v", got)
@@ -432,7 +465,10 @@ AMAZONLINUX_TAG="${AMAZONLINUX_TAG:-2023.12.20260817.0}"
 func TestScrapeFfmpeg(t *testing.T) {
 	const script = `
 : "${FFMPEG_VERSION:=8.0}"
+: "${FFMPEG_COMMIT:=1a748fe2cd43e3ead22fafb1b5b7d77f153898a8}"
 : "${NV_CODEC_HEADERS_TAG:=n13.0.19.0}"
+: "${NV_CODEC_HEADERS_COMMIT:=88fee5c37318c991a8762d423530f91681e32e3a}"
+: "${GENCODE:=arch=compute_75,code=sm_75}"
 : "${CUDA_MANIFEST_URL:=https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.0.2.json}"
 : "${DEBIAN_SNAPSHOT:=20260824T082821Z}"
 `
@@ -556,5 +592,95 @@ func TestScanCallArgsQuoteAndCommentAware(t *testing.T) {
 				t.Errorf("scanCallArgs(%q, %q) = %q, want [%q]", tt.content, tt.callName, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestExtractModuleBazelRealRepo is the integration guard: every repo-rule pin,
+// deb_extract, cross sysroot, apt.install package, s3 integrity pin, qemu call,
+// and http_archive protoc pin that actually ships in this repo's MODULE.bazel is
+// extracted with its expected version. It locates the repo root by walking up
+// from the test working directory and skips when MODULE.bazel is absent (e.g. a
+// hermetic test sandbox).
+func TestExtractModuleBazelRealRepo(t *testing.T) {
+	root := findModuleRoot(t)
+
+	deps, unknowns := ExtractModuleBazel(root)
+	if len(unknowns) != 0 {
+		t.Fatalf("real repo unknowns = %v, want none", unknowns)
+	}
+
+	// Named pins whose category and version must match exactly.
+	named := []struct {
+		category string
+		name     string
+		version  string
+	}{
+		{common.CategoryToolBinary, "libwebsockets", "5.0.0"},
+		{common.CategoryToolBinary, "libprotobuf_dev_arm64", "3.21.12-11+deb13u1"},
+		{common.CategoryToolBinary, "libprotoc_dev_arm64", "3.21.12-11+deb13u1"},
+		{common.CategoryToolBinary, "protobuf_compiler_arm64", "3.21.12-11+deb13u1"},
+		{common.CategoryToolchain, "amd64_sysroot:libc6", "2.41-11cross1"},
+		{common.CategoryToolchain, "amd64_sysroot:libgcc", "14.2.0-19cross1"},
+		{common.CategoryToolchain, "amd64_sysroot:linux_libc", "6.12.38-1cross1"},
+		{common.CategoryToolBinary, "qemu_x86_64_patched", "11.0.4"},
+		{common.CategoryToolBinary, "protoc_linux_aarch64", "36.2"},
+		{common.CategoryToolBinary, "protoc_linux_x86_64", "36.2"},
+	}
+	for _, tc := range named {
+		if got := findDepVersion(t, deps, tc.category, tc.name, tc.version); got == nil {
+			t.Errorf("%s %q version %q not extracted", tc.category, tc.name, tc.version)
+		}
+	}
+
+	// The 13 apt.install packages, each a versionless base-image donor (the
+	// pinned snapshot governs, not a per-package version).
+	aptPackages := []string{
+		"dash", "busybox-static", "gettext-base", "ca-certificates",
+		"libfdk-aac2t64", "libc6", "coreutils", "libbinutils", "libsframe1",
+		"zlib1g", "libzstd1", "libgcc-s1", "binutils-x86-64-linux-gnu",
+	}
+	for _, name := range aptPackages {
+		got := findDep(t, deps, common.CategoryBaseImage, name)
+		if got == nil || got.Version != "" {
+			t.Errorf("apt.install package %q not extracted as a versionless base-image donor: %v", name, got)
+		}
+	}
+
+	// The 5 self-published s3 artifacts, each an integrity pin.
+	s3Artifacts := []struct {
+		category string
+		name     string
+	}{
+		{common.CategoryToolBinary, "ffmpeg_dist"},
+		{common.CategoryToolBinary, "ffmpeg_dist_arm64"},
+		{common.CategoryRuntime, "offline_segment_dist"},
+		{common.CategoryRuntime, "openssh_dist"},
+		{common.CategoryRuntime, "openssh_dist_arm64"},
+	}
+	for _, tc := range s3Artifacts {
+		got := findDep(t, deps, tc.category, tc.name)
+		if got == nil || !got.IsIntegrity() {
+			t.Errorf("s3 artifact %s %q not extracted as an integrity pin: %v", tc.category, tc.name, got)
+		}
+	}
+}
+
+// findModuleRoot walks up from the test working directory to the directory that
+// contains MODULE.bazel, skipping the test when none is found.
+func findModuleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if info, statErr := os.Stat(filepath.Join(dir, "MODULE.bazel")); statErr == nil && !info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Skip("no MODULE.bazel above test working directory; skipping repo integration test")
+		}
+		dir = parent
 	}
 }

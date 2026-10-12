@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"sync"
 
 	"strimserver-check-deps/common"
@@ -36,6 +37,79 @@ func Matches(category, name string) func(common.Dependency) bool {
 	}
 }
 
+// MatchesNamePrefix matches a dependency whose category equals category and
+// whose architecture-normalized name has name's architecture-normalized form
+// as a prefix. It is the hybrid fallback for per-architecture binary names: an
+// entry registered for golangci_lint_linux_amd64 also owns
+// golangci_lint_linux_arm64, and mediamtx_dist owns mediamtx_dist_arm64.
+func MatchesNamePrefix(category, name string) func(common.Dependency) bool {
+	base := trimArchSuffix(name)
+	return func(dep common.Dependency) bool {
+		return dep.Category == category && strings.HasPrefix(trimArchSuffix(dep.Name), base)
+	}
+}
+
+// archSuffixes are the trailing tokens that distinguish per-architecture
+// builds of one artifact. Stripping one yields the architecture-independent
+// base name the prefix matcher compares.
+var archSuffixes = []string{
+	"_amd64", "_arm64", "_x86_64", "_aarch64", "_x86-64",
+	"-amd64", "-arm64", "-x86_64", "-aarch64", "-x86-64",
+}
+
+// trimArchSuffix removes one trailing architecture token, if present.
+func trimArchSuffix(name string) string {
+	for _, suffix := range archSuffixes {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix)
+		}
+	}
+	return name
+}
+
+// MatchesGitHubURL is the opt-in URL-derived matcher: it owns a dependency
+// whose category equals category and whose Source is a GitHub URL for the
+// given owner/repo. It lets a dependency be matched by its download URL rather
+// than by a brittle archive name.
+func MatchesGitHubURL(category, owner, repo string) func(common.Dependency) bool {
+	return func(dep common.Dependency) bool {
+		if dep.Category != category {
+			return false
+		}
+		gotOwner, gotRepo, ok := githubOwnerRepo(dep.Source)
+		return ok && gotOwner == owner && gotRepo == repo
+	}
+}
+
+// githubOwnerRepo parses a GitHub URL's owner and repository. It accepts
+// http(s)://github.com/owner/repo and bare github.com/owner/repo, ignores any
+// path suffix (releases/download/...), and tolerates a trailing ".git". It
+// reports ok=false for any non-GitHub URL or a path missing owner or repo.
+func githubOwnerRepo(rawURL string) (owner, repo string, ok bool) {
+	rest, found := strings.CutPrefix(rawURL, "https://")
+	if !found {
+		rest, found = strings.CutPrefix(rawURL, "http://")
+	}
+	if !found {
+		rest = rawURL
+	}
+	rest = strings.TrimPrefix(rest, "www.")
+	host, path, found := strings.Cut(rest, "/")
+	if !found || host != "github.com" {
+		return "", "", false
+	}
+	owner, path, found = strings.Cut(path, "/")
+	if !found {
+		return "", "", false
+	}
+	repo, _, _ = strings.Cut(path, "/")
+	repo = strings.TrimSuffix(repo, ".git")
+	if owner == "" || repo == "" {
+		return "", "", false
+	}
+	return owner, repo, true
+}
+
 func matchResolver(resolvers []ResolverEntry, dep common.Dependency) (ResolverEntry, bool) {
 	for _, e := range resolvers {
 		if e.Match(dep) {
@@ -49,6 +123,17 @@ func matchResolver(resolvers []ResolverEntry, dep common.Dependency) (ResolverEn
 // resolver entry owns.
 func resolveNoMatch(dep common.Dependency, classifier *common.Classifier) common.Resolved {
 	return classifier.Classify(dep, common.VersionInfo{Err: errors.New("no resolver configured for this dependency")})
+}
+
+// offlineSkipped classifies dep as skipped without any network access. It
+// routes through the classifier so the dependency's resting tier is preserved,
+// then overrides the status and reason: an offline run reports a network-backed
+// pin as skipped, never as unknown. It is a pure function of its inputs.
+func offlineSkipped(dep common.Dependency, classifier *common.Classifier) common.Resolved {
+	r := classifier.Classify(dep, common.VersionInfo{})
+	r.Status = common.StatusSkipped
+	r.Reasons = []string{"offline mode: network resolution skipped"}
+	return r
 }
 
 func resolveMatched(e ResolverEntry, dep common.Dependency, classifier *common.Classifier) common.Resolved {
@@ -156,6 +241,13 @@ func githubDep(category, name, owner, repo string, f *common.Fetcher) ResolverEn
 	return ResolverEntry{Match: Matches(category, name), Resolve: resolverimpl.GithubResolverFor(owner, repo, f), Network: true}
 }
 
+// githubMatchDep is githubDep for a custom match rule (a per-arch prefix or a
+// URL-derived match): it binds any match predicate to a fixed GitHub
+// owner/repo resolver and marks the entry network-backed.
+func githubMatchDep(match func(common.Dependency) bool, owner, repo string, f *common.Fetcher) ResolverEntry {
+	return ResolverEntry{Match: match, Resolve: resolverimpl.GithubResolverFor(owner, repo, f), Network: true}
+}
+
 func networkedDep(match func(common.Dependency) bool, resolve common.Resolver) ResolverEntry {
 	return ResolverEntry{Match: match, Resolve: resolve, Network: true}
 }
@@ -208,6 +300,14 @@ func resolveAll(opts *Options, guard *cacheGuard, resolvers []ResolverEntry, bat
 	// Match the resolver once per dependency here, in input order.
 	for i, dep := range deps {
 		entry, ok := matchResolver(resolvers, dep)
+		// Offline mode answers network-backed entries as skipped before any
+		// fetch is enqueued, so no network resolver can run and the cache is
+		// neither read nor written. No-op/digest entries fall through and
+		// resolve normally.
+		if opts.Offline && ok && entry.Network {
+			results[i] = offlineSkipped(dep, classifier)
+			continue
+		}
 		jobs <- resolveJob{index: i, dep: dep, entry: entry, ok: ok}
 	}
 	close(jobs)

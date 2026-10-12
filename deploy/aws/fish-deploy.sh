@@ -8,7 +8,7 @@
 MACHINE="$(uname -m)"
 if [[ "$MACHINE" != "x86_64" && "$MACHINE" != "amd64" ]]; then
    printf "\n*** fish shell: skipped on %s ***\n" "$MACHINE"
-   printf "The pinned fish 4.3.1 release URL is x86_64-only and strimserver does not\n"
+   printf "The pinned fish 4.9.3 release URL is x86_64-only and strimserver does not\n"
    printf "ship a pinned aarch64 fish build. fish is an operator convenience shell,\n"
    printf "not required by strimserver - install it manually later if you want it:\n"
    printf "  sudo dnf install fish     # or build from https://github.com/fish-shell/fish-shell\n\n"
@@ -16,8 +16,8 @@ if [[ "$MACHINE" != "x86_64" && "$MACHINE" != "amd64" ]]; then
 fi
 
 printf "configuring fish shell...\n"
-FISH_DIST_URL="https://github.com/fish-shell/fish-shell/releases/download/4.3.1/fish-4.3.1-linux-x86_64.tar.xz"
-FISH_DIST_CHECKSUM="dda2233dde1f36918a4ee2055a2bbbb61ddbdc9d81e77004885529b25560ba1f"
+FISH_DIST_URL="https://github.com/fish-shell/fish-shell/releases/download/4.9.3/fish-4.9.3-linux-x86_64.tar.xz"
+FISH_DIST_CHECKSUM="8f643d10ad1abb0ef7072764c01ceb5cf61b2d373fda400cf60f0bad69b7e095"
 FISH_TEMP_DIR="$(mktemp -d)"
 FISH_DIST_FILE="$FISH_TEMP_DIR/fish-bin.tar.xz"
 FISH_SYSTEM_CONFIG_FILE="/etc/fish/config.fish"

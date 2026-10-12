@@ -33,6 +33,8 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
+exports_files(["pin.json"])
+
 # The vendored .c files (the exact set the old cmake build compiled) plus the
 # vendored internal headers, both exposed from @libwebsockets (see the
 # build_file_content in MODULE.bazel). The lwsgen/ config headers are

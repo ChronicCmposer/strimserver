@@ -35,6 +35,29 @@ type Dependency struct {
 	// DigestPinned marks a base image pinned by digest (sha256) rather than a
 	// mutable tag; there is no tag to compare.
 	DigestPinned bool
+	// Role distinguishes a normal version pin from an integrity (hash) pin.
+	// Empty and RoleVersion mean the pin carries a comparable version;
+	// RoleIntegrity means the pin is an integrity hash with no upstream
+	// version to compare.
+	Role string
+}
+
+// Role* constants enumerate the dependency roles. The zero value (empty
+// string) is treated as RoleVersion everywhere, so older extractors that do
+// not set Role keep their version semantics.
+const (
+	// RoleVersion is a pin with a comparable upstream version.
+	RoleVersion = "version"
+	// RoleIntegrity is a pin whose identity is an integrity hash (e.g. an SRI
+	// or sha256 digest) rather than a version to compare.
+	RoleIntegrity = "integrity"
+)
+
+// IsIntegrity reports whether the dependency is an integrity (hash) pin rather
+// than a version pin. It is the single predicate for the role check so the
+// classifier, output, and future passes never re-compare the literal.
+func (d Dependency) IsIntegrity() bool {
+	return d.Role == RoleIntegrity
 }
 
 // Category* constants enumerate the dependency categories the extractors
@@ -107,6 +130,14 @@ const (
 	// or year-major base image); the reviewer should consider a digest or
 	// date pin.
 	StatusHygiene Status = "hygiene"
+	// StatusIntegrity means the pin is an integrity (hash) pin: its identity
+	// is a hash, so there is no upstream version to compare and the reviewer
+	// checks the hash provenance instead.
+	StatusIntegrity Status = "integrity"
+	// StatusSkipped means resolution was deliberately not attempted (e.g. an
+	// offline run skipped a network-backed resolver); it is neither a success
+	// nor a failure.
+	StatusSkipped Status = "skipped"
 )
 
 // Tier ranks the review priority of a dependency.

@@ -6,4 +6,4 @@
 # (//tools/ddns) links the musl-static @cares//:cares library for its direct
 # authoritative DNS check. No in-repo targets live here.
 
-exports_files(["BUILD.cares"])
+exports_files(["BUILD.cares", "pin.json"])

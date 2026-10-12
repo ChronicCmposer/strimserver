@@ -8,10 +8,11 @@ module(
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "rules_shell", version = "0.8.0")
-# rules_cc is pinned to 0.2.17 (not the historical 0.1.1): hermetic_cc_toolchain
+
+# rules_cc is pinned to 0.2.26 (not the historical 0.1.1): hermetic_cc_toolchain
 # 4.3.0 requires >= 0.2.14, and bzlmod's max-version selection already resolves
-# 0.2.17 in practice. Declaring it keeps --check_direct_dependencies happy.
-bazel_dep(name = "rules_cc", version = "0.2.17")
+# 0.2.26 in practice. Declaring it keeps --check_direct_dependencies happy.
+bazel_dep(name = "rules_cc", version = "0.2.26")
 
 # --- Hermetic musl C toolchain (Wave 0-A) ----------------------------------
 # The new C controller layer (//core/controller/c) is built statically against
@@ -41,15 +42,15 @@ use_repo(toolchains, "zig_sdk")
 # previously-added BCR bazel_deps were removed.
 
 # --- Go controller -----------------------------------------------------------
-bazel_dep(name = "rules_go", version = "0.63.0")
+bazel_dep(name = "rules_go", version = "0.64.2")
 bazel_dep(name = "gazelle", version = "0.54.0")
 bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
 bazel_dep(name = "rules_distroless", version = "0.9.4")
 bazel_dep(name = "rules_oci", version = "2.3.0")
 bazel_dep(name = "rules_pkg", version = "1.3.0")
-bazel_dep(name = "aspect_rules_js", version = "3.4.1")
+bazel_dep(name = "aspect_rules_js", version = "3.5.1")
 bazel_dep(name = "aspect_rules_ts", version = "3.10.1")
-bazel_dep(name = "rules_nodejs", version = "6.7.5")
+bazel_dep(name = "rules_nodejs", version = "6.7.6")
 
 # aspect_bazel_lib's own MODULE.bazel unconditionally registers a bats-core
 # toolchain (used by lib:bats.bzl, which nothing here uses) fetched from
@@ -91,12 +92,13 @@ use_repo(
     "com_github_containerd_typeurl_v2",
     "com_github_opencontainers_image_spec",
     "com_github_opencontainers_runtime_spec",
+    "org_golang_google_protobuf",
 )
 
 # golangci-lint pinned as a downloaded release tarball (checksummed) instead
 # of `go install`ed over the network on every lint-enabled build.
 #
-# v2.13.2 (module path github.com/golangci/golangci-lint/v2) is required: the
+# v2.14.0 (module path github.com/golangci/golangci-lint/v2) is required: the
 # old v1 line stopped at v1.64.8 and refuses to analyze a go.mod declaring a
 # newer Go version than it was built with, so it cannot lint this module's
 # `go 1.26.4`. See the "version: 2" line added to .golangci.yml alongside
@@ -122,17 +124,17 @@ qemu_x86_64(name = "qemu_x86_64_patched")
 http_archive(
     name = "golangci_lint_linux_amd64",
     build_file_content = "exports_files([\"golangci-lint\"])",
-    sha256 = "2277d43b98ec0054280f2ac26b53268bae97682444678a59a657dd565da021d6",
-    strip_prefix = "golangci-lint-2.13.2-linux-amd64",
-    url = "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-amd64.tar.gz",
+    sha256 = "ab90aeb7b066f92a33415b638a50fe5344bbb75a0d32ad30cc248d88f81032ab",
+    strip_prefix = "golangci-lint-2.14.0-linux-amd64",
+    url = "https://github.com/golangci/golangci-lint/releases/download/v2.14.0/golangci-lint-2.14.0-linux-amd64.tar.gz",
 )
 
 http_archive(
     name = "golangci_lint_linux_arm64",
     build_file_content = "exports_files([\"golangci-lint\"])",
-    sha256 = "a2a4e0065aa41be71f7c5ac90f271b61751331e5d04314e62afe4027855f0893",
-    strip_prefix = "golangci-lint-2.13.2-linux-arm64",
-    url = "https://github.com/golangci/golangci-lint/releases/download/v2.13.2/golangci-lint-2.13.2-linux-arm64.tar.gz",
+    sha256 = "ee7ec5f3453d15ddf106fae5a4d6c71737712348a979d1fe9cd52ec7ea299bae",
+    strip_prefix = "golangci-lint-2.14.0-linux-arm64",
+    url = "https://github.com/golangci/golangci-lint/releases/download/v2.14.0/golangci-lint-2.14.0-linux-arm64.tar.gz",
 )
 
 # --- Debian donor packages for the FROM-scratch images ----------------------
@@ -156,7 +158,7 @@ apt.sources_list(
     ],
     suites = ["trixie"],
     types = ["deb"],
-    uris = ["https://snapshot.debian.org/archive/debian/20260824T082821Z"],
+    uris = ["https://snapshot.debian.org/archive/debian/20261005T000000Z"],
 )
 apt.install(
     dependency_set = "trixie",
@@ -508,7 +510,7 @@ cc_library(
 )
 """,
     sha256 = "26e311a867ef831d2378a33e772b1f21924261eedcefe08f7ce852c6176c2836",
-    url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/p/protobuf/libprotobuf-dev_3.21.12-11+deb13u1_arm64.deb",
+    url = "https://snapshot.debian.org/archive/debian/20261005T000000Z/pool/main/p/protobuf/libprotobuf-dev_3.21.12-11+deb13u1_arm64.deb",
 )
 
 deb_extract(
@@ -525,7 +527,7 @@ cc_library(
 )
 """,
     sha256 = "405ec6e7b5dd99b73a84f4671af03b0b0d94b4a372c36a49c0f94457f40b36a9",
-    url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/p/protobuf/libprotoc-dev_3.21.12-11+deb13u1_arm64.deb",
+    url = "https://snapshot.debian.org/archive/debian/20261005T000000Z/pool/main/p/protobuf/libprotoc-dev_3.21.12-11+deb13u1_arm64.deb",
 )
 
 deb_extract(
@@ -534,7 +536,7 @@ deb_extract(
 exports_files(["usr/bin/protoc"])
 """,
     sha256 = "a873f75cbdf8054a23687e7c9b39ca1a93545edd22a581f4caa560756678f658",
-    url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/p/protobuf/protobuf-compiler_3.21.12-11+deb13u1_arm64.deb",
+    url = "https://snapshot.debian.org/archive/debian/20261005T000000Z/pool/main/p/protobuf/protobuf-compiler_3.21.12-11+deb13u1_arm64.deb",
 )
 
 # Hermetic amd64 glibc static sysroot for the clang cross-toolchain that
@@ -548,11 +550,11 @@ amd64_sysroot = use_repo_rule("//tools/bazel:amd64_sysroot.bzl", "amd64_sysroot"
 amd64_sysroot(
     name = "amd64_sysroot",
     libc6_sha256 = "54ef8425cbc7c45888981e6ef23529df4d056688a6c71a415fcc95a404522b9f",
-    libc6_url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/c/cross-toolchain-base/libc6-dev-amd64-cross_2.41-11cross1_all.deb",
+    libc6_url = "https://snapshot.debian.org/archive/debian/20261005T000000Z/pool/main/c/cross-toolchain-base/libc6-dev-amd64-cross_2.41-11cross1_all.deb",
     libgcc_sha256 = "c6642e5d83ad232573c2a45efb5b407b06eb61af2220eb1c922d0380dd446286",
-    libgcc_url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/g/gcc-14-cross/libgcc-14-dev-amd64-cross_14.2.0-19cross1_all.deb",
+    libgcc_url = "https://snapshot.debian.org/archive/debian/20261005T000000Z/pool/main/g/gcc-14-cross/libgcc-14-dev-amd64-cross_14.2.0-19cross1_all.deb",
     linux_libc_sha256 = "da463ddd3ee96b37c33f16da99c47b03b4e514888d3d853e73253ee73bd0d7d8",
-    linux_libc_url = "https://snapshot.debian.org/archive/debian/20260824T082821Z/pool/main/c/cross-toolchain-base/linux-libc-dev-amd64-cross_6.12.38-1cross1_all.deb",
+    linux_libc_url = "https://snapshot.debian.org/archive/debian/20261005T000000Z/pool/main/c/cross-toolchain-base/linux-libc-dev-amd64-cross_6.12.38-1cross1_all.deb",
 )
 
 # --- iperf3 image (rules_oci, keeping the alpine base) ----------------------
@@ -601,15 +603,15 @@ http_file(
 http_archive(
     name = "mediamtx_dist",
     build_file_content = "exports_files([\"mediamtx\"])",
-    sha256 = "e02e34c3337a35f20ac9e5aa31524566108964e6e37dbc46cf8292169f6c792b",
-    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.0/mediamtx_v1.21.0_linux_amd64.tar.gz",
+    sha256 = "121be6e00397e473a95d83c75f4fcd3819a6af3b0e1a50889cba43ab4fab6a27",
+    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.2/mediamtx_v1.21.2_linux_amd64.tar.gz",
 )
 
 http_archive(
     name = "mediamtx_dist_arm64",
     build_file_content = "exports_files([\"mediamtx\"])",
-    sha256 = "a8113b5928ba1a934b81557b61b8a07954b76921a4b567d54c7f086f8b39d9a2",
-    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.0/mediamtx_v1.21.0_linux_arm64.tar.gz",
+    sha256 = "180a235374a548d9133cdd5e20f5dbd8b01317be1c86e0d7e66df585dc42ed6f",
+    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.2/mediamtx_v1.21.2_linux_arm64.tar.gz",
 )
 
 # --- FFmpeg -------------------------------------------------------------
@@ -697,7 +699,7 @@ s3_http_file(
     downloaded_file_name = "openssh-experimental.rpm",
     mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental.rpm"],
     s3_key = "openssh/openssh-experimental.rpm",
-    sha256 = "698ccebf9a35c730c4fd402bdfb7f3473613e06a4edf2d2971460b82e65d2bab",
+    sha256 = "05a2869d27c59c22aaccbad738a91b08f397a82a066c2d6ade4ed68ac00cc8fd",
 )
 
 s3_http_file(
@@ -706,17 +708,18 @@ s3_http_file(
     downloaded_file_name = "openssh-experimental-aarch64.rpm",
     mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental-aarch64.rpm"],
     s3_key = "openssh/openssh-experimental-aarch64.rpm",
-    sha256 = "c2aef77841c6edcfb49f4aa54fef617e79590d09f26158a30dbb0ae512ba9423",
+    sha256 = "613a9a8366beb76b8299b5d077e611b7acc7ed46deecab73b9ccf5ea56e1423d",
 )
 
 # --- Stream Deck plugin (rollup) ------------------------------------------
 # Node version comes from tools/streamdeck-plugin/.nvmrc via
-# node_version_from_nvmrc (rules_nodejs 6.7.5 supports it; its
+# node_version_from_nvmrc (rules_nodejs 6.7.6 supports it; its
 # _verify_version_is_valid requires a full major.minor.patch, so .nvmrc now
 # carries "24.13.0" rather than a bare major like "24"). Matches
 # package.json's ">=24".
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version_from_nvmrc = "//tools/streamdeck-plugin:.nvmrc")
+
 # Surface the generated per-platform Node repos under their apparent names so
 # tools/streamdeck-plugin's host_node select can reference
 # @nodejs_linux_{arm64,amd64} instead of canonical

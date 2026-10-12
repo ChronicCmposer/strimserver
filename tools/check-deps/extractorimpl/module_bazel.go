@@ -8,56 +8,11 @@ import (
 	"strimserver-check-deps/utilities"
 )
 
-// scanCallArgs returns the argument text of every call to callName in content,
-// e.g. "http_archive" or "apt.sources_list". Parentheses are balanced so a
-// nested call inside an argument (like exports_files([...]) inside
-// build_file_content) does not truncate the match at the first ")". A match
-// whose preceding character is a word character is skipped, so searching for
-// "http_archive" never matches the s3_http_archive/s3_http_file own-pipeline
-// rules. The scan is quote/comment-aware via skipStringOrComment, so
-// parentheses inside strings or after '#' comments never unbalance the depth.
+// scanCallArgs returns the argument text of every call to callName in content.
+// It is a thin alias for scanRepoRule, the canonical repo-rule scanner, kept so
+// the many existing call sites and tests keep one name for the same behavior.
 func scanCallArgs(content, callName string) []string {
-	var args []string
-	needle := callName + "("
-	for {
-		start := strings.Index(content, needle)
-		if start < 0 {
-			return args
-		}
-		if start > 0 && isWordChar(content[start-1]) {
-			content = content[start+len(callName):]
-			continue
-		}
-		depth := 0
-		end := -1
-	balanceScan:
-		for i := start + len(callName); i < len(content); {
-			c := content[i]
-			switch {
-			case c == '\'' || c == '"' || c == '#':
-				i = skipStringOrComment(content, i)
-				continue
-			case c == '(':
-				depth++
-				i++
-			case c == ')':
-				depth--
-				if depth == 0 {
-					end = i
-					break balanceScan
-				}
-				i++
-			default:
-				i++
-			}
-		}
-		if end < 0 {
-			// Unbalanced call; stop scanning rather than loop forever.
-			return args
-		}
-		args = append(args, content[start+len(callName)+1:end])
-		content = content[end+1:]
-	}
+	return scanRepoRule(content, callName)
 }
 
 // skipStringOrComment advances past the quoted string or '#' comment that
@@ -181,22 +136,35 @@ var (
 	digestRe       = regexp.MustCompile(`sha256:[0-9a-f]{64}`)
 )
 
+// ExtractModuleBazel reads MODULE.bazel and extracts every pinned dependency.
+// It also reads tools/bazel/qemu_x86_64.bzl to resolve the qemu_x86_64 repo
+// rule's version default, which the call site does not carry.
 func ExtractModuleBazel(root string) ([]common.Dependency, []common.ExtractionUnknown) {
-	return common.ReadAndParse(root, "MODULE.bazel", parseModuleBazel)
+	defaults := repoRuleDefaults{qemuVersion: readQemuRepoRuleDefault(root)}
+	return common.ReadAndParse(root, "MODULE.bazel", func(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
+		return parseModuleBazelWithDefaults(data, file, defaults)
+	})
 }
 
 // ExtractModuleBazel must keep satisfying the common.Extractor contract.
 var _ common.Extractor = ExtractModuleBazel
 
-// parseModuleBazel extracts every pinned dependency declared in MODULE.bazel:
-// bazel_dep module registry pins, single_version_override module version pins,
-// http_archive/http_file downloads (golangci-lint, mediamtx, iperf3), the
-// apt.sources_list Debian snapshot, and the digest-pinned oci.pull base image.
-// Self-published s3_http_archive/s3_http_file artifacts are deliberately not
-// extracted: they are governed by the repo's own publish pipeline. Each policy
-// is a pure helper that scans the same content for its own call form; the
-// ordered aggregation preserves the original declaration order.
+// parseModuleBazel is the pure parser used by tests and callers that have only
+// the MODULE.bazel bytes; the qemu repo-rule default is absent, so its call
+// fails closed unless parseModuleBazelWithDefaults supplies it.
 func parseModuleBazel(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
+	return parseModuleBazelWithDefaults(data, file, repoRuleDefaults{})
+}
+
+// parseModuleBazelWithDefaults extracts every pinned dependency declared in
+// MODULE.bazel: bazel_dep module registry pins, single_version_override module
+// version pins, http_archive/http_file downloads, the apt.sources_list Debian
+// snapshot, the digest-pinned oci.pull base image, and the repo-rule pins
+// (tarball_strip_symlinks, deb_extract, amd64_sysroot, apt.install,
+// s3_http_archive/s3_http_file, qemu_x86_64) driven by the repoRuleSpecs table.
+// Each policy is a pure helper that scans the same content for its own call
+// form; the ordered aggregation preserves the original declaration order.
+func parseModuleBazelWithDefaults(data []byte, file string, defaults repoRuleDefaults) ([]common.Dependency, []common.ExtractionUnknown) {
 	content := string(data)
 	var deps []common.Dependency
 	var unknowns []common.ExtractionUnknown
@@ -207,6 +175,9 @@ func parseModuleBazel(data []byte, file string) ([]common.Dependency, []common.E
 		parseHTTPFile,
 		parseAPTSourcesList,
 		parseOCIPull,
+		func(content, file string) ([]common.Dependency, []common.ExtractionUnknown) {
+			return parseRepoRules(content, file, defaults)
+		},
 	}
 	for _, pass := range passes {
 		gotDeps, gotUnknowns := pass(content, file)
@@ -264,7 +235,8 @@ func parseHTTPArchive(content, file string) ([]common.Dependency, []common.Extra
 		name := attrValue(args, "name")
 		// Version extraction is deterministic: consult one structured
 		// attribute at a time, in priority order — the version attribute,
-		// then a semver inside strip_prefix, then one inside url. Scraping
+		// then a semver inside strip_prefix, then a semver inside url, then a
+		// two-part x.y inside url (protoc ships 36.2, not x.y.z). Scraping
 		// the whole argument text first could match an unrelated x.y.z (e.g.
 		// inside build_file_content), so each step reads the value of a single
 		// known attribute and only falls through when it yields no version.
@@ -275,8 +247,12 @@ func parseHTTPArchive(content, file string) ([]common.Dependency, []common.Extra
 		if version == "" {
 			version = semverRe.FindString(attrValue(args, "url"))
 		}
-		if name == "" || version == "" {
-			unknowns = append(unknowns, common.ExtractionUnknown{File: file, Reason: "http_archive without name or a determinable version (version/strip_prefix/url): " + args})
+		if version == "" {
+			version = firstCapture(twoPartCaptureRe, attrValue(args, "url"))
+		}
+		sha := attrValue(args, "sha256")
+		if name == "" || (version == "" && sha == "") {
+			unknowns = append(unknowns, common.ExtractionUnknown{File: file, Reason: "http_archive without name or a determinable version or sha256 (version/strip_prefix/url/sha256): " + args})
 			continue
 		}
 		deps = append(deps, common.Dependency{
@@ -285,9 +261,22 @@ func parseHTTPArchive(content, file string) ([]common.Dependency, []common.Extra
 			Version:  version,
 			Source:   attrValue(args, "url"),
 			File:     file,
+			Note:     noteWithSHA256("", sha),
+			Role:     integrityRoleForMissingVersion(version, sha),
 		})
 	}
 	return deps, unknowns
+}
+
+// integrityRoleForMissingVersion returns RoleIntegrity for a sha-only pin (a
+// hash with no version to compare) and the empty default role otherwise, so a
+// hash-pinned artifact without an upstream version is still emitted rather than
+// failed.
+func integrityRoleForMissingVersion(version, sha string) string {
+	if version == "" && sha != "" {
+		return common.RoleIntegrity
+	}
+	return ""
 }
 
 // parseHTTPFile extracts the http_file download pins (the iperf3 apk).
@@ -306,8 +295,12 @@ func parseHTTPFile(content, file string) ([]common.Dependency, []common.Extracti
 				version = m[1]
 			}
 		}
-		if name == "" || version == "" {
-			unknowns = append(unknowns, common.ExtractionUnknown{File: file, Reason: "http_file without name or an iperf3 version in its urls: " + args})
+		if version == "" {
+			version = firstCapture(twoPartCaptureRe, url)
+		}
+		sha := attrValue(args, "sha256")
+		if name == "" || (version == "" && sha == "") {
+			unknowns = append(unknowns, common.ExtractionUnknown{File: file, Reason: "http_file without name or a determinable version or sha256 in its urls: " + args})
 			continue
 		}
 		note := ""
@@ -322,8 +315,9 @@ func parseHTTPFile(content, file string) ([]common.Dependency, []common.Extracti
 			Version:  version,
 			Source:   url,
 			File:     file,
-			Note:     note,
+			Note:     noteWithSHA256(note, sha),
 			Branch:   branch,
+			Role:     integrityRoleForMissingVersion(version, sha),
 		})
 	}
 	return deps, unknowns

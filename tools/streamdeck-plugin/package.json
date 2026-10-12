@@ -20,7 +20,7 @@
     "@rollup/plugin-node-resolve": "^16",
     "@rollup/plugin-typescript": "^12",
     "@types/node": "24.13.3",
-    "rollup": "4.63.3",
+    "rollup": "4.64.5",
     "tslib": "^2",
     "typescript": "6.0.3"
   },

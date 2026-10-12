@@ -54,6 +54,18 @@
     "until": "2027-03-31"
   },
   {
+    "id": "go/github.com/containerd/containerd/v2",
+    "file": "core/controller/go.mod",
+    "reason": "pinned to LTS v2.3.6 for CVE-2026-53493; v2.4.1 forces grpc ≥ v1.82.1 (open deadlock regression grpc/grpc-go #9330).",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "go/github.com/containerd/containerd/api",
+    "file": "core/controller/go.mod",
+    "reason": "arrives with containerd v2.4.1 (blocked by the grpc gate).",
+    "until": "2027-03-31"
+  },
+  {
     "id": "go/github.com/Microsoft/hcsshim",
     "file": "core/controller/go.mod",
     "reason": "hcsshim is an indirect Windows-container runtime dep pinned by containerd/v2 v2.3.5's go.mod requirements; v0.15.0-rc.4 is not yet coordinated by a containerd release. Resolved via MVS, not independently editable. Wait for a containerd release.",
@@ -69,18 +81,6 @@
     "id": "go/github.com/fsnotify/fsnotify",
     "file": "core/controller/go.mod",
     "reason": "fsnotify is an indirect dep used by containerd's watch-based event handling; it is pinned by containerd/v2 v2.3.5's go.mod requirements and not independently editable. Wait for a containerd release.",
-    "until": "2027-03-31"
-  },
-  {
-    "id": "go/github.com/go-logr/logr",
-    "file": "core/controller/go.mod",
-    "reason": "logr is the standard Go logging abstraction used by otel and grpc; it is pinned transitively via those direct deps' go.mod requirements and not independently editable. Wait for grpc/otel coordination.",
-    "until": "2027-03-31"
-  },
-  {
-    "id": "go/github.com/klauspost/compress",
-    "file": "core/controller/go.mod",
-    "reason": "klauspost/compress is an indirect dep pinned by containerd/v2 v2.3.5 (snappy/zstd layer compression); it is resolved via MVS and not independently editable. Wait for a containerd release.",
     "until": "2027-03-31"
   },
   {
@@ -111,24 +111,6 @@
     "id": "go/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp",
     "file": "core/controller/go.mod",
     "reason": "otelhttp is part of the otel instrumentation family pinned transitively via grpc's go.mod; the otel modules must move together as one version set. Wait for grpc/otel coordination.",
-    "until": "2027-03-31"
-  },
-  {
-    "id": "go/go.opentelemetry.io/otel",
-    "file": "core/controller/go.mod",
-    "reason": "otel SDK is pinned transitively via grpc's go.mod; the otel family (otel/metric/trace/otelhttp) must move together as one version set. Wait for grpc/otel coordination.",
-    "until": "2027-03-31"
-  },
-  {
-    "id": "go/go.opentelemetry.io/otel/metric",
-    "file": "core/controller/go.mod",
-    "reason": "otel/metric must move in lockstep with the rest of the otel family (otel/trace/otelhttp), all pinned transitively via grpc's go.mod. Wait for grpc/otel coordination.",
-    "until": "2027-03-31"
-  },
-  {
-    "id": "go/go.opentelemetry.io/otel/trace",
-    "file": "core/controller/go.mod",
-    "reason": "otel/trace must move in lockstep with the rest of the otel family (otel/metric/otelhttp), all pinned transitively via grpc's go.mod. Wait for grpc/otel coordination.",
     "until": "2027-03-31"
   },
   {
@@ -176,7 +158,7 @@
   {
     "id": "go/google.golang.org/grpc",
     "file": "core/controller/go.mod",
-    "reason": "grpc is pinned by containerd/v2 v2.3.5's go.mod requirements (containerd's RPC layer); bumping to v1.83.2 must be coordinated by a containerd release and with the otel family. Wait for a containerd release.",
+    "reason": "v1.82.1+ has an open deadlock regression (#9330); hold until 1.85.",
     "until": "2027-03-31"
   },
   {
@@ -199,7 +181,173 @@
   },
   {
     "id": "bzl-pin/qemu",
-    "reason": "qemu pinned to 11.0.4, the newest 11.0.x whose buildkit-direct-execve patch series is verified/applies cleanly; 11.1.1 has no verified buildkit series yet. Re-evaluate when tonistiigi/binfmt ships a verified v11.1 series.",
+    "reason": "11.1.x has no `buildkit-direct-execve` patch series upstream; stay on 11.0.4.",
     "until": "2027-12-31"
+  },
+  {
+    "id": "bazel-module/gazelle",
+    "file": "MODULE.bazel",
+    "reason": "2.0.0-beta.2 is a pre-release overriding rules_go's tested pin; wait for GA.",
+    "until": "2027-03-31"
+  },
+  {
+    "id": "base-image/dash",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/busybox-static",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/gettext-base",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/ca-certificates",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/libfdk-aac2t64",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/libc6",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/coreutils",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/libbinutils",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/libsframe1",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/zlib1g",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/libzstd1",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/libgcc-s1",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "base-image/binutils-x86-64-linux-gnu",
+    "file": "MODULE.bazel",
+    "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "npm/@elgato/streamdeck",
+    "file": "tools/streamdeck-plugin/package.json",
+    "reason": "npm dependency declared in package.json; check-deps has no per-package npm registry resolver (the native pnpm batch resolver only reports already-outdated packages, not current pins). Re-evaluate when an npm registry resolver is wired.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "npm/@rollup/plugin-commonjs",
+    "file": "tools/streamdeck-plugin/package.json",
+    "reason": "npm dependency declared in package.json; check-deps has no per-package npm registry resolver (the native pnpm batch resolver only reports already-outdated packages, not current pins). Re-evaluate when an npm registry resolver is wired.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "npm/@rollup/plugin-node-resolve",
+    "file": "tools/streamdeck-plugin/package.json",
+    "reason": "npm dependency declared in package.json; check-deps has no per-package npm registry resolver (the native pnpm batch resolver only reports already-outdated packages, not current pins). Re-evaluate when an npm registry resolver is wired.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "npm/@rollup/plugin-typescript",
+    "file": "tools/streamdeck-plugin/package.json",
+    "reason": "npm dependency declared in package.json; check-deps has no per-package npm registry resolver (the native pnpm batch resolver only reports already-outdated packages, not current pins). Re-evaluate when an npm registry resolver is wired.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "npm/node",
+    "file": "tools/streamdeck-plugin/package.json",
+    "reason": "npm dependency declared in package.json (engines.node); check-deps has no per-package npm registry resolver (the native pnpm batch resolver only reports already-outdated packages, not current pins). Re-evaluate when an npm registry resolver is wired.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "npm/rollup",
+    "file": "tools/streamdeck-plugin/package.json",
+    "reason": "npm dependency declared in package.json; check-deps has no per-package npm registry resolver (the native pnpm batch resolver only reports already-outdated packages, not current pins). Re-evaluate when an npm registry resolver is wired.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "npm/tslib",
+    "file": "tools/streamdeck-plugin/package.json",
+    "reason": "npm dependency declared in package.json; check-deps has no per-package npm registry resolver (the native pnpm batch resolver only reports already-outdated packages, not current pins). Re-evaluate when an npm registry resolver is wired.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/libmicrohttpd",
+    "file": "third_party/libmicrohttpd/pin.json",
+    "reason": "Vendored C library pinned by third_party/libmicrohttpd/pin.json (GNU FTP tarball); no automated upstream resolver is wired for this project. Re-evaluate when a GNU FTP scraper is added.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/wslay",
+    "file": "third_party/wslay/pin.json",
+    "reason": "Vendored C library pinned by third_party/wslay/pin.json (tatsuhiro-t/wslay, release-N.N.N tags); no automated upstream resolver is wired for this project. Re-evaluate when a wslay resolver is added.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/yyjson",
+    "file": "third_party/yyjson/pin.json",
+    "reason": "Vendored C library pinned by third_party/yyjson/pin.json (ibireme/yyjson); no automated upstream resolver is wired for this project. Re-evaluate when a yyjson resolver is added.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/libprotobuf_dev_arm64",
+    "file": "MODULE.bazel",
+    "reason": "ARM64 protobuf toolchain deb fetched by http_archive from the pinned Debian snapshot; its version is fixed by the snapshot and is not independently resolvable. Re-evaluate when the ARM64 toolchain moves to a versioned upstream.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/libprotoc_dev_arm64",
+    "file": "MODULE.bazel",
+    "reason": "ARM64 protobuf toolchain deb fetched by http_archive from the pinned Debian snapshot; its version is fixed by the snapshot and is not independently resolvable. Re-evaluate when the ARM64 toolchain moves to a versioned upstream.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/protobuf_compiler_arm64",
+    "file": "MODULE.bazel",
+    "reason": "ARM64 protobuf compiler deb fetched by http_archive from the pinned Debian snapshot; its version is fixed by the snapshot and is not independently resolvable. Re-evaluate when the ARM64 toolchain moves to a versioned upstream.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/protoc_linux_aarch64",
+    "file": "MODULE.bazel",
+    "reason": "protoc compiler binary pinned by http_archive; no automated upstream resolver is wired for this project. Re-evaluate when a protobuf-release resolver is added.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/protoc_linux_x86_64",
+    "file": "MODULE.bazel",
+    "reason": "protoc compiler binary pinned by http_archive; no automated upstream resolver is wired for this project. Re-evaluate when a protobuf-release resolver is added.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/qemu_x86_64_patched",
+    "file": "MODULE.bazel",
+    "reason": "Patched qemu-x86_64 built by the qemu_x86_64 repo rule for cross-stripping the amd64 mediamtx binary; its version tracks the qemu script pin, so it is not independently resolvable."
   }
 ]

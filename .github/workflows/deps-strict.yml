@@ -1,0 +1,46 @@
+# Required PR check: the hermetic, network-free strict dependency check.
+#
+# On every pull request (and on demand) this runs tools/check-deps with
+# --strict --offline --native-tools=false: no network-backed resolver runs and
+# the native `go list -u` / `pnpm outdated` batch resolvers are disabled, so the
+# job is hermetic and reproducible on any runner. --strict makes any extraction
+# unknown or undeterminable pin fail the job unless deps-ignore.json records a
+# reviewed exception (an ignored unknown satisfies --strict), so a new
+# unaccounted pin cannot land silently.
+#
+# The setup steps mirror .github/workflows/deps-check.yml so the two checks use
+# the same toolchains; --native-tools=false keeps this job off the network and
+# independent of the pnpm/go toolchains' upstream access.
+name: deps-strict
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  deps-strict:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: bazelbuild/setup-bazelisk@v3
+
+      # Go version taken from the `go` directive in core/controller/go.mod
+      # (go 1.27.2; mirrored as PROJECT_GO_VERSION_TAG in .env).
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.27.2
+
+      # Node version from tools/streamdeck-plugin/.nvmrc (Node 24.21.0). The
+      # hermetic check does not shell out to pnpm (--native-tools=false), but
+      # setup-node mirrors deps-check.yml so both checks share a toolchain.
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: tools/streamdeck-plugin/.nvmrc
+          cache: pnpm
+          cache-dependency-path: tools/streamdeck-plugin/pnpm-lock.yaml
+
+      # Required check: a hermetic strict run. Exit 0 means every pin was
+      # determined or covered by a reviewed deps-ignore.json rule.
+      - name: Run the hermetic strict dependency check
+        run: bazel run //tools/check-deps:check-deps -- --strict --offline --native-tools=false --json

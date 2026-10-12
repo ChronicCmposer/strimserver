@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# RED oracle for the 11-item dependency-pin upgrade. Stdlib-only (no go_deps
+# wiring) and fully offline: it resolves the repository root by walking up to
+# MODULE.bazel (mirroring tools/check-deps/main.go:199-220) and asserts the
+# target pins.
+#
+#   no-sandbox: `bazel test` does not set BUILD_WORKSPACE_DIRECTORY, so the
+#       walk-up needs the execroot's _main symlink (the workspace) visible.
+#   external:   the pin files are read from the live workspace rather than
+#       declared as action inputs, so force re-execution instead of serving a
+#       cached RED/GREEN result.
+#
+# It intentionally FAILS until every target pin is applied, then turns GREEN.
+# `//tools/deps-pins:all` runs it.
+go_test(
+    name = "pins_test",
+    srcs = ["pins_test.go"],
+    tags = [
+        "external",
+        "no-sandbox",
+    ],
+    visibility = ["//visibility:public"],
+)

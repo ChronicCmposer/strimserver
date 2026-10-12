@@ -1,0 +1,7 @@
+{
+  "name": "libwebsockets",
+  "version": "5.0.0",
+  "upstream": "https://github.com/warmcat/libwebsockets/archive/refs/tags/v5.0.0.tar.gz",
+  "sha256": "f853c6582101cfcee3a5a9e28ae92ab19d9735c5f31f0bb2e9794b5106123962",
+  "owner_repo": "warmcat/libwebsockets"
+}

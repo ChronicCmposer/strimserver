@@ -24,7 +24,7 @@
 #   NV_CODEC_HEADERS_TAG   n13.0.19.1
 #   NV_CODEC_HEADERS_COMMIT 88fee5c37318c991a8762d423530f91681e32e3a
 #   CUDA_MANIFEST_URL      https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json
-#   DEBIAN_SNAPSHOT        20260824T082821Z
+#   DEBIAN_SNAPSHOT        20261005T000000Z
 #   CUDA_COMPONENTS        cuda_nvcc cuda_cudart cuda_crt libnvvm
 #   GENCODE                arch=compute_75,code=sm_75
 #   NPROC                  host nproc (env-overridable)
@@ -78,7 +78,7 @@ esac
 : "${NV_CODEC_HEADERS_TAG:=n13.0.19.1}"
 : "${NV_CODEC_HEADERS_COMMIT:=88fee5c37318c991a8762d423530f91681e32e3a}"
 : "${CUDA_MANIFEST_URL:=https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json}"
-: "${DEBIAN_SNAPSHOT:=20260824T082821Z}"
+: "${DEBIAN_SNAPSHOT:=20261005T000000Z}"
 : "${CUDA_COMPONENTS:=cuda_nvcc cuda_cudart cuda_crt libnvvm}"
 : "${GENCODE:=arch=compute_75,code=sm_75}"
 : "${NPROC:=$(nproc)}"

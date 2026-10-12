@@ -206,12 +206,12 @@ gracefully on shutdown.
 | [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.1` at commit `88fee5c` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
 | FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
 | Intermediate Debian image | `debian:trixie` snapshot `20260824T082821Z` | Base for the artifact producer (`tools/ffmpeg-dist`: pulled via the Docker Hub registry API into a rootfs by `publish.sh`); the same snapshot supplies the scratch-image runtime libs via the `@trixie` rules_distroless apt extension |
-| Go toolchain | `go 1.26.4` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
+| Go toolchain | `go 1.27.2` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
 | [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.21.0`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
 | `libfdk-aac` | `libfdk-aac2t64` (Debian trixie package from `@trixie`) | AAC encode support through FFmpeg (`libfdk-aac.so.2` in the ffmpeg image) |
 | busybox / `gettext-base` (`envsubst`) | Debian trixie packages from `@trixie` | Shell + tools for the scratch ffmpeg runtime image |
 | iperf3 | `3.19.1-r1` `.apk` (`@iperf3_apk` http_file) on alpine `3.23.3` (digest-pinned `@alpine_linux_amd64` oci.pull) | Optional bandwidth-test image |
-| Node.js | `24.13.0` (from `tools/streamdeck-plugin/.nvmrc` via rules_nodejs `node_version_from_nvmrc`) | Stream Deck plugin build |
+| Node.js | `24.21.0` (from `tools/streamdeck-plugin/.nvmrc` via rules_nodejs `node_version_from_nvmrc`) | Stream Deck plugin build |
 
 > Note: the FFmpeg build currently compiles for `sm_75`
 > (Turing, e.g. the T4 in `g4dn` instances). To run the
@@ -719,8 +719,11 @@ repo — Bazel modules, Go modules, npm packages, container base
 images, downloaded artifacts, toolchain versions, CI actions, and
 script pins — resolves the latest upstream version, and emits a
 tiered report so stale or drifting pins are noticed instead of
-silently rotting. It is **report-only**: it never modifies pins and
-never gates a build.
+silently rotting. It never modifies a pin. `--strict` is **on by
+default**, so a run exits non-zero when a pin's status cannot be
+determined (or an extraction unknown remains) unless
+`deps-ignore.json` records a reviewed exception; updates alone never
+fail a run.
 
 Run it locally (the `make` facade and the underlying `bazel`
 command are equivalent):
@@ -734,7 +737,8 @@ bazel run //tools/check-deps:check-deps -- --ignore # apply deps-ignore.json
 
 The console report lists T1 and T2 findings individually and
 collapses T3 into a count; `--json` emits the full structured
-report (`{ "findings": [...], "counts": {...}, "unknowns": [...] }`).
+report (`{ "findings": [...], "inventory": [...], "integrity": [...],
+"unknowns": [...], "counts": {...} }`).
 
 Each dependency is classified into a **tier** (review priority)
 and a **status** (current state):
@@ -751,6 +755,7 @@ and a **status** (current state):
 | unknown | The latest version could not be determined. |
 | ok | The pin is current (or properly pinned with no tag to float). |
 | hygiene | The pin is valid but floats upstream (a rolling tag, no digest). |
+| skipped | Resolution was deliberately not attempted (an `--offline` run leaves network and native pins unrun). |
 
 ### Ignore file (`deps-ignore.json`)
 
@@ -770,9 +775,12 @@ rule is `{ "id", "reason", "until" }`, where `id` is
 ]
 ```
 
-A rule with no `until` never expires. Expired rules no longer
-match, so an intentional pin that outlives its grace period
-surfaces again as `update`.
+A rule with no `until` never expires, and a rule must carry a
+non-empty `reason` to be honored. Expired rules no longer match, so
+an intentional pin that outlives its grace period surfaces again
+(as `update`, or as an `unknown` that fails a `--strict` run). A
+live rule is also the escape hatch that satisfies `--strict` for an
+unresolvable pin.
 
 ### Cache
 
@@ -781,23 +789,51 @@ Network-backed resolvers cache upstream results under
 repeated runs are fast and offline-friendly. Use `--fresh` to
 bypass the cache and refetch. The cache is git-ignored and only
 network resolvers are cached — native resolvers (`go list -u`,
-`pnpm outdated`) always resolve live.
+`pnpm outdated`) resolve live online and are reported `skipped` on
+an `--offline` run.
 
 ### CI
 
-A weekly workflow (`.github/workflows/deps-check.yml`) runs every
-Monday at 03:00 UTC (and on demand via `workflow_dispatch`). It
-uses `--ignore` so intentional pins are collapsed, and uploads
-`deps-report.json` and the console log as the `deps-check`
-artifact. Because updates don't change the exit code, a normal run
-succeeds; only an operational failure (exit 1) fails the job so it
-is noticed. The check-deps unit tests run on every PR via the
-`controller-ci` workflow.
+Two workflows cover it:
+
+- **`.github/workflows/deps-strict.yml`** — the required PR check.
+  It runs `--strict --offline --native-tools=false`, so no network
+  resolver and no native toolchain shell-out runs and the check is
+  hermetic and reproducible on any runner. `--strict` fails the job
+  when a pin cannot be determined or an extraction unknown remains,
+  unless `deps-ignore.json` records a reviewed exception (an ignored
+  unknown satisfies strict), so a new unaccounted pin cannot land
+  silently.
+- **`.github/workflows/deps-check.yml`** — the advisory weekly job.
+  It runs every Monday at 03:00 UTC (and on demand via
+  `workflow_dispatch`) with `--strict=false --ignore`, so intentional
+  pins are collapsed and updates never fail the job; it uploads
+  `deps-report.json` and the console log as the `deps-check`
+  artifact.
+
+A local `make check-deps` inherits the strict default (it passes
+`--ignore` only), so it fails on an undeterminable pin too; pass
+`--strict=false` for an advisory run. The check-deps unit tests run
+on every PR via the `controller-ci` workflow.
 
 ### Exit codes
 
 - `0` — the tool ran successfully (updates may exist; check the report).
 - `1` — operational failure (repo root unresolvable, JSON serialization failed).
+- `1` — a `--strict` violation (on by default: an extraction unknown or an
+  undeterminable pin remains and no live `deps-ignore.json` rule covers it).
+  The report is written before the non-zero exit.
+
+### Detailed reference
+
+The full tool reference — every audited source, the report schema (schema v2:
+`findings` / `inventory` / `integrity` / `unknowns` / `counts`), the tier table,
+all flags (`--json`, `--console`, `--fresh`, `--ignore`, `--all`, `--offline`,
+`--strict`, `--native-tools`), and the "how to add a dependency source"
+contract — lives in
+[`tools/check-deps/README.md`](tools/check-deps/README.md). The ignore-file
+schema and policy are in
+[`tools/check-deps/docs/deps-ignore.md`](tools/check-deps/docs/deps-ignore.md).
 
 ## AWS EC2 deployment target
 

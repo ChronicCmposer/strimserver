@@ -37,6 +37,8 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
+exports_files(["pin.json"])
+
 # ---------------------------------------------------------------------------
 # Codegen: pinned protoc 36.2 + protoc-gen-c over the pinned containerd api
 # ---------------------------------------------------------------------------

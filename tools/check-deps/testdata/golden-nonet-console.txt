@@ -10,6 +10,10 @@ T2 (review) — 3
 T3 (minor) — 2
   names: qemu, no-such-pin
 
+Integrity (hash pins) — 0
+
+Inventory (transitive) — 0
+
 Unknown — 2
   - tools/ffmpeg-dist/build.sh: cannot read file: open tools/ffmpeg-dist/build.sh: no such file or directory
   - no-such-pin: no resolver configured for this dependency

@@ -8,6 +8,8 @@
 # the tool exits 0 even when updates exist -- so a normal run always succeeds
 # and the JSON report is simply attached as an artifact for review. Only a real
 # operational failure (exit 1) fails the job, so it is actually noticed.
+# The run passes --strict=false explicitly so this schedule stays advisory even
+# though --strict defaults ON; deps-strict.yml is the enforcing PR check.
 #
 # The cron mirrors the ffmpeg reproducibility canary's pattern
 # (.github/workflows/ffmpeg-reproducibility.yml).
@@ -27,14 +29,14 @@ jobs:
       - uses: bazelbuild/setup-bazelisk@v3
 
       # Go version taken from the `go` directive in core/controller/go.mod
-      # (go 1.26.4; mirrored as PROJECT_GO_VERSION_TAG in .env).
+      # (go 1.27.2; mirrored as PROJECT_GO_VERSION_TAG in .env).
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: 1.26.4
+          go-version: 1.27.2
 
-      # Node version from tools/streamdeck-plugin/.nvmrc (Node 24.13.0).
+      # Node version from tools/streamdeck-plugin/.nvmrc (Node 24.21.0).
       # pnpm availability comes from Node 24 bundling corepack plus the
-      # package.json `packageManager` field auto-activating it (Node 24.13.0
+      # package.json `packageManager` field auto-activating it (Node 24.21.0
       # per .nvmrc), not from a setup-node input. `pnpm outdated` is one of
       # check-deps' native resolvers.
       - uses: actions/setup-node@v7.0.0
@@ -46,8 +48,11 @@ jobs:
       # `make check-deps` runs `bazel run //tools/check-deps:check-deps` with no
       # extra args, so call bazel directly to pass -- --json. --ignore collapses
       # intentional pins (deps-ignore.json) so the report shows only real drift.
+      # --strict=false keeps this weekly job ADVISORY: --strict now defaults ON,
+      # and a scheduled report must not turn red on a transient extraction
+      # unknown. The enforcing gate is the deps-strict.yml PR check.
       - name: Run check-deps and capture the report
-        run: bazel run //tools/check-deps:check-deps -- --json --ignore > deps-report.json 2> deps-console.log
+        run: bazel run //tools/check-deps:check-deps -- --json --ignore --strict=false > deps-report.json 2> deps-console.log
 
       - name: Upload the dependency report
         uses: actions/upload-artifact@v4

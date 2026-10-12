@@ -1,0 +1,7 @@
+{
+  "name": "wslay",
+  "version": "1.1.1",
+  "upstream": "https://github.com/tatsuhiro-t/wslay/releases/download/release-1.1.1/wslay-1.1.1.tar.gz",
+  "sha256": "90ce68c6dfd614722d44fbb14563a3f6dacc68b548b20ae382ac4f4952c55268",
+  "owner_repo": "tatsuhiro-t/wslay"
+}

@@ -33,6 +33,7 @@ type finding struct {
 	Status      string            `json:"status"`
 	Ignored     bool              `json:"ignored"`
 	File        string            `json:"file,omitempty"`
+	Pins        []pinEntry        `json:"pins,omitempty"`
 	Reasons     []string          `json:"reasons,omitempty"`
 	Infos       []string          `json:"infos,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
@@ -40,13 +41,25 @@ type finding struct {
 	tier common.Tier
 }
 
+// pinEntry is one file's declaration of a logical dependency: the repo-relative
+// file and the version pinned there. A logical dependency declared in several
+// files (or as per-architecture twins) carries one pinEntry per declaration, so
+// multi-file and mixed-version drift stays visible in the collapsed finding.
+type pinEntry struct {
+	File    string `json:"file"`
+	Version string `json:"version"`
+}
+
 // unknownEntry is one entry in the unknowns array. Phase 1 extraction
 // failures carry File+Reason; resolved dependencies that came back "unknown"
-// carry Name+File+Reason.
+// carry Name+File+Reason. Ignored records that a live deps-ignore.json rule
+// covers: they stay listed (the honest record) but are marked so a reviewer
+// sees which unknowns are reviewed exceptions rather than open questions.
 type unknownEntry struct {
-	Name   string `json:"name,omitempty"`
-	File   string `json:"file,omitempty"`
-	Reason string `json:"reason"`
+	Name    string `json:"name,omitempty"`
+	File    string `json:"file,omitempty"`
+	Reason  string `json:"reason"`
+	Ignored bool   `json:"ignored"`
 }
 
 // counts summarizes the report. The JSON keys are a deliberate, tested
@@ -65,12 +78,107 @@ type counts struct {
 	Hygiene       int `json:"hygiene"`
 	Ignored       int `json:"ignored"`
 	UnknownsTotal int `json:"unknowns"`
+	// Inventory and Integrity count the inventory and integrity section sizes.
+	// They are the per-section totals and are disjoint from the T1/T2/T3
+	// tallies: a sectioned dependency is never a finding and never carries a
+	// review tier. Total is the number of report entries, so it equals the sum
+	// of the tier tallies plus these two sections. Pins of one logical
+	// dependency collapse into a single finding, so Total counts logical
+	// dependencies rather than physical pins.
+	Inventory int `json:"inventory"`
+	Integrity int `json:"integrity"`
+	// Skipped counts the dependencies whose resolution was deliberately not
+	// attempted (a StatusSkipped finding, e.g. a network-backed resolver left
+	// unrun by --offline). It completes the status tallies alongside
+	// Update/StatusUnknown/OK/Hygiene, so summing them covers every finding
+	// rather than silently dropping the skipped ones. It is appended last so
+	// the existing keys and their meanings are unchanged.
+	Skipped int `json:"skipped"`
+}
+
+// reportSchemaVersion is the current JSON report schema version. It is bumped
+// whenever the report shape changes incompatibly, so machine consumers can
+// branch on it.
+const reportSchemaVersion = "2"
+
+// inventoryNote is the extractor tag that marks a lockfile-transitive pin: a
+// dependency a lockfile records only transitively, not as a top-level reviewed
+// pin. It mirrors the extractors' `inventoryNote` constant; matching by content
+// keeps output decoupled from the extractor package.
+const inventoryNote = "inventory:transitive"
+
+// inventoryEntry is one row in the report's inventory section: a lockfile
+// transitive pin recorded for completeness but not reviewed (it has no
+// top-level upstream version to compare). Current carries the locked version.
+type inventoryEntry struct {
+	Category string `json:"category"`
+	Name     string `json:"name"`
+	Current  string `json:"current"`
+	File     string `json:"file,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Note     string `json:"note,omitempty"`
+}
+
+// integrityEntry is one row in the report's integrity section: a pin whose
+// identity is an integrity hash (SRI/sha256) rather than a version to compare.
+// Current carries the pinned hash.
+type integrityEntry struct {
+	Category string `json:"category"`
+	Name     string `json:"name"`
+	Current  string `json:"current"`
+	File     string `json:"file,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Note     string `json:"note,omitempty"`
+}
+
+// reportSection identifies which report array a resolved dependency belongs to.
+type reportSection int
+
+const (
+	// sectionFinding is a reviewable dependency: it appears in findings and
+	// carries a review tier.
+	sectionFinding reportSection = iota
+	// sectionInventory is a lockfile-transitive pin recorded for completeness.
+	sectionInventory
+	// sectionIntegrity is an integrity-hash pin with no version to compare.
+	sectionIntegrity
+)
+
+// sectionFor routes a resolved dependency to its report section. Integrity pins
+// (by role or by the classifier's integrity status) win first, then
+// lockfile-transitive inventory pins, then everything else is a finding. The
+// order is deliberate: a pin that is both an integrity pin and inventory-tagged
+// is reported as integrity, the stronger classification.
+func sectionFor(r common.Resolved) reportSection {
+	if r.Dep.IsIntegrity() || r.Status == common.StatusIntegrity {
+		return sectionIntegrity
+	}
+	if strings.Contains(r.Dep.Note, inventoryNote) {
+		return sectionInventory
+	}
+	return sectionFinding
 }
 
 type report struct {
-	Findings []finding      `json:"findings"`
-	Unknowns []unknownEntry `json:"unknowns"`
-	Counts   counts         `json:"counts"`
+	SchemaVersion string           `json:"schemaVersion"`
+	Findings      []finding        `json:"findings"`
+	Unknowns      []unknownEntry   `json:"unknowns"`
+	Inventory     []inventoryEntry `json:"inventory"`
+	Integrity     []integrityEntry `json:"integrity"`
+	Counts        counts           `json:"counts"`
+}
+
+// newReport returns the empty report envelope: the current schema version and
+// non-nil (empty) findings/unknowns/inventory/integrity arrays, so the
+// marshalled JSON always carries arrays rather than null.
+func newReport() report {
+	return report{
+		SchemaVersion: reportSchemaVersion,
+		Findings:      []finding{},
+		Unknowns:      []unknownEntry{},
+		Inventory:     []inventoryEntry{},
+		Integrity:     []integrityEntry{},
+	}
 }
 
 // findingID is the canonical identity of a finding for ignore matching:
@@ -132,39 +240,68 @@ func toFinding(r common.Resolved) finding {
 // list: false filters them out while counts still cover the full inventory;
 // true lists every dependency.
 func buildReport(all []common.Resolved, unknowns []common.ExtractionUnknown, ignores parsedIgnoreSet, today time.Time, includeOK bool) report {
-	var rep report
+	rep := newReport()
 	calToday := calendarDate(today)
 	rep.Findings = make([]finding, 0, len(all))
 	rep.Unknowns = make([]unknownEntry, 0, len(unknowns)+len(all))
+
+	// Route each resolved dependency into its section. Inventory and integrity
+	// entries never become findings and never reach the unknowns list: they are
+	// recorded in their own section instead of surfacing as "unknown" noise.
+	var findings []finding
 	for _, r := range all {
 		f := toFinding(r)
 		f.Ignored = ignores.isIgnoredOn(findingID(r.Dep), r.Dep.File, calToday)
-		// Count every dependency regardless of the findings filter so counts
-		// stay full and authoritative; only the findings list narrows.
-		accumulateCounts(&rep.Counts, r, f.Ignored)
-		if r.Status != common.StatusOK || includeOK {
-			rep.Findings = append(rep.Findings, f)
+		switch sectionFor(r) {
+		case sectionIntegrity:
+			rep.Integrity = append(rep.Integrity, toIntegrityEntry(r))
+		case sectionInventory:
+			rep.Inventory = append(rep.Inventory, toInventoryEntry(r))
+		default:
+			findings = append(findings, f)
+			if u, ok := resolvedUnknownEntry(r, f.Ignored); ok {
+				rep.Unknowns = append(rep.Unknowns, u)
+			}
 		}
-		if u, ok := resolvedUnknownEntry(r); ok {
-			rep.Unknowns = append(rep.Unknowns, u)
+	}
+
+	// Collapse pins of one logical dependency (arch twins, multi-file) into a
+	// single finding, then count the logical findings so the tier tallies always
+	// agree with the findings list.
+	findings = collapseFindings(findings)
+	for _, f := range findings {
+		accumulateFindingCounts(&rep.Counts, f)
+		if f.Status != string(common.StatusOK) || includeOK {
+			rep.Findings = append(rep.Findings, f)
 		}
 	}
 	for _, unk := range unknowns {
-		rep.Unknowns = append(rep.Unknowns, unknownEntry{File: unk.File, Reason: unk.Reason})
+		rep.Unknowns = append(rep.Unknowns, unknownEntry{
+			File:    unk.File,
+			Reason:  unk.Reason,
+			Ignored: ignores.coversFile(unk.File, calToday),
+		})
 	}
-	rep.Counts.Total = len(all)
+
+	rep.Counts.Inventory = len(rep.Inventory)
+	rep.Counts.Integrity = len(rep.Integrity)
+	rep.Counts.Total = len(findings) + rep.Counts.Inventory + rep.Counts.Integrity
 	sortFindings(rep.Findings)
+	sortInventory(rep.Inventory)
+	sortIntegrity(rep.Integrity)
 	sortUnknowns(rep.Unknowns)
 	rep.Counts.UnknownsTotal = len(rep.Unknowns)
 	return rep
 }
 
-// accumulateCounts adds one resolved dependency's tier, status, and ignored
+// accumulateFindingCounts adds one finding's tier, status, and ignored
 // contributions to the running counts. common.Tier.Normalized() rests any
 // unrecognized tier at TierT3 (the explicit catch-all resting tier), and an
-// unrecognized status contributes nothing to the status tallies.
-func accumulateCounts(c *counts, r common.Resolved, ignored bool) {
-	switch r.Tier.Normalized() {
+// unrecognized status contributes nothing to the status tallies. It is called
+// once per logical finding, so a collapsed multi-file dependency is counted
+// once.
+func accumulateFindingCounts(c *counts, f finding) {
+	switch f.tier.Normalized() {
 	case common.TierT1:
 		c.T1++
 	case common.TierT2:
@@ -172,7 +309,7 @@ func accumulateCounts(c *counts, r common.Resolved, ignored bool) {
 	default:
 		c.T3++
 	}
-	switch r.Status {
+	switch common.Status(f.Status) {
 	case common.StatusUpdate:
 		c.Update++
 	case common.StatusUnknown:
@@ -181,24 +318,243 @@ func accumulateCounts(c *counts, r common.Resolved, ignored bool) {
 		c.OK++
 	case common.StatusHygiene:
 		c.Hygiene++
+	case common.StatusSkipped:
+		c.Skipped++
 	default:
 		// An unrecognized status is not counted so the tallies stay honest.
 	}
-	if ignored {
+	if f.Ignored {
 		c.Ignored++
 	}
 }
 
+// toInventoryEntry converts a lockfile-transitive resolved dependency into the
+// inventory section row.
+func toInventoryEntry(r common.Resolved) inventoryEntry {
+	return inventoryEntry{
+		Category: r.Dep.Category,
+		Name:     r.Dep.Name,
+		Current:  r.Dep.Version,
+		File:     r.Dep.File,
+		Source:   r.Dep.Source,
+		Note:     r.Dep.Note,
+	}
+}
+
+// toIntegrityEntry converts an integrity-hash resolved dependency into the
+// integrity section row. Current carries the pinned hash.
+func toIntegrityEntry(r common.Resolved) integrityEntry {
+	return integrityEntry{
+		Category: r.Dep.Category,
+		Name:     r.Dep.Name,
+		Current:  r.Dep.Version,
+		File:     r.Dep.File,
+		Source:   r.Dep.Source,
+		Note:     r.Dep.Note,
+	}
+}
+
+// collapseFindings folds findings that describe the same logical dependency
+// into one finding, keyed by category and architecture-normalized name. A group
+// of one is returned unchanged (so single pins keep their exact name and shape);
+// a group of two or more merges into one finding carrying every pin, so arch
+// twins and multi-file declarations stop being reported as duplicates while
+// their drift stays visible.
+func collapseFindings(findings []finding) []finding {
+	groups := make(map[logicalKey][]finding)
+	order := make([]logicalKey, 0, len(findings))
+	for _, f := range findings {
+		key := logicalKey{category: f.Category, name: trimArchSuffix(f.Name)}
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], f)
+	}
+
+	collapsed := make([]finding, 0, len(order))
+	for _, key := range order {
+		members := groups[key]
+		if len(members) == 1 {
+			collapsed = append(collapsed, members[0])
+			continue
+		}
+		collapsed = append(collapsed, mergeFindings(key, members))
+	}
+	return collapsed
+}
+
+// logicalKey is the identity of a logical dependency for collapse: its category
+// and its architecture-normalized name.
+type logicalKey struct {
+	category string
+	name     string
+}
+
+// mergeFindings merges several pins of one logical dependency into a single
+// finding. It takes the most severe member as the representative (so no
+// actionable twin is hidden), rests the tier at the most severe member's tier,
+// records every pin, and marks multi-file version/arch drift in metadata.
+func mergeFindings(key logicalKey, members []finding) finding {
+	merged := mostSevere(members)
+	merged.Name = key.name
+	merged.Pins = collectPins(members)
+	merged.tier = minTier(members)
+	merged.Tier = merged.tier.String()
+	merged.Ignored = allIgnored(members)
+	merged.Metadata = mergeMetadata(merged.Metadata, members)
+	return merged
+}
+
+// mostSevere returns the member whose status (then tier, then file) is the most
+// actionable, so the collapsed finding surfaces the worst case. Ordering is
+// total and deterministic.
+func mostSevere(members []finding) finding {
+	best := members[0]
+	for _, m := range members[1:] {
+		if moreSevere(m, best) {
+			best = m
+		}
+	}
+	return best
+}
+
+// moreSevere reports whether a outranks b: a more severe status wins first,
+// then a lower (more severe) tier, then the lexicographically smaller file.
+func moreSevere(a, b finding) bool {
+	if statusRank(a.Status) != statusRank(b.Status) {
+		return statusRank(a.Status) < statusRank(b.Status)
+	}
+	at, bt := a.tier.Normalized(), b.tier.Normalized()
+	if at != bt {
+		return at < bt
+	}
+	return a.File < b.File
+}
+
+// statusRank orders statuses by review severity; a lower rank is more severe. An
+// unrecognized status rests at the least severe rank.
+func statusRank(status string) int {
+	switch common.Status(status) {
+	case common.StatusUpdate:
+		return 0
+	case common.StatusUnknown:
+		return 1
+	case common.StatusHygiene:
+		return 2
+	case common.StatusIntegrity:
+		return 3
+	case common.StatusSkipped:
+		return 4
+	case common.StatusOK:
+		return 5
+	default:
+		return 6
+	}
+}
+
+// minTier returns the most severe (numerically lowest) normalized tier across
+// the members.
+func minTier(members []finding) common.Tier {
+	t := members[0].tier.Normalized()
+	for _, m := range members[1:] {
+		if n := m.tier.Normalized(); n < t {
+			t = n
+		}
+	}
+	return t
+}
+
+// allIgnored reports whether every member is ignored, so a collapsed finding is
+// hidden only when all of its pins are intentionally ignored.
+func allIgnored(members []finding) bool {
+	for _, m := range members {
+		if !m.Ignored {
+			return false
+		}
+	}
+	return true
+}
+
+// collectPins returns the distinct (file, version) declarations across the
+// members, sorted by file then version, so every pin and any version drift is
+// visible.
+func collectPins(members []finding) []pinEntry {
+	seen := make(map[pinEntry]struct{}, len(members))
+	pins := make([]pinEntry, 0, len(members))
+	for _, m := range members {
+		p := pinEntry{File: m.File, Version: m.Current}
+		if _, duplicate := seen[p]; duplicate {
+			continue
+		}
+		seen[p] = struct{}{}
+		pins = append(pins, p)
+	}
+	slices.SortFunc(pins, func(a, b pinEntry) int {
+		if a.File != b.File {
+			return strings.Compare(a.File, b.File)
+		}
+		return strings.Compare(a.Version, b.Version)
+	})
+	return pins
+}
+
+// mergeMetadata copies the representative metadata and records the drift kinds
+// the collapse exposed: mixed-version when the pins disagree on version,
+// mixed-arch when the members span more than one architecture.
+func mergeMetadata(base map[string]string, members []finding) map[string]string {
+	md := maps.Clone(base)
+	var drift []string
+	if mixedVersion(members) {
+		drift = append(drift, "mixed-version")
+	}
+	if mixedArch(members) {
+		drift = append(drift, "mixed-arch")
+	}
+	if len(drift) == 0 {
+		return md
+	}
+	if md == nil {
+		md = map[string]string{}
+	}
+	slices.Sort(drift)
+	md["drift"] = strings.Join(drift, ",")
+	return md
+}
+
+// mixedVersion reports whether the members disagree on the pinned current
+// version.
+func mixedVersion(members []finding) bool {
+	for _, m := range members[1:] {
+		if m.Current != members[0].Current {
+			return true
+		}
+	}
+	return false
+}
+
+// mixedArch reports whether the members span more than one architecture label
+// (including the architecture-independent empty label).
+func mixedArch(members []finding) bool {
+	arches := make(map[string]struct{}, len(members))
+	for _, m := range members {
+		arches[archLabel(m.Name)] = struct{}{}
+	}
+	return len(arches) > 1
+}
+
 // resolvedUnknownEntry builds the unknowns-array entry for a resolved
-// dependency that came back "unknown", reporting whether one applies.
-func resolvedUnknownEntry(r common.Resolved) (unknownEntry, bool) {
+// dependency that came back "unknown", reporting whether one applies. ignored
+// carries the finding's ignore verdict so the unknowns array agrees with the
+// findings list about which unknowns are reviewed exceptions.
+func resolvedUnknownEntry(r common.Resolved, ignored bool) (unknownEntry, bool) {
 	if r.Status != common.StatusUnknown {
 		return unknownEntry{}, false
 	}
 	return unknownEntry{
-		Name:   firstNonEmpty(r.Dep.Name, r.Dep.Category),
-		File:   r.Dep.File,
-		Reason: strings.Join(r.Reasons, "; "),
+		Name:    firstNonEmpty(r.Dep.Name, r.Dep.Category),
+		File:    r.Dep.File,
+		Reason:  strings.Join(r.Reasons, "; "),
+		Ignored: ignored,
 	}, true
 }
 
@@ -212,6 +568,51 @@ func sortUnknowns(unknowns []unknownEntry) {
 		}
 		return strings.Compare(a.Reason, b.Reason)
 	})
+}
+
+// sortInventory orders the inventory rows deterministically (category, name,
+// file, current) so the JSON is reproducible.
+func sortInventory(entries []inventoryEntry) {
+	slices.SortFunc(entries, func(a, b inventoryEntry) int {
+		if a.Category != b.Category {
+			return strings.Compare(a.Category, b.Category)
+		}
+		if a.Name != b.Name {
+			return strings.Compare(a.Name, b.Name)
+		}
+		if a.File != b.File {
+			return strings.Compare(a.File, b.File)
+		}
+		return strings.Compare(a.Current, b.Current)
+	})
+}
+
+// sortIntegrity orders the integrity rows deterministically (category, name,
+// file, current) so the JSON is reproducible.
+func sortIntegrity(entries []integrityEntry) {
+	slices.SortFunc(entries, func(a, b integrityEntry) int {
+		if a.Category != b.Category {
+			return strings.Compare(a.Category, b.Category)
+		}
+		if a.Name != b.Name {
+			return strings.Compare(a.Name, b.Name)
+		}
+		if a.File != b.File {
+			return strings.Compare(a.File, b.File)
+		}
+		return strings.Compare(a.Current, b.Current)
+	})
+}
+
+// archLabel returns the architecture token a pin name carries, or "" for an
+// architecture-independent name. It is the inverse view of trimArchSuffix, so
+// the collapse and the resolver matcher agree on what counts as an arch suffix.
+func archLabel(name string) string {
+	base := trimArchSuffix(name)
+	if base == name {
+		return ""
+	}
+	return strings.TrimLeft(strings.TrimPrefix(name, base), "_-")
 }
 
 func firstNonEmpty(a, b string) string {
@@ -257,13 +658,20 @@ func renderConsole(rep report, root string) string {
 		b.WriteString("  names: " + joinNames(t3) + "\n")
 	}
 
+	writeIntegritySection(&b, rep.Integrity)
+	writeInventorySection(&b, rep.Inventory)
+
 	fmt.Fprintf(&b, "\nUnknown — %d\n", len(rep.Unknowns))
 	for _, unk := range rep.Unknowns {
 		who := unk.Name
 		if who == "" {
 			who = unk.File
 		}
-		fmt.Fprintf(&b, "  - %s: %s\n", who, unk.Reason)
+		marker := ""
+		if unk.Ignored {
+			marker = " [ignored]"
+		}
+		fmt.Fprintf(&b, "  - %s: %s%s\n", who, unk.Reason, marker)
 	}
 
 	fmt.Fprintf(&b, "\nIgnored — %d\n", len(ignored))
@@ -297,6 +705,9 @@ func writeFindingSection(b *strings.Builder, title string, findings []finding) {
 		if f.File != "" {
 			fmt.Fprintf(b, "  [%s]", f.File)
 		}
+		if len(f.Pins) > 0 {
+			fmt.Fprintf(b, "  pins: %s", formatPins(f.Pins))
+		}
 		fmt.Fprintf(b, "  [%s]", f.Status)
 		if len(f.Reasons) > 0 {
 			fmt.Fprintf(b, "  | %s", strings.Join(f.Reasons, " | "))
@@ -326,6 +737,54 @@ func joinNames(findings []finding) string {
 		names = append(names, displayName(f))
 	}
 	return strings.Join(names, ", ")
+}
+
+// formatPins renders a finding's pins as "file@version" pairs joined by ", ",
+// so a collapsed multi-file finding shows every declaration on its line.
+func formatPins(pins []pinEntry) string {
+	parts := make([]string, 0, len(pins))
+	for _, p := range pins {
+		parts = append(parts, p.File+"@"+p.Version)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// writeIntegritySection renders the integrity (hash-pin) section flat: one line
+// per pin with its hash, optional source, and file. It always prints the
+// heading (matching the Unknown/Ignored sections) so an empty section is
+// explicit rather than absent.
+func writeIntegritySection(b *strings.Builder, entries []integrityEntry) {
+	fmt.Fprintf(b, "\nIntegrity (hash pins) — %d\n", len(entries))
+	for _, e := range entries {
+		fmt.Fprintf(b, "  - %s", firstNonEmpty(e.Name, e.Category))
+		if e.Current != "" {
+			fmt.Fprintf(b, "  %s", e.Current)
+		}
+		if e.Source != "" {
+			fmt.Fprintf(b, "  (%s)", e.Source)
+		}
+		if e.File != "" {
+			fmt.Fprintf(b, "  [%s]", e.File)
+		}
+		fmt.Fprintf(b, "\n")
+	}
+}
+
+// writeInventorySection renders the inventory (lockfile-transitive) section
+// flat: one line per pin with its locked version and file. It always prints the
+// heading so an empty section is explicit rather than absent.
+func writeInventorySection(b *strings.Builder, entries []inventoryEntry) {
+	fmt.Fprintf(b, "\nInventory (transitive) — %d\n", len(entries))
+	for _, e := range entries {
+		fmt.Fprintf(b, "  - %s", firstNonEmpty(e.Name, e.Category))
+		if e.Current != "" {
+			fmt.Fprintf(b, "  %s", e.Current)
+		}
+		if e.File != "" {
+			fmt.Fprintf(b, "  [%s]", e.File)
+		}
+		fmt.Fprintf(b, "\n")
+	}
 }
 
 // sortFindings orders findings deterministically (category, name, current) so

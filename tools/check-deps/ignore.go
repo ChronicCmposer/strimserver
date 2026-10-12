@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -34,13 +35,15 @@ type ignoreSet []ignoreRule
 // untilStr holds the validated original YYYY-MM-DD string (empty when the rule
 // has no expiry, i.e. it never expires); malformedUntil marks a rule whose
 // until could not be parsed, failing it closed (treated as already expired) so
-// it never matches.
+// it never matches; emptyReason marks a rule with a blank justification, which
+// is not a reviewed exception and therefore never matches (fail closed).
 type ignoredRule struct {
 	ID             string
 	File           string
 	Reason         string
 	untilStr       string
 	malformedUntil bool
+	emptyReason    bool
 }
 
 // parsedIgnoreSet is the ordered collection of parsed ignore rules. It is the
@@ -52,6 +55,7 @@ func (s ignoreSet) parsed() parsedIgnoreSet {
 	out := make(parsedIgnoreSet, 0, len(s))
 	for _, rule := range s {
 		pr := ignoredRule{ID: rule.ID, Reason: rule.Reason, File: rule.File}
+		pr.emptyReason = strings.TrimSpace(rule.Reason) == ""
 		if rule.Until != "" {
 			if _, err := time.Parse(dateLayout, rule.Until); err != nil {
 				pr.malformedUntil = true
@@ -99,7 +103,22 @@ func loadIgnore(root string, warn func(string, ...any)) parsedIgnoreSet {
 		warn("ignoring malformed %s: %v", ignoreFileName, err)
 		return parsedIgnoreSet{}
 	}
+	warnInvalidIgnoreRules(rules, warn)
 	return rules
+}
+
+// warnInvalidIgnoreRules reports every rule the matcher will refuse to honor
+// (an empty reason or an unparseable until), so a hand-edited deps-ignore.json
+// that forgot a justification or mistyped a date is never silently ignored.
+func warnInvalidIgnoreRules(rules parsedIgnoreSet, warn func(string, ...any)) {
+	for _, rule := range rules {
+		switch {
+		case rule.emptyReason:
+			warn("deps-ignore.json rule %q has an empty reason; it is not honored", rule.ID)
+		case rule.malformedUntil:
+			warn("deps-ignore.json rule %q has a malformed until; it is not honored", rule.ID)
+		}
+	}
 }
 
 // isIgnored reports whether id matches any non-expired rule as of today,
@@ -132,6 +151,35 @@ func (s parsedIgnoreSet) isIgnoredOn(id, file, calToday string) bool {
 		if rule.malformedUntil {
 			// Fail closed: a malformed until date must never silently pin the
 			// dependency forever, so treat the rule as expired.
+			continue
+		}
+		if rule.emptyReason {
+			// Fail closed: a rule with no justification is not a reviewed
+			// exception, so it never pins anything.
+			continue
+		}
+		if rule.untilStr != "" && calToday > rule.untilStr {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// coversFile reports whether any live rule is scoped to exactly file. It is the
+// match used for Phase-1 extraction unknowns, which carry only a file and no
+// category/name to match against a rule id; a rule with an empty file is
+// unscoped and therefore does not cover a nameless extraction unknown. A rule
+// whose until is malformed or already expired does not cover (fail closed).
+func (s parsedIgnoreSet) coversFile(file, calToday string) bool {
+	for _, rule := range s {
+		if rule.File == "" || rule.File != file {
+			continue
+		}
+		if rule.malformedUntil {
+			continue
+		}
+		if rule.emptyReason {
 			continue
 		}
 		if rule.untilStr != "" && calToday > rule.untilStr {
