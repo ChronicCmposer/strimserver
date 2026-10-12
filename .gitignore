@@ -29,6 +29,8 @@ tools/local-obs/
 ideas/
 plans/
 playbooks/
+# Parallel sub-agent scratch (journals/results); never committed.
+.parallel-implement/
 
 # check-deps version-check cache (populated by later phases).
 tools/check-deps/.cache/

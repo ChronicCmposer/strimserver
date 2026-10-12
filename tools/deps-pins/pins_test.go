@@ -12,6 +12,7 @@
 package pins
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +35,11 @@ type pin struct {
 	// modules (e.g. the otel /metric and /trace sub-modules) that are pinned
 	// only when the project already depends on them.
 	presentIf string
+	// skipIfMissing makes this assertion conditional on the file's existence:
+	// when file is absent the sub-test is skipped rather than failed. It models
+	// local-only files (e.g. the gitignored .env) that a CI checkout or fresh
+	// clone legitimately lacks; when the file is present it is asserted fully.
+	skipIfMissing bool
 }
 
 // pins is the full upgrade contract. Keep each entry aligned with the
@@ -139,9 +145,10 @@ var pins = []pin{
 		needles: []string{"go 1.27.2"},
 	},
 	{
-		name:    "env-project-go-version-tag-go1.27.2",
-		file:    ".env",
-		needles: []string{`PROJECT_GO_VERSION_TAG="go1.27.2"`},
+		name:          "env-project-go-version-tag-go1.27.2",
+		file:          ".env",
+		needles:       []string{`PROJECT_GO_VERSION_TAG="go1.27.2"`},
+		skipIfMissing: true,
 	},
 	{
 		name:    "deps-check-workflow-go-version-1.27.2",
@@ -214,6 +221,12 @@ func TestPins(t *testing.T) {
 		t.Run(p.name, func(t *testing.T) {
 			content, err := read(p.file)
 			if err != nil {
+				// Local-only file (e.g. gitignored .env) absent from a fresh
+				// checkout: skip rather than fail — the committed toolchain
+				// pins are asserted by their own sub-tests.
+				if p.skipIfMissing && errors.Is(err, os.ErrNotExist) {
+					t.Skipf("%s: %s is absent; skipping optional assertion", p.name, p.file)
+				}
 				t.Errorf("%s: cannot read %s: %v", p.name, p.file, err)
 				return
 			}
