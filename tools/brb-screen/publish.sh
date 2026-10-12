@@ -46,6 +46,19 @@
 # =============================================================================
 set -euo pipefail
 
+# --- project-scoped operator profile (decision 11b) ---------------------------
+# The aws-profile contract (pin [strimserver], reject other identities) lives in
+# ONE shared library so no call site re-implements it. Find the repo root the
+# same way the Go tooling does: BUILD_WORKSPACE_DIRECTORY when `bazel run` set
+# it, otherwise walk up from this script's directory.
+_ss_root="${BUILD_WORKSPACE_DIRECTORY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+while [[ ! -f "$_ss_root/deploy/aws/lib/aws_profile.sh" && "$_ss_root" != "/" ]]; do
+  _ss_root="$(dirname "$_ss_root")"
+done
+. "$_ss_root/deploy/aws/lib/aws_profile.sh"
+unset _ss_root
+# ------------------------------------------------------------------------------
+
 # --- inputs (defaults) ---
 OUTPUT_PATH="${OUTPUT_PATH:-$HOME/Downloads/strimserver-offline-2160p60.mp4}"
 S3_BUCKET="${S3_BUCKET:-s3://<bucket-name>}"
@@ -106,16 +119,16 @@ upload_clip() {
     echo "error: AWS_REGION is required for upload (no default)." >&2
     exit 1
   fi
-  if ! aws --region "$AWS_REGION" sts get-caller-identity >/dev/null 2>&1; then
-    echo "!! AWS credentials not found (aws sts get-caller-identity failed)." >&2
+  if ! require_strimserver_identity; then
+    echo "!! AWS credentials for the [strimserver] profile are missing or are not the operator." >&2
     echo "!! Skipping upload; $clip remains local." >&2
     echo "!! Re-run with valid credentials to publish, or upload manually:" >&2
-    echo "!!   aws --region $AWS_REGION s3 cp $clip $S3_BUCKET/offline/strimserver-offline-2160p60.mp4" >&2
+    echo "!!   aws --profile strimserver --region $AWS_REGION s3 cp $clip $S3_BUCKET/offline/strimserver-offline-2160p60.mp4" >&2
     return 1
   fi
 
   echo "==> uploading to $S3_BUCKET/offline/ (no ACL modification; the bucket policy gates access)"
-  aws --region "$AWS_REGION" s3 cp "$clip" "$S3_BUCKET/offline/strimserver-offline-2160p60.mp4"
+  aws_strim --region "$AWS_REGION" s3 cp "$clip" "$S3_BUCKET/offline/strimserver-offline-2160p60.mp4"
 }
 
 # Print the MODULE.bazel s3_http_file stanza for a clip and its sha256, plus

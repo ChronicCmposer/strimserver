@@ -1,3 +1,5 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 exports_files([
     "deploy.sh",
     "fish-deploy.sh",
@@ -75,4 +77,49 @@ expand_template(
         "__CONTAINER__": "strim-ddns",
     },
     visibility = ["//visibility:public"],
+)
+
+# --- Offline tests: project-scoped [strimserver] operator account (11b) ------
+# These run without AWS: testutil_fake_aws.sh puts a stub `aws` on PATH.
+sh_test(
+    name = "operator_template_test",
+    srcs = ["operator_template_test.sh"],
+    data = ["strimserver-infra.yaml"],
+)
+
+sh_test(
+    name = "deploy_infra_test",
+    srcs = ["deploy_infra_test.sh"],
+    data = [
+        "deploy-infra",
+        "strimserver-infra.yaml",
+        "testutil_fake_aws.sh",
+    ],
+)
+
+# aws_profile_test.sh asserts every AWS-invoking tooling script pins the
+# project-scoped [strimserver] profile AND never calls the AWS CLI directly:
+# every call must route through the shared aws_strim wrapper (a bare
+# `aws <service>` invocation is flagged; `command -v aws`, comments and
+# echo/printf prose are not). It is NOT self-contained -- it greps sources
+# across several packages (scripts/*.sh, tools/ffmpeg-dist, tools/openssh,
+# tools/brb-screen, tools/bandwidth-test, tools/streamdeck-plugin) that are not
+# exported as Bazel targets, and its behavioural checks assume a full checkout
+# (they cd to the repo root and resolve the lib by walking up), so a sandboxed
+# test action cannot run it. Wiring the cross-package sources as data would
+# require exports_files in the root and tools/* packages (outside this package's
+# ownership) plus a runfiles-aware rewrite. It is therefore wired here so it is
+# addressable/discoverable, but tagged `manual` (excluded from
+# `//deploy/aws/...` wildcards). The standalone run is the authoritative gate:
+#   bash deploy/aws/aws_profile_test.sh
+sh_test(
+    name = "aws_profile_test",
+    srcs = ["aws_profile_test.sh"],
+    data = [
+        "//deploy/aws/lib:aws_profile.sh",
+        "launch",
+        "terminate",
+        "testutil_fake_aws.sh",
+    ],
+    tags = ["manual"],
 )

@@ -88,12 +88,28 @@ request) for arm64, and diffs `-print-env-example`, `-print-ts-types`, and
 
 `deploy/aws/strimserver-infra.yaml` provisions the durable pieces once: the
 security group, IAM instance profile, optional VPC/subnet/networking, and the
-`strimserver` IAM service account. The service account's
-`strimserver-ssm-dlami-readonly` policy grants `ssm:GetParameter` on **both**
+`strimserver` IAM service account. The account carries two managed policies: the
+narrow `strimserver-ssm-dlami-readonly` policy (`ssm:GetParameter` on **both**
 the x86_64 and arm64 DLAMI SSM parameters, so the check-deps AMI resolver can
-float the arm64 AMI in any region where it exists.
+float the arm64 AMI in any region where it exists) and the project-scoped
+`strimserver-operator` policy, which grants only the inventoried operator
+surface: S3 read/write and object-ACL on the deployment bucket, EC2
+describe/run/terminate plus `CreateTags`, `cloudformation:DescribeStacks` on
+`stack/strimserver/*` (read-only — the stack lifecycle is admin-run), the DLAMI
+SSM parameters, self access-key rotation, and `iam:PassRole` on
+`role/strimserver*` conditioned on `iam:PassedToService` =
+`ec2.amazonaws.com`. It carries no account-wide IAM administration and no
+DNS-zone access.
 
-Deploy (or update) the stack with admin credentials:
+Deploy (or update) the stack with admin credentials. `deploy-infra` is
+admin-run: it deploys the stack (the operator policy cannot manage the stack —
+it only calls `cloudformation:DescribeStacks`), then rotates the service
+account's access key into the local `[strimserver]` profile (never
+`[default]`), backing up
+`~/.aws/credentials` first with a timestamp, writes `[profile strimserver]`
+with the resolved region into `~/.aws/config` (backed up, other sections
+preserved), and asserts the fresh key authenticates as
+`arn:...:user/strimserver` before reporting success:
 
 ```sh
 # CreateNetwork=true, EnableExperimentalSsh=true, IngestCidr=OperatorCidr
@@ -111,6 +127,13 @@ deploy/aws/deploy-infra
 | `CreateNetwork` / `VpcId` | `false` / `""` | `true` creates a dedicated VPC + public subnet; otherwise supply an existing `VpcId` |
 | `DeploymentBucketName` | `""` | Set only when the bundle is delivered via `s3://` |
 | `EnableExperimentalSsh` / `ExperimentalSshPort` | `false` / `2222` | Open the experimental OpenSSH port to `OperatorCidr` |
+
+Every strimserver tool that talks to AWS (`deploy-infra` excepted — it is
+admin-run) selects this account through the `[strimserver]` profile by pinning
+`--profile "${AWS_PROFILE:-strimserver}"`, and refuses to run unless
+`aws sts get-caller-identity` reports an ARN ending `:user/strimserver` (the
+identity guard). Set `AWS_PROFILE` to point at a different profile only when
+that profile is also the strimserver operator.
 
 `KEY_NAME` (the EC2 key pair) is **not** a stack parameter — it is set in
 `deploy/aws/.env` and consumed by `launch`.

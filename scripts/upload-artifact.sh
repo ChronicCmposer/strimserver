@@ -11,6 +11,19 @@
 # (https://s3.<region>.amazonaws.com/<bucket>/<key>), with the region from $AWS_REGION.
 set -euo pipefail
 
+# --- project-scoped operator profile (decision 11b) ---------------------------
+# The aws-profile contract (pin [strimserver], reject other identities) lives in
+# ONE shared library so no call site re-implements it. Find the repo root the
+# same way the Go tooling does: BUILD_WORKSPACE_DIRECTORY when `bazel run` set
+# it, otherwise walk up from this script's directory.
+_ss_root="${BUILD_WORKSPACE_DIRECTORY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+while [[ ! -f "$_ss_root/deploy/aws/lib/aws_profile.sh" && "$_ss_root" != "/" ]]; do
+  _ss_root="$(dirname "$_ss_root")"
+done
+. "$_ss_root/deploy/aws/lib/aws_profile.sh"
+unset _ss_root
+# ------------------------------------------------------------------------------
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 S3_BUCKET_NAME="${S3_BUCKET_NAME:?S3_BUCKET_NAME is required (e.g. your-bucket-name)}"
 S3_KEY_PREFIX="${S3_KEY_PREFIX:-ffmpeg}"
@@ -52,15 +65,12 @@ fi
 [[ "$SKIP_SHA_CHECK" == "1" ]] && sha_note="(contract skipped)" || sha_note="(matches pin)"
 echo "==> sha256: $actual_sha256 $sha_note"
 
-# --- guard: valid AWS credentials (fail loud before any upload) ---
-if ! aws sts get-caller-identity >/dev/null 2>&1; then
-  echo "error: 'aws sts get-caller-identity' failed; run 'aws configure'." >&2
-  exit 1
-fi
+# --- guard: the caller is the project-scoped strimserver operator -----------
+require_strimserver_identity || exit 1
 
 # --- upload: no ACL modification (objects get the bucket's default private ACL; the IP-scoped bucket policy from scripts/bucket-cidr-policy.sh is the only access gate); region from $AWS_REGION ---
 s3_key="${S3_KEY_PREFIX}/$(basename "$artifact")"
-aws s3 cp "$artifact" "s3://${S3_BUCKET_NAME}/${s3_key}" --region "$AWS_REGION"
+aws_strim s3 cp "$artifact" "s3://${S3_BUCKET_NAME}/${s3_key}" --region "$AWS_REGION"
 
 # --- done: public URL in the path-style form MODULE.bazel uses ---
 public_url="https://s3.${AWS_REGION}.amazonaws.com/${S3_BUCKET_NAME}/${s3_key}"

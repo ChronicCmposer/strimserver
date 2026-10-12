@@ -324,6 +324,156 @@ Resources:
             Action: ec2:DescribeImages
             Resource: "*"
 
+  # Project-scoped operator policy (decision 11b): the service user is also the
+  # project operator, so the operator surface its own tooling (deploy/aws/launch,
+  # deploy/aws/terminate, and the scripts/tools publish helpers) actually calls
+  # is attached here. Least privilege by construction: the durable stack itself
+  # is deployed by deploy/aws/deploy-infra with ADMIN credentials, so no
+  # account-wide IAM administration is granted. The narrow DlamiReadPolicy above
+  # keeps serving the check-deps AMI resolver.
+  StrimserverOperatorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: strimserver-operator
+      Description: >
+        Least-privilege operator surface for the strimserver account: publish
+        artifacts to the deployment bucket, read the strimserver stack outputs,
+        resolve the DLAMI, launch/terminate tagged GPU instances, hand the
+        strimserver instance role to EC2 only, and rotate its own access key. No
+        account-wide IAM administration and no DNS-zone management is granted:
+        this project owns no hosted zone.
+      Users:
+        - !Ref StrimserverServiceUser
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Bucket-level config used by scripts/bucket-cidr-policy.sh
+          # (get-bucket-location / get- / put-bucket-policy) and by the publish
+          # helpers' list-objects-v2. Scoped to the one deployment bucket the
+          # stack is parameterised with (S3_BUCKET_NAME); omitted entirely when
+          # no bucket is configured, mirroring the InstanceRole's
+          # DeploymentBucketRead policy (an empty bucket name would otherwise
+          # yield a malformed ARN).
+          - !If
+            - HasBucket
+            - Sid: S3BucketConfig
+              Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetBucketLocation
+                - s3:GetBucketPolicy
+                - s3:PutBucketPolicy
+              Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}"
+            - !Ref AWS::NoValue
+          # Object uploads from the publish helpers (`aws s3 cp`) plus the
+          # object-ACL flip that scripts/bucket-cidr-policy.sh performs under
+          # MAKE_PRIVATE=1 (`s3api put-object-acl --acl private`). Scoped to the
+          # deployment bucket's objects.
+          - !If
+            - HasBucket
+            - Sid: S3Objects
+              Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:PutObjectAcl
+                - s3:DeleteObject
+              Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}/*"
+            - !Ref AWS::NoValue
+          # M2: split the EC2 lifecycle so the operator can only touch instances
+          # it launched. RunInstances is gated by the Project request tag (the
+          # tag launch applies via --tag-specifications) plus an instance-type
+          # allowlist; TerminateInstances by the Project resource tag; CreateTags
+          # (required for tag-on-create) by the same request tag on instance
+          # ARNs. Describe* stay Resource:"*" WITHOUT conditions: EC2 Describe
+          # actions do not support resource-level permissions, so a ResourceTag
+          # condition would evaluate false and deny them, breaking terminate's
+          # instance lookup.
+          - Sid: Ec2Describe
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeSubnets
+            Resource: "*"
+          - Sid: Ec2RunInstances
+            Effect: Allow
+            Action:
+              - ec2:RunInstances
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "aws:RequestTag/Project": !Ref ProjectName
+              StringLike:
+                "ec2:InstanceType":
+                  - "g4dn.*"
+                  - "g5g.*"
+                  - "g6.*"
+          # Tag-on-create (--tag-specifications) requires ec2:CreateTags; scope
+          # it to instance ARNs, the Project request tag, and an aws:TagKeys
+          # allowlist so the operator can only apply the Project/Name keys launch
+          # sets -- not an arbitrary key that could later gate TerminateInstances.
+          #
+          # No aws:ResourceTag condition here: tag-on-create (RunInstances
+          # --tag-specifications) is authorized before the instance exists, so a
+          # ResourceTag condition would DENY every launch.
+          #
+          # Residual (cannot be closed in IAM): a standalone CreateTags API call
+          # and the implicit tag-on-create authorization are indistinguishable,
+          # so a determined operator could still call CreateTags on a foreign
+          # instance with Project=<name> (both keys are allowlisted) and then
+          # terminate it. The allowlist still blocks every other tag key.
+          - Sid: Ec2CreateTags
+            Effect: Allow
+            Action:
+              - ec2:CreateTags
+            Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+            Condition:
+              StringEquals:
+                "aws:RequestTag/Project": !Ref ProjectName
+              ForAllValues:StringEquals:
+                "aws:TagKeys":
+                  - Project
+                  - Name
+          - Sid: Ec2TerminateInstances
+            Effect: Allow
+            Action:
+              - ec2:TerminateInstances
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "aws:ResourceTag/Project": !Ref ProjectName
+          # launch/terminate read the stack outputs; the stack lifecycle itself
+          # is admin-run (deploy-infra), so only DescribeStacks is needed.
+          - Sid: CloudFormationReadStack
+            Effect: Allow
+            Action:
+              - cloudformation:DescribeStacks
+            Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/strimserver/*"
+          - Sid: SsmDlamiLookup
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
+              - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
+          - Sid: SelfKeyRotation
+            Effect: Allow
+            Action:
+              - iam:ListAccessKeys
+              - iam:CreateAccessKey
+              - iam:DeleteAccessKey
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:user/strimserver"
+          # launch passes the stack's instance role to run-instances; constrain
+          # it to EC2 so the role can never be handed to another principal that
+          # could escalate by assuming it.
+          - Sid: PassStrimserverRole
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/strimserver*"
+            Condition:
+              StringEquals:
+                "iam:PassedToService": ec2.amazonaws.com
+
   # Optional: experimental OpenSSH port (separate sshd, see tools/openssh).
   # Added as a standalone ingress rule so it is cleanly conditional and does
   # not collide with the inline rules on the security group above.

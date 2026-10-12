@@ -25,6 +25,19 @@
 # scripts/upload-artifact.sh) set no object ACL.
 set -euo pipefail
 
+# --- project-scoped operator profile (decision 11b) ---------------------------
+# The aws-profile contract (pin [strimserver], reject other identities) lives in
+# ONE shared library so no call site re-implements it. Find the repo root the
+# same way the Go tooling does: BUILD_WORKSPACE_DIRECTORY when `bazel run` set
+# it, otherwise walk up from this script's directory.
+_ss_root="${BUILD_WORKSPACE_DIRECTORY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+while [[ ! -f "$_ss_root/deploy/aws/lib/aws_profile.sh" && "$_ss_root" != "/" ]]; do
+  _ss_root="$(dirname "$_ss_root")"
+done
+. "$_ss_root/deploy/aws/lib/aws_profile.sh"
+unset _ss_root
+# ------------------------------------------------------------------------------
+
 # --- env-override reads (required; mirror scripts/upload-artifact.sh style) ---
 S3_BUCKET_NAME="${S3_BUCKET_NAME:?S3_BUCKET_NAME is required (e.g. your-bucket-name)}"
 ALLOWED_CIDR="${ALLOWED_CIDR:?ALLOWED_CIDR is required (your home IP CIDR)}"
@@ -72,14 +85,17 @@ if ! validate_ipv4_cidr "$allowed_cidr"; then
   exit 1
 fi
 
-# --- guard: valid AWS identity; capture the owner Account ID ---
-account_id="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" || {
-  echo "error: 'aws sts get-caller-identity' failed; run 'aws configure'." >&2
+# --- guard: the caller is the project-scoped strimserver operator -----------
+require_strimserver_identity || exit 1
+
+# --- capture the owner Account ID ---
+account_id="$(aws_strim sts get-caller-identity --query Account --output text 2>/dev/null)" || {
+  echo "error: 'aws sts get-caller-identity' failed; run deploy/aws/deploy-infra." >&2
   exit 1
 }
 
 # --- guard: the bucket must exist; resolve its region for the regional API call ---
-reported_region="$(aws s3api get-bucket-location --bucket "$S3_BUCKET_NAME" --output text 2>/dev/null)" || {
+reported_region="$(aws_strim s3api get-bucket-location --bucket "$S3_BUCKET_NAME" --output text 2>/dev/null)" || {
   echo "error: bucket '$S3_BUCKET_NAME' not found or not accessible (get-bucket-location failed)." >&2
   echo "       check the bucket name and that your credentials can read its location." >&2
   exit 1
@@ -148,7 +164,7 @@ cat >&2 <<'WARN'
 !!
 WARN
 
-put_command=(aws s3api put-bucket-policy --bucket "$S3_BUCKET_NAME" --policy "$policy" --region "$resolved_region")
+put_command=(aws_strim s3api put-bucket-policy --bucket "$S3_BUCKET_NAME" --policy "$policy" --region "$resolved_region")
 
 if [[ "$APPLY" != "1" ]]; then
   mode="dry-run"
@@ -163,7 +179,7 @@ else
     exit 1
   }
   echo "==> verifying applied policy still contains $allowed_cidr"
-  applied_policy="$(aws s3api get-bucket-policy --bucket "$S3_BUCKET_NAME" --query Policy --output text 2>/dev/null)" || {
+  applied_policy="$(aws_strim s3api get-bucket-policy --bucket "$S3_BUCKET_NAME" --query Policy --output text 2>/dev/null)" || {
     echo "error: aws s3api get-bucket-policy failed for $S3_BUCKET_NAME; cannot verify." >&2
     exit 1
   }
@@ -176,7 +192,7 @@ fi
 # --- optional enforcement: MAKE_PRIVATE=1 flips PRE-EXISTING objects to a private ACL ---
 if [[ "$MAKE_PRIVATE" == "1" ]]; then
   echo "==> MAKE_PRIVATE=1: listing objects to enforce private ACLs"
-  keys_text="$(aws s3api list-objects-v2 --bucket "$S3_BUCKET_NAME" --query 'Contents[].Key' --output text 2>/dev/null)" || {
+  keys_text="$(aws_strim s3api list-objects-v2 --bucket "$S3_BUCKET_NAME" --query 'Contents[].Key' --output text 2>/dev/null)" || {
     echo "error: aws s3api list-objects-v2 failed for $S3_BUCKET_NAME." >&2
     exit 1
   }
@@ -196,7 +212,7 @@ if [[ "$MAKE_PRIVATE" == "1" ]]; then
     echo "==> setting --acl private on $object_count object(s)"
     for key in "${object_keys[@]}"; do
       [[ -n "$key" ]] || continue
-      aws s3api put-object-acl --bucket "$S3_BUCKET_NAME" --key "$key" --acl private || {
+      aws_strim s3api put-object-acl --bucket "$S3_BUCKET_NAME" --key "$key" --acl private || {
         echo "error: aws s3api put-object-acl failed for '$key'." >&2
         exit 1
       }

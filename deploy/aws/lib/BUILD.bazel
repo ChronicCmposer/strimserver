@@ -1,0 +1,8 @@
+# The shared aws-profile contract sourced by every strimserver AWS tooling
+# script. Depending on it (e.g. "//deploy/aws/lib:aws_profile.sh") puts it in the
+# consumer's runfiles, so the source stanza that walks up to
+# deploy/aws/lib/aws_profile.sh resolves under `bazel run`/`bazel test` too.
+exports_files(
+    ["aws_profile.sh"],
+    visibility = ["//visibility:public"],
+)

@@ -87,6 +87,19 @@
 # =============================================================================
 set -euo pipefail
 
+# --- project-scoped operator profile (decision 11b) ---------------------------
+# The aws-profile contract (pin [strimserver], reject other identities) lives in
+# ONE shared library so no call site re-implements it. Find the repo root the
+# same way the Go tooling does: BUILD_WORKSPACE_DIRECTORY when `bazel run` set
+# it, otherwise walk up from this script's directory.
+_ss_root="${BUILD_WORKSPACE_DIRECTORY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+while [[ ! -f "$_ss_root/deploy/aws/lib/aws_profile.sh" && "$_ss_root" != "/" ]]; do
+  _ss_root="$(dirname "$_ss_root")"
+done
+. "$_ss_root/deploy/aws/lib/aws_profile.sh"
+unset _ss_root
+# ------------------------------------------------------------------------------
+
 # --- inputs (defaults mirror the build.sh pins) ---
 FFMPEG_VERSION="${FFMPEG_VERSION:-8.1}"
 FFMPEG_COMMIT="${FFMPEG_COMMIT:-1a748fe2cd43e3ead22fafb1b5b7d77f153898a8}"
@@ -420,7 +433,7 @@ elif [[ -z "$AWS_REGION" ]]; then
   # otherwise report a misleading "credentials not found" for an empty region.
   echo "error: AWS_REGION is required for upload (no default)." >&2
   exit 1
-elif ! aws --region "$AWS_REGION" sts get-caller-identity >/dev/null 2>&1; then
+elif ! require_strimserver_identity; then
   echo "!! AWS credentials not found (aws sts get-caller-identity failed)." >&2
   echo "!! Skipping upload; $artifact remains local." >&2
   echo "!! Re-run with valid credentials to publish, or upload manually:" >&2
@@ -428,7 +441,7 @@ elif ! aws --region "$AWS_REGION" sts get-caller-identity >/dev/null 2>&1; then
   upload_ok=0
 else
   [[ -n "${S3_BUCKET#s3://}" ]] || { echo "error: S3_BUCKET is required for upload (e.g. S3_BUCKET=s3://your-bucket-name)" >&2; exit 1; }
-  aws --region "$AWS_REGION" s3 cp "$artifact" "$S3_BUCKET/ffmpeg/$artifact"
+  aws_strim --region "$AWS_REGION" s3 cp "$artifact" "$S3_BUCKET/ffmpeg/$artifact"
   upload_ok=1
 fi
 

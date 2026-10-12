@@ -14,9 +14,31 @@ import subprocess
 import sys
 
 
+PROFILE = os.environ.get("AWS_PROFILE", "").strip() or "strimserver"
+
+
+def require_strimserver_identity():
+    """Fail loud unless the pinned profile authenticates as :user/strimserver.
+
+    Decision 11b: the project-scoped operator account is selected via the
+    [strimserver] profile; the ambient default identity is never trusted.
+    """
+    proc = subprocess.run(
+        ["aws", "--profile", PROFILE, "sts", "get-caller-identity",
+         "--query", "Arn", "--output", "text"],
+        text=True, capture_output=True)
+    arn = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not arn.endswith(":user/strimserver"):
+        sys.exit(
+            f"error: AWS profile '{PROFILE}' authenticated as "
+            f"'{arn or '<none>'}', expected ...:user/strimserver.\n"
+            "Run deploy/aws/deploy-infra (with admin credentials), then retry.")
+    return arn
+
+
 def aws(args):
     region = os.environ.get("AWS_REGION", "").strip()
-    cmd = ["aws"] + (["--region", region] if region else []) + args
+    cmd = ["aws", "--profile", PROFILE] + (["--region", region] if region else []) + args
     return subprocess.check_output(cmd, text=True)
 
 
@@ -57,6 +79,7 @@ def main():
                         help="skip the interactive confirmation prompt")
     args = parser.parse_args()
 
+    require_strimserver_identity()
     project = project_name()
     instance_ids = get_running_instances(project)
     if not instance_ids:

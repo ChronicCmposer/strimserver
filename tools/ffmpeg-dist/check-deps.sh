@@ -12,6 +12,19 @@
 # =============================================================================
 set -uo pipefail
 
+# --- project-scoped operator profile (decision 11b) ---------------------------
+# The aws-profile contract (pin [strimserver], reject other identities) lives in
+# ONE shared library so no call site re-implements it. Find the repo root the
+# same way the Go tooling does: BUILD_WORKSPACE_DIRECTORY when `bazel run` set
+# it, otherwise walk up from this script's directory.
+_ss_root="${BUILD_WORKSPACE_DIRECTORY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+while [[ ! -f "$_ss_root/deploy/aws/lib/aws_profile.sh" && "$_ss_root" != "/" ]]; do
+  _ss_root="$(dirname "$_ss_root")"
+done
+. "$_ss_root/deploy/aws/lib/aws_profile.sh"
+unset _ss_root
+# ------------------------------------------------------------------------------
+
 # --- dependency sweep (aggregate): every missing tool, one pass, fail at end --
 required_tools=(curl jq tar gzip sha256sum awk sed grep tr file strings uname mktemp nproc sudo aws)
 missing=()
@@ -36,15 +49,10 @@ if [[ -z "${SKIP_UPLOAD:-}" ]]; then
     echo "error: AWS_REGION is required for upload (no default)." >&2
     echo "       Set it (e.g. AWS_REGION=us-east-1) or run with SKIP_UPLOAD=1." >&2
   fi
-  # A missing aws binary is already reported by the sweep; verify credentials
-  # only when aws exists and AWS_REGION is set.
+  # A missing aws binary is already reported by the sweep; verify the pinned
+  # strimserver identity only when aws exists and AWS_REGION is set.
   if command -v aws >/dev/null 2>&1 && [[ -n "${AWS_REGION:-}" ]]; then
-    if ! aws --region "$AWS_REGION" sts get-caller-identity >/dev/null 2>&1; then
-      failed=1
-      echo "error: AWS credentials not found (aws --region $AWS_REGION sts get-caller-identity failed)." >&2
-      echo "       Run 'aws configure' or export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY," >&2
-      echo "       or run with SKIP_UPLOAD=1 to skip the upload gates." >&2
-    fi
+    require_strimserver_identity || failed=1
   fi
   # Make's '?=' default (s3://<bucket-name>) is not exported to recipe shells,
   # so unset here == user never set it == the placeholder.

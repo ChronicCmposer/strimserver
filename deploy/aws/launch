@@ -198,9 +198,31 @@ def select_ami(cfg):
     return DEFAULT_AMI_ID
 
 
+PROFILE = os.environ.get("AWS_PROFILE", "").strip() or "strimserver"
+
+
+def require_strimserver_identity():
+    """Fail loud unless the pinned profile authenticates as :user/strimserver.
+
+    Decision 11b: the project-scoped operator account is selected via the
+    [strimserver] profile; the ambient default identity is never trusted.
+    """
+    proc = subprocess.run(
+        ["aws", "--profile", PROFILE, "sts", "get-caller-identity",
+         "--query", "Arn", "--output", "text"],
+        text=True, capture_output=True)
+    arn = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not arn.endswith(":user/strimserver"):
+        sys.exit(
+            f"error: AWS profile '{PROFILE}' authenticated as "
+            f"'{arn or '<none>'}', expected ...:user/strimserver.\n"
+            "Run deploy/aws/deploy-infra (with admin credentials), then retry.")
+    return arn
+
+
 def aws(args, capture=True):
     region = os.environ.get("AWS_REGION", "").strip()
-    cmd = ["aws"] + (["--region", region] if region else []) + args
+    cmd = ["aws", "--profile", PROFILE] + (["--region", region] if region else []) + args
     return subprocess.run(cmd, text=True, check=True, capture_output=capture)
 
 
@@ -721,6 +743,7 @@ if __name__ == "__main__":
 
     cfg = Config.from_env(instance_type=args.type)
     default_deployment_env(cfg)
+    require_strimserver_identity()
     try:
         launch_instance(cfg, use_spot=not args.no_spot, wait=args.wait)
     except subprocess.CalledProcessError as e:
