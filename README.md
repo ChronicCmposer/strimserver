@@ -898,20 +898,20 @@ deploy/aws/deploy-infra
 then rotates the `strimserver` IAM service account's access key into the local
 `[strimserver]` profile in `~/.aws/credentials` (never `[default]`), backing the
 file up first with a timestamp and asserting the fresh key authenticates as
-`arn:...:user/strimserver`. The stack attaches the project-scoped
+`arn:...:user/strimserver`. The stack attaches a single project-scoped
 `strimserver-operator` policy to that account: S3 read/write and object-ACL on
-the deployment bucket, EC2 describe/run/terminate plus `CreateTags`,
-`cloudformation:DescribeStacks` on `stack/strimserver/*` (read-only), the DLAMI
-SSM parameters, self access-key rotation, and `iam:PassRole` on
-`role/strimserver*` conditioned on `iam:PassedToService` =
-`ec2.amazonaws.com` — no account-wide IAM administration. That policy reads the
-stack but does not manage it; the stack lifecycle itself is admin-run by
-`deploy-infra`. The account also carries the read-only
-`strimserver-ssm-dlami-readonly` policy the check-deps AMI resolver reads. All
-strimserver AWS tooling pins `--profile
+the deployment bucket, EC2 describe (including `ec2:DescribeImages` for the
+check-deps DLAMI metadata resolver)/run/terminate plus `CreateTags`,
+`cloudformation:DescribeStacks` on `stack/strimserver/*` (read-only — the stack
+lifecycle itself is admin-run by `deploy-infra`), `ssm:GetParameter` on the
+x86_64 and arm64 DLAMI parameters (so the check-deps AMI resolver can float the
+arm64 AMI), self access-key rotation, and `iam:PassRole` on `role/strimserver*`
+conditioned on `iam:PassedToService` = `ec2.amazonaws.com` — no account-wide IAM
+administration. All strimserver AWS tooling pins `--profile
 "${AWS_PROFILE:-strimserver}"` and refuses to run unless the caller is
-`...:user/strimserver` (the identity guard). It also writes `[profile strimserver]` with the resolved
-`region` into `~/.aws/config` (backed up first, every other section preserved).
+`...:user/strimserver` (the identity guard). It also writes
+`[profile strimserver]` with the resolved `region` into `~/.aws/config` (backed
+up first, every other section preserved).
 
 Then configure `.env` and launch. `launch` resolves the
 security group, instance profile, and (when the stack

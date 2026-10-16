@@ -2,9 +2,10 @@
 # operator_template_test.sh -- structural assertions on
 # deploy/aws/strimserver-infra.yaml (decision 11b).
 #
-# The durable stack must KEEP the read-only service user + DLAMI policy and ADD
-# the project-scoped operator managed policy `strimserver-operator` (attached to
-# the same user) covering only the inventoried AWS surface. This test enshrines
+# The durable stack must KEEP the read-only service user and carry a SINGLE
+# project-scoped operator managed policy `strimserver-operator` (attached to that
+# user) covering only the inventoried AWS surface, including the DLAMI read
+# grants the check-deps resolver uses. This test enshrines
 # LEAST PRIVILEGE: the operator policy must grant exactly the actions the
 # strimserver tooling actually calls (derived from the `aws` CLI calls in
 # deploy/aws/launch, deploy/aws/terminate and the publish/bucket scripts), must
@@ -45,7 +46,6 @@ extract_resource() {
 }
 
 service_user="$(extract_resource StrimserverServiceUser)"
-dlami_policy="$(extract_resource StrimserverDlamiReadPolicy)"
 operator_policy="$(extract_resource StrimserverOperatorPolicy)"
 
 # extract_statement <Sid>: the `- Sid: <Sid>` block within the operator policy,
@@ -63,10 +63,16 @@ contains() { grep -Fq -- "$2" <<<"$1"; }
 # --- preserved resources ------------------------------------------------------
 check "service user exists (AWS::IAM::User, UserName strimserver)" \
   bash -c 'grep -Fq "StrimserverServiceUser:" "$1" && grep -Fq "Type: AWS::IAM::User" <<<"$2" && grep -Fq "UserName: strimserver" <<<"$2"' _ "$template" "$service_user"
-check "DLAMI read policy preserved (strimserver-ssm-dlami-readonly)" \
-  bash -c 'grep -Fq "ManagedPolicyName: strimserver-ssm-dlami-readonly" <<<"$1"' _ "$dlami_policy"
-check "DLAMI read policy still covers both x86_64 + arm64 SSM params" \
-  bash -c 'grep -Fq "deeplearning/ami/x86_64/" <<<"$1" && grep -Fq "deeplearning/ami/arm64/" <<<"$1"' _ "$dlami_policy"
+check "standalone DLAMI read policy name is gone (strimserver-ssm-dlami-readonly)" \
+  bash -c '! grep -Fq "strimserver-ssm-dlami-readonly" "$1"' _ "$template"
+check "standalone DLAMI read policy resource is gone (StrimserverDlamiReadPolicy)" \
+  bash -c '! grep -Fq "StrimserverDlamiReadPolicy:" "$1"' _ "$template"
+check "operator policy covers both x86_64 + arm64 DLAMI SSM params" \
+  bash -c 'grep -Fq "deeplearning/ami/x86_64/" <<<"$1" && grep -Fq "deeplearning/ami/arm64/" <<<"$1"' _ "$operator_policy"
+check "operator policy grants ec2:DescribeImages (check-deps DLAMI metadata)" \
+  bash -c 'grep -Fq "ec2:DescribeImages" <<<"$1"' _ "$operator_policy"
+check "exactly ONE managed policy attaches to the user (Users: appears once)" \
+  bash -c '[ "$(grep -c "Users:" "$1")" -eq 1 ]' _ "$template"
 
 # --- operator policy identity -------------------------------------------------
 check "operator policy exists (AWS::IAM::ManagedPolicy)" \
@@ -75,6 +81,17 @@ check "operator policy has fixed name strimserver-operator" \
   bash -c 'grep -Fq "ManagedPolicyName: strimserver-operator" <<<"$1"' _ "$operator_policy"
 check "operator policy attached to the service user" \
   bash -c 'grep -Fq "StrimserverServiceUser" <<<"$1"' _ "$operator_policy"
+
+# Regression: the IAM CreatePolicy Description regex
+# [\p{L}\p{M}\p{Z}\p{S}\p{N}\p{P}]* rejects control chars, and a YAML folded
+# scalar `>` (clip chomping) appends a trailing newline -> CloudFormation fails
+# with "Value at 'description' failed to satisfy constraint". Use strip
+# chomping `>-` (matching the movienight operator policy) so the parsed value
+# has no trailing newline.
+check "operator policy Description uses strip chomping '>-' (no trailing newline)" \
+  bash -c 'grep -Eq "^[[:space:]]*Description: >-[[:space:]]*$" <<<"$1"' _ "$operator_policy"
+check "operator policy has no bare clip-chomping '>' Description" \
+  bash -c '! grep -Eq "^[[:space:]]*Description: >[[:space:]]*$" <<<"$1"' _ "$operator_policy"
 
 # --- required (minimal) surface: exactly what the tooling calls --------------
 # Derived from the `aws` CLI calls in deploy/aws/launch, deploy/aws/terminate,
@@ -89,6 +106,7 @@ for action in \
   s3:ListBucket s3:GetBucketLocation s3:GetBucketPolicy s3:PutBucketPolicy \
   s3:GetObject s3:PutObject s3:PutObjectAcl s3:DeleteObject \
   ec2:DescribeInstances ec2:DescribeSecurityGroups ec2:DescribeSubnets \
+  ec2:DescribeImages \
   ec2:RunInstances ec2:TerminateInstances ec2:CreateTags \
   cloudformation:DescribeStacks \
   ssm:GetParameter \
@@ -122,7 +140,9 @@ check "no account-wide s3:PutObjectAcl (Describe Ec2 statement is clean)" \
 # The former single Ec2LaunchTerminate statement granted RunInstances /
 # TerminateInstances / CreateTags on Resource "*" with NO conditions, so the
 # operator could terminate ANY instance in the account. Mirror movienight:
-#   - Run    : gated by aws:RequestTag/Project + an ec2:InstanceType allowlist
+#   - Run    : gated by aws:RequestTag/Project + an ec2:InstanceType allowlist,
+#     scoped to instance/* (the referenced key-pair/SG/subnet/image/volume/ENI
+#     get their own unconditioned RunInstancesDependencies grant)
 #   - Term   : gated by aws:ResourceTag/Project
 #   - Tags   : gated by aws:RequestTag/Project, scoped to instance ARNs
 #   - Describe* : MUST stay WITHOUT conditions. EC2 Describe actions do not
@@ -131,6 +151,7 @@ check "no account-wide s3:PutObjectAcl (Describe Ec2 statement is clean)" \
 #     "the Describe actions do not support resource-level permissions, so you
 #     must specify them in a separate statement without conditions."
 run_stmt="$(extract_statement Ec2RunInstances)"
+run_deps_stmt="$(extract_statement Ec2RunInstancesDependencies)"
 terminate_stmt="$(extract_statement Ec2TerminateInstances)"
 tags_stmt="$(extract_statement Ec2CreateTags)"
 describe_stmt="$(extract_statement Ec2Describe)"
@@ -143,6 +164,20 @@ check "RunInstances condition uses the ProjectName parameter" \
   bash -c 'grep -Fq "!Ref ProjectName" <<<"$1"' _ "$run_stmt"
 check "RunInstances restricts ec2:InstanceType to the documented GPU families" \
   bash -c 'grep -Fq "ec2:InstanceType" <<<"$1" && grep -Fq "g4dn.*" <<<"$1" && grep -Fq "g6.*" <<<"$1" && grep -Fq "g5g.*" <<<"$1"' _ "$run_stmt"
+# RunInstances is authorized against EVERY resource the request references, but
+# only the instance carries the RequestTag/InstanceType gates (launch tags the
+# instance alone). The statement must therefore be scoped to instance/* rather
+# than Resource:"*", with the referenced resources in a separate statement.
+check "RunInstances instance statement is scoped to instance/* (not Resource \"*\")" \
+  bash -c 'grep -Fq "instance/*" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$run_stmt"
+check "RunInstancesDependencies statement exists and grants ec2:RunInstances" \
+  bash -c 'grep -Fq "ec2:RunInstances" <<<"$1"' _ "$run_deps_stmt"
+check "RunInstancesDependencies covers volume/ENI/key-pair/SG/subnet" \
+  bash -c 'for r in "volume/*" "network-interface/*" "key-pair/*" "security-group/*" "subnet/*"; do grep -Fq "$r" <<<"$1" || exit 1; done' _ "$run_deps_stmt"
+check "RunInstancesDependencies covers the empty-account public image ARN" \
+  bash -c 'grep -Fq "arn:aws:ec2:\${AWS::Region}::image/*" <<<"$1"' _ "$run_deps_stmt"
+check "RunInstancesDependencies is UNCONDITIONED (no RequestTag / InstanceType)" \
+  bash -c '! grep -Fq "aws:RequestTag" <<<"$1" && ! grep -Fq "ec2:InstanceType" <<<"$1"' _ "$run_deps_stmt"
 
 check "TerminateInstances statement exists" \
   bash -c 'grep -Fq "ec2:TerminateInstances" <<<"$1"' _ "$terminate_stmt"

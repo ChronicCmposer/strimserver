@@ -88,18 +88,19 @@ request) for arm64, and diffs `-print-env-example`, `-print-ts-types`, and
 
 `deploy/aws/strimserver-infra.yaml` provisions the durable pieces once: the
 security group, IAM instance profile, optional VPC/subnet/networking, and the
-`strimserver` IAM service account. The account carries two managed policies: the
-narrow `strimserver-ssm-dlami-readonly` policy (`ssm:GetParameter` on **both**
-the x86_64 and arm64 DLAMI SSM parameters, so the check-deps AMI resolver can
-float the arm64 AMI in any region where it exists) and the project-scoped
-`strimserver-operator` policy, which grants only the inventoried operator
-surface: S3 read/write and object-ACL on the deployment bucket, EC2
-describe/run/terminate plus `CreateTags`, `cloudformation:DescribeStacks` on
-`stack/strimserver/*` (read-only — the stack lifecycle is admin-run), the DLAMI
-SSM parameters, self access-key rotation, and `iam:PassRole` on
-`role/strimserver*` conditioned on `iam:PassedToService` =
-`ec2.amazonaws.com`. It carries no account-wide IAM administration and no
-DNS-zone access.
+`strimserver` IAM service account. A single project-scoped `strimserver-operator`
+policy is attached to that account — a single managed policy because
+CloudFormation cannot reliably manage two `AWS::IAM::ManagedPolicy` resources
+attached to the same user. It grants only the inventoried operator surface: S3
+read/write and object-ACL on the deployment bucket, EC2 describe (including
+`DescribeImages` for the check-deps DLAMI metadata resolver)/run/terminate plus
+`CreateTags`, `cloudformation:DescribeStacks` on `stack/strimserver/*`
+(read-only — the stack lifecycle is admin-run), both DLAMI SSM parameters
+(`ssm:GetParameter` on the x86_64 and arm64 families, so the check-deps AMI
+resolver can float the arm64 AMI in any region where it exists), self access-key
+rotation, and `iam:PassRole` on `role/strimserver*` conditioned on
+`iam:PassedToService` = `ec2.amazonaws.com`. It carries no account-wide IAM
+administration and no DNS-zone access.
 
 Deploy (or update) the stack with admin credentials. `deploy-infra` is
 admin-run: it deploys the stack (the operator policy cannot manage the stack —

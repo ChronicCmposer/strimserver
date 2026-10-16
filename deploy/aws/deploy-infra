@@ -138,15 +138,41 @@ for key in $OLD_KEYS; do
 done
 
 # --- 5. Assert the minted key really is the strimserver operator --------------
-ASSERTED_ARN="$(aws --profile "$PROFILE" sts get-caller-identity \
-  --query Arn --output text 2>/dev/null || true)"
+# Capture stderr so a credential/config failure reports its actual cause instead
+# of a bare '<none>'. IAM is eventually consistent: a freshly minted access key
+# can return InvalidClientTokenId for a few seconds before it is usable, so retry
+# with a short backoff before failing.
+assert_err="$(mktemp)"
+trap 'rm -f "$assert_err"' EXIT
+assert_attempts=10
+assert_sleep=2
+ASSERTED_ARN=""
+for attempt in $(seq 1 "$assert_attempts"); do
+  if ASSERTED_ARN="$(aws --profile "$PROFILE" sts get-caller-identity \
+        --query Arn --output text 2>"$assert_err")"; then
+    break
+  fi
+  ASSERTED_ARN=""
+  if [ "$attempt" -lt "$assert_attempts" ]; then
+    log "identity not yet valid (attempt $attempt/$assert_attempts); retrying in ${assert_sleep}s"
+    sleep "$assert_sleep"
+  fi
+done
+
 case "$ASSERTED_ARN" in
-  *:user/strimserver) ;;
+  *:user/strimserver)
+    log "verified [$PROFILE] authenticates as $ASSERTED_ARN"
+    ;;
+  "")
+    echo "deploy-infra: ERROR: the new [$PROFILE] profile did not authenticate as ...:user/strimserver" >&2
+    echo "deploy-infra: aws sts get-caller-identity failed with:" >&2
+    sed 's/^/deploy-infra:   /' "$assert_err" >&2
+    exit 1
+    ;;
   *)
-    echo "deploy-infra: ERROR: the new [$PROFILE] profile did not authenticate as ...:user/strimserver (got '${ASSERTED_ARN:-<none>}')" >&2
+    echo "deploy-infra: ERROR: the new [$PROFILE] profile authenticated as '$ASSERTED_ARN', not ...:user/strimserver" >&2
     exit 1
     ;;
 esac
-log "verified [$PROFILE] authenticates as $ASSERTED_ARN"
 
 log "done. The [$PROFILE] profile is written to $CREDENTIALS_FILE."

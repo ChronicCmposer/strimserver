@@ -300,42 +300,20 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
-  StrimserverDlamiReadPolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      ManagedPolicyName: strimserver-ssm-dlami-readonly
-      # Public SSM parameters carry an empty account segment in their ARN,
-      # hence the `::` before `parameter` (AWS's documented public ARN shape).
-      # Both DLAMI SSM families are readable: the x86_64 one (the amd64 path's
-      # SSM float, used when DLAMI_SSM_PARAM is set) and the arm64 one (the
-      # aarch64 path's default float for g5g.2xlarge launches). The pinned
-      # x86_64 AMI id itself is not an SSM parameter, so the pin needs no ARN.
-      Users:
-        - !Ref StrimserverServiceUser
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Action: ssm:GetParameter
-            Resource:
-              - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
-              - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
-          - Effect: Allow
-            Action: ec2:DescribeImages
-            Resource: "*"
-
   # Project-scoped operator policy (decision 11b): the service user is also the
   # project operator, so the operator surface its own tooling (deploy/aws/launch,
   # deploy/aws/terminate, and the scripts/tools publish helpers) actually calls
   # is attached here. Least privilege by construction: the durable stack itself
   # is deployed by deploy/aws/deploy-infra with ADMIN credentials, so no
-  # account-wide IAM administration is granted. The narrow DlamiReadPolicy above
-  # keeps serving the check-deps AMI resolver.
+  # account-wide IAM administration is granted. This is the SINGLE managed policy
+  # attached to the user (CloudFormation cannot reliably manage two
+  # AWS::IAM::ManagedPolicy resources attached to one user) and it also serves the
+  # check-deps DLAMI resolver via the SsmDlamiLookup + Ec2Describe grants below.
   StrimserverOperatorPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: strimserver-operator
-      Description: >
+      Description: >-
         Least-privilege operator surface for the strimserver account: publish
         artifacts to the deployment bucket, read the strimserver stack outputs,
         resolve the DLAMI, launch/terminate tagged GPU instances, hand the
@@ -381,26 +359,48 @@ Resources:
               Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}/*"
             - !Ref AWS::NoValue
           # M2: split the EC2 lifecycle so the operator can only touch instances
-          # it launched. RunInstances is gated by the Project request tag (the
-          # tag launch applies via --tag-specifications) plus an instance-type
-          # allowlist; TerminateInstances by the Project resource tag; CreateTags
-          # (required for tag-on-create) by the same request tag on instance
-          # ARNs. Describe* stay Resource:"*" WITHOUT conditions: EC2 Describe
-          # actions do not support resource-level permissions, so a ResourceTag
-          # condition would evaluate false and deny them, breaking terminate's
-          # instance lookup.
+          # it launched. RunInstances is itself split in two: the instance
+          # statement is gated by the Project request tag (the tag launch applies
+          # via --tag-specifications) plus an instance-type allowlist, while the
+          # referenced dependencies (volume/ENI/key-pair/SG/subnet/image) carry
+          # their own unconditioned grant; TerminateInstances by the Project
+          # resource tag; CreateTags (required for tag-on-create) by the same
+          # request tag on instance ARNs. Describe* stay Resource:"*" WITHOUT
+          # conditions: EC2 Describe actions do not support resource-level
+          # permissions, so a ResourceTag condition would evaluate false and deny
+          # them, breaking terminate's instance lookup.
           - Sid: Ec2Describe
             Effect: Allow
             Action:
               - ec2:DescribeInstances
               - ec2:DescribeSecurityGroups
               - ec2:DescribeSubnets
+              # ec2:DescribeImages also backs the check-deps DLAMI metadata
+              # resolver, which reads Images[0].[Name,CreationDate].
+              - ec2:DescribeImages
             Resource: "*"
+          # ec2:RunInstances is authorized against EVERY resource the request
+          # references (the instance, its root volume, the network interface, the
+          # key pair, the security group, the subnet and the AMI), not just the
+          # instance. The RequestTag/Project condition can only hold for the
+          # instance: launch applies --tag-specifications to the instance alone,
+          # so a single tag-gated statement on Resource:"*" fails authorization on
+          # the key-pair (and on the SG/subnet/image/volume/ENI). The grant is
+          # therefore split: the instance keeps the RequestTag + instance-type
+          # gates, and the referenced resources get their own unconditioned grant.
+          #
+          # The dependency grant is intentionally unconditioned: ec2:InstanceType
+          # is absent from the authorization context for the referenced resources,
+          # so any StringLike gate there would never match and would leave
+          # ec2:RunInstances denied. Safety comes from the gated instance
+          # statement, which IAM still requires for the instance ARN. Public AMIs
+          # live in the empty-account ARN namespace, so image/* must NOT carry
+          # ${AWS::AccountId}.
           - Sid: Ec2RunInstances
             Effect: Allow
             Action:
               - ec2:RunInstances
-            Resource: "*"
+            Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
             Condition:
               StringEquals:
                 "aws:RequestTag/Project": !Ref ProjectName
@@ -409,6 +409,17 @@ Resources:
                   - "g4dn.*"
                   - "g5g.*"
                   - "g6.*"
+          - Sid: Ec2RunInstancesDependencies
+            Effect: Allow
+            Action:
+              - ec2:RunInstances
+            Resource:
+              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
+              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*"
+              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:key-pair/*"
+              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*"
+              - !Sub "arn:aws:ec2:${AWS::Region}::image/*"
           # Tag-on-create (--tag-specifications) requires ec2:CreateTags; scope
           # it to instance ARNs, the Project request tag, and an aws:TagKeys
           # allowlist so the operator can only apply the Project/Name keys launch
