@@ -8,9 +8,9 @@ import (
 	"strimserver-check-deps/common"
 )
 
-// curl releases are tagged "curl-8_22_0": a curl- prefix and underscores where
+// curl releases are tagged "curl-8_23_0": a curl- prefix and underscores where
 // the version has dots. normalizeCurlTag strips the prefix and turns the
-// underscores into dots so the result compares against the "8.22.0" the
+// underscores into dots so the result compares against the "8.23.0" the
 // extractor recorded.
 func normalizeCurlTag(tag string) (string, error) {
 	version := strings.TrimPrefix(tag, "curl-")

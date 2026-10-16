@@ -44,8 +44,8 @@ func newResolversTestFetcher(ts *httptest.Server) *common.Fetcher {
 }
 
 // TestNormalizeCurlTag pins curl's tag convention: releases are named
-// "curl-8_22_0", so the prefix is stripped and the underscores become dots to
-// match the "8.22.0" the extractor records. A tag with no version is an error,
+// "curl-8_23_0", so the prefix is stripped and the underscores become dots to
+// match the "8.23.0" the extractor records. A tag with no version is an error,
 // never a silent empty.
 func TestNormalizeCurlTag(t *testing.T) {
 	cases := []struct {
@@ -53,8 +53,8 @@ func TestNormalizeCurlTag(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{"curl-8_22_0", "8.22.0", false},
-		{"8_22_0", "8.22.0", false},
+		{"curl-8_23_0", "8.23.0", false},
+		{"8_23_0", "8.23.0", false},
 		{"curl-", "", true},
 		{"", "", true},
 	}
@@ -79,13 +79,13 @@ func TestNormalizeCurlTag(t *testing.T) {
 // TestParseCurlRelease pins the pure bytes->version parser against an inline
 // release fixture.
 func TestParseCurlRelease(t *testing.T) {
-	const release = `{"tag_name": "curl-8_22_0", "published_at": "2026-09-01T00:00:00Z"}`
+	const release = `{"tag_name": "curl-8_23_0", "published_at": "2026-09-01T00:00:00Z"}`
 	vi, err := parseCurlRelease([]byte(release))
 	if err != nil {
 		t.Fatalf("parseCurlRelease: %v", err)
 	}
-	if vi.Version != "8.22.0" {
-		t.Errorf("parseCurlRelease version = %q, want 8.22.0", vi.Version)
+	if vi.Version != "8.23.0" {
+		t.Errorf("parseCurlRelease version = %q, want 8.23.0", vi.Version)
 	}
 	if vi.Date != "2026-09-01T00:00:00Z" {
 		t.Errorf("parseCurlRelease date = %q, want 2026-09-01T00:00:00Z", vi.Date)
@@ -99,24 +99,24 @@ func TestParseCurlRelease(t *testing.T) {
 
 // TestCurlResolveHostRewrite exercises the network wrapper: the hardcoded
 // api.github.com URL is redirected to the fixture and the curl- tag is
-// normalized to 8.22.0.
+// normalized to 8.23.0.
 func TestCurlResolveHostRewrite(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/curl/curl/releases/latest" {
 			http.NotFound(w, r)
 			return
 		}
-		w.Write([]byte(`{"tag_name":"curl-8_22_0","published_at":"2026-09-01T00:00:00Z"}`))
+		w.Write([]byte(`{"tag_name":"curl-8_23_0","published_at":"2026-09-01T00:00:00Z"}`))
 	}))
 	defer ts.Close()
 
 	f := newResolversTestFetcher(ts)
-	vi := CurlResolve(f)(common.Dependency{Category: common.CategoryToolBinary, Name: "curl", Version: "8.22.0"})
+	vi := CurlResolve(f)(common.Dependency{Category: common.CategoryToolBinary, Name: "curl", Version: "8.23.0"})
 	if vi.Err != nil {
 		t.Fatalf("CurlResolve: %v", vi.Err)
 	}
-	if vi.Version != "8.22.0" {
-		t.Errorf("CurlResolve version = %q, want 8.22.0", vi.Version)
+	if vi.Version != "8.23.0" {
+		t.Errorf("CurlResolve version = %q, want 8.23.0", vi.Version)
 	}
 }
 
@@ -128,7 +128,7 @@ func TestResolveGitHubTaggedFallsBackToTags(t *testing.T) {
 		case "/repos/curl/curl/releases/latest":
 			http.NotFound(w, r)
 		case "/repos/curl/curl/tags":
-			w.Write([]byte(`[{"name":"curl-8_22_0"},{"name":"curl-8_21_0"}]`))
+			w.Write([]byte(`[{"name":"curl-8_23_0"},{"name":"curl-8_21_0"}]`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -140,7 +140,7 @@ func TestResolveGitHubTaggedFallsBackToTags(t *testing.T) {
 	if vi.Err != nil {
 		t.Fatalf("CurlResolve fallback: %v", vi.Err)
 	}
-	if vi.Version != "8.22.0" {
-		t.Errorf("CurlResolve fallback version = %q, want 8.22.0", vi.Version)
+	if vi.Version != "8.23.0" {
+		t.Errorf("CurlResolve fallback version = %q, want 8.23.0", vi.Version)
 	}
 }

@@ -203,7 +203,7 @@ func TestExtractVendoredPinsRealRepo(t *testing.T) {
 		"yyjson":         "0.13.0",
 		"libwebsockets":  "5.0.0",
 		"protobuf-c":     "1.5.2",
-		"curl":           "8.22.0",
+		"curl":           "8.23.0",
 		"mbedtls":        "3.6.7",
 		"c-ares":         "1.34.8",
 		"containerd-api": "1.12.0",

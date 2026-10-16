@@ -66,6 +66,12 @@
     "until": "2027-03-31"
   },
   {
+    "id": "go/github.com/containerd/log",
+    "file": "core/controller/go.mod",
+    "reason": "containerd/log is an indirect logging shim pinned by containerd/v2's go.mod requirements; it has no direct call sites in the repo and is resolved via MVS, not independently editable. Wait for a containerd release that coordinates it.",
+    "until": "2027-03-31"
+  },
+  {
     "id": "go/github.com/Microsoft/hcsshim",
     "file": "core/controller/go.mod",
     "reason": "hcsshim is an indirect Windows-container runtime dep pinned by containerd/v2 v2.3.5's go.mod requirements; v0.15.0-rc.4 is not yet coordinated by a containerd release. Resolved via MVS, not independently editable. Wait for a containerd release.",

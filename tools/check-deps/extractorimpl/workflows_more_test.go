@@ -15,7 +15,7 @@ func TestParseWorkflowMappingKeyUses(t *testing.T) {
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Upload the dependency report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deps-check
 `
@@ -26,7 +26,7 @@ func TestParseWorkflowMappingKeyUses(t *testing.T) {
 	if got := findDep(t, deps, common.CategoryCIAction, "actions/checkout"); got == nil || got.Version != "v7.0.1" {
 		t.Errorf("list-item uses not extracted: %v", got)
 	}
-	if got := findDep(t, deps, common.CategoryCIAction, "actions/upload-artifact"); got == nil || got.Version != "v4" {
+	if got := findDep(t, deps, common.CategoryCIAction, "actions/upload-artifact"); got == nil || got.Version != "v7" {
 		t.Errorf("mapping-key uses not extracted: %v", got)
 	}
 }

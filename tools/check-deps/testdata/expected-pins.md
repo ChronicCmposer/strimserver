@@ -81,8 +81,8 @@ from the **actual working tree** (no invented values).
 | MODULE.bazel:http_archive | `MODULE.bazel` | protoc_linux_x86_64:sha256 | 121f6c7afe1d4d0e3ea6aab9432038599250134cbf4474cb1167d2c7decd4278 | integrity | no |
 | MODULE.bazel:http_archive | `MODULE.bazel` | containerd_api | 1.12.0 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | containerd_api:sha256 | 6978892e8ab09b36f5c09311f856ae07411cd9efd76a5213d125a733f08753fa | integrity | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | curl | 8.22.0 | version | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | curl:sha256 | d54dd598bf05927a726deb38df31c6a255ba83ff1de57c5d1464dac3ed8f44a1 | integrity | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | curl | 8.23.0 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | curl:sha256 | e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49 | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | mbedtls | 3.6.7 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | mbedtls:sha256 | a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6 | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | cares | 1.34.8 | version | yes |
@@ -199,8 +199,8 @@ from the **actual working tree** (no invented values).
 | third_party/pin.json | `third_party/cares/pin.json` | c-ares:sha256 | c222b6d681096f9444d2c4863d2c1174019e27cacca0a4a5c114d36dd7d7bf78 | integrity | no |
 | third_party/pin.json | `third_party/containerd-api/pin.json` | containerd-api | 1.12.0 | version | no |
 | third_party/pin.json | `third_party/containerd-api/pin.json` | containerd-api:sha256 | 6978892e8ab09b36f5c09311f856ae07411cd9efd76a5213d125a733f08753fa | integrity | no |
-| third_party/pin.json | `third_party/curl/pin.json` | curl | 8.22.0 | version | no |
-| third_party/pin.json | `third_party/curl/pin.json` | curl:sha256 | d54dd598bf05927a726deb38df31c6a255ba83ff1de57c5d1464dac3ed8f44a1 | integrity | no |
+| third_party/pin.json | `third_party/curl/pin.json` | curl | 8.23.0 | version | no |
+| third_party/pin.json | `third_party/curl/pin.json` | curl:sha256 | e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49 | integrity | no |
 | third_party/pin.json | `third_party/libwebsockets/pin.json` | libwebsockets | 5.0.0 | version | no |
 | third_party/pin.json | `third_party/libwebsockets/pin.json` | libwebsockets:sha256 | f853c6582101cfcee3a5a9e28ae92ab19d9735c5f31f0bb2e9794b5106123962 | integrity | no |
 | third_party/pin.json | `third_party/mbedtls/pin.json` | mbedtls | 3.6.7 | version | no |

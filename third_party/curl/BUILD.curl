@@ -1,12 +1,13 @@
-# BUILD file for the @curl external repo (curl 8.22.0 source, pinned in
+# BUILD file for the @curl external repo (curl 8.23.0 source, pinned in
 # MODULE.bazel). Builds libcurl as a static library with mbedTLS as its TLS
 # backend, sized for the strim-ddns HTTPS GET (//tools/ddns).
 #
 # The archive does not ship a generated curl_config.h (autotools produces
 # one at configure time), so every HAVE_* / RECV_* / SEND_* / SELECT_* knob
-# is passed as a compile-time define. The option set below is the exact,
-# presubmit-tested copts list of the BCR curl 8.22.0 module (which pairs
-# this curl version with mbedtls 3.6.7), plus USE_MBEDTLS + HTTP_ONLY:
+# is passed as a compile-time define. The option set below is the BCR curl
+# 8.22.0 module's presubmit-tested overlay copts base (mbedtls 3.6.7 backend),
+# plus the single HAVE_FCHMOD knob curl 8.23.0 adds (verified against the
+# 8.23.0 release's lib/curl_config.h.in), plus USE_MBEDTLS + HTTP_ONLY:
 #   - USE_MBEDTLS selects the mbedTLS TLS backend (deps = @mbedtls);
 #   - HTTP_ONLY trims the protocol surface to HTTP/HTTPS (curl_setup.h
 #     turns it into CURL_DISABLE_* for every other protocol);
@@ -28,10 +29,10 @@ package(
 )
 
 # Same compile-time option set curl's autotools configure produces for a
-# static Linux build of 8.22.0, copied from the BCR curl 8.22.0 module's
-# proven overlay BUILD (the archive's lib/ sources have no curl_config.h;
-# these defines ARE the config). Both target arches are LP64, so the
-# SIZEOF_* = 8 defines cover amd64 and arm64 alike.
+# static Linux build of 8.23.0: the BCR curl 8.22.0 overlay base plus the one
+# knob 8.23.0 adds (HAVE_FCHMOD). The archive's lib/ sources have no
+# curl_config.h; these defines ARE the config. Both target arches are LP64,
+# so the SIZEOF_* = 8 defines cover amd64 and arm64 alike.
 _CURL_COPTS = [
     "-DCURL_DISABLE_LDAP=1",
     "-DENABLE_IPV6=1",
@@ -51,6 +52,7 @@ _CURL_COPTS = [
     "-DHAVE_DLFCN_H=1",
     "-DHAVE_ENGINE_LOAD_BUILTIN_ENGINES=1",
     "-DHAVE_ERRNO_H=1",
+    "-DHAVE_FCHMOD=1",
     "-DHAVE_FCNTL=1",
     "-DHAVE_FCNTL_H=1",
     "-DHAVE_FCNTL_O_NONBLOCK=1",

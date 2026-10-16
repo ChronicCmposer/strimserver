@@ -55,7 +55,7 @@ jobs:
         run: bazel run //tools/check-deps:check-deps -- --json --ignore --strict=false > deps-report.json 2> deps-console.log
 
       - name: Upload the dependency report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deps-check
           path: |
