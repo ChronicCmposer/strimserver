@@ -205,7 +205,7 @@ func TestExtractVendoredPinsRealRepo(t *testing.T) {
 		"protobuf-c":     "1.5.2",
 		"curl":           "8.23.0",
 		"mbedtls":        "3.6.7",
-		"c-ares":         "1.34.8",
+		"c-ares":         "1.34.9",
 		"containerd-api": "1.12.0",
 	}
 	got := make(map[string]string, len(deps))

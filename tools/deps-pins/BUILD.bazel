@@ -15,7 +15,10 @@ load("@rules_go//go:def.bzl", "go_test")
 # `//tools/deps-pins:all` runs it.
 go_test(
     name = "pins_test",
-    srcs = ["pins_test.go"],
+    srcs = [
+        "ffmpeg_dist_test.go",
+        "pins_test.go",
+    ],
     tags = [
         "external",
         "no-sandbox",

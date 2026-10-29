@@ -40,7 +40,7 @@
 #   NV_CODEC_HEADERS_TAG default n13.0.19.1
 #   NV_CODEC_HEADERS_COMMIT default 88fee5c37318c991a8762d423530f91681e32e3a
 #   CUDA_MANIFEST_URL    default .../redistrib_13.2.2.json
-#   DEBIAN_SNAPSHOT      default 20261005T000000Z
+#   DEBIAN_SNAPSHOT      default 20261027T000000Z
 #   CUDA_COMPONENTS      default "cuda_nvcc cuda_cudart cuda_crt libnvvm"
 #   GENCODE              default arch=compute_75,code=sm_75
 #   NPROC                host nproc (env-overridable)
@@ -107,7 +107,9 @@ FFMPEG_ARCH="${FFMPEG_ARCH:-amd64}"
 NV_CODEC_HEADERS_TAG="${NV_CODEC_HEADERS_TAG:-n13.0.19.1}"
 NV_CODEC_HEADERS_COMMIT="${NV_CODEC_HEADERS_COMMIT:-88fee5c37318c991a8762d423530f91681e32e3a}"
 CUDA_MANIFEST_URL="${CUDA_MANIFEST_URL:-https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json}"
-DEBIAN_SNAPSHOT="${DEBIAN_SNAPSHOT:-20261005T000000Z}"
+# This snapshot is both the artifact-reproducibility pin for the published
+# @ffmpeg_dist (deb20261027) and the source of the runtime image debs in MODULE.bazel.
+DEBIAN_SNAPSHOT="${DEBIAN_SNAPSHOT:-20261027T000000Z}"
 CUDA_COMPONENTS="${CUDA_COMPONENTS:-cuda_nvcc cuda_cudart cuda_crt libnvvm}"
 GENCODE="${GENCODE:-arch=compute_75,code=sm_75}"
 NPROC="${NPROC:-$(nproc)}"

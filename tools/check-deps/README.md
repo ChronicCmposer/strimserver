@@ -41,7 +41,7 @@ unknown** in the report (and fails a `--strict` run).
 | Shell scripts under `tools/`, `scripts/`, `deploy/` | Version / `*_SHA256` / `*_COMMIT` pins in the pinned build scripts (qemu, OpenSSH, FFmpeg, CUDA, GNU m4, fish, distlib, the DLAMI id, the S3 upload checksum, …). Hashes, epochs, and commits are **integrity** pins. A discovered script that carries a pin but has no extractor spec **fails closed** as an extraction unknown. | `script-pin`, `bzl-pin`, `ami`, `tool-binary`, `runtime` |
 | `third_party/<lib>/pin.json` | One vendored-library pin per `third_party` subdirectory. A missing or malformed pin is an extraction unknown. | `tool-binary` |
 | Stream Deck manifest `tools/streamdeck-plugin/…/manifest.json.tpl` | The plugin's `SDKVersion`, `Software.MinimumVersion`, `Nodejs.Version`, and per-OS `MinimumVersion` requirements. | `toolchain` |
-| Repo `.env` | `PROJECT_GO_VERSION_TAG` (normalized `go1.27.2` → `1.27.2`) and `GOROOT_BOOTSTRAP`. | `toolchain` |
+| Repo `.env` | `PROJECT_GO_VERSION_TAG` (normalized `go1.27.3` → `1.27.3`) and `GOROOT_BOOTSTRAP`. | `toolchain` |
 | Root `.bazelrc` | The registered toolchain and platform labels: `--platforms`, `--extra_toolchains`, and `register_toolchains(...)` arguments. These become **integrity** pins — a label names a toolchain graph, not a version. A missing `.bazelrc` is optional and yields nothing. | `toolchain` |
 | Native toolchains | `go list -u` (Go module graph) and corepack `pnpm outdated` (each discovered node sub-repo) resolve current + latest directly. A missing toolchain is an `unknown`, never a crash. Disabled by `--native-tools=false`; an `--offline` run reports their pins as `skipped` instead. | `go`, `npm` |
 

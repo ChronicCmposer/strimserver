@@ -201,17 +201,19 @@ gracefully on shutdown.
 | Component | Version / source | Where used |
 | --- | --- | --- |
 | NVIDIA CUDA redistributables | `13.2.2` (`cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm`; per-component sha256 pinned via the `redistrib_13.2.2.json` manifest) | Compile the FFmpeg artifact in `tools/ffmpeg-dist` (producer-only; not needed for a normal package build) |
-| Prebuilt FFmpeg artifact | `ffmpeg-8.1-deb20260824-cuda13.2.2-sm75-1a748fe.tar.gz` (sha256 pinned in `MODULE.bazel` via `s3_http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
+| Prebuilt FFmpeg artifact | `ffmpeg-8.1-deb20261027-cuda13.2.2-sm75-1a748fe.tar.gz` (sha256 pinned in `MODULE.bazel` via `s3_http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
 | [FFmpeg](https://github.com/FFmpeg/FFmpeg) | `8.1` at commit `1a748fe` (tip of `release/8.1`, 2026-08-28; pinned and baked into the prebuilt artifact) | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
 | [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.1` at commit `88fee5c` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
 | FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
-| Intermediate Debian image | `debian:trixie` snapshot `20260824T082821Z` | Base for the artifact producer (`tools/ffmpeg-dist`: pulled via the Docker Hub registry API into a rootfs by `publish.sh`); the same snapshot supplies the scratch-image runtime libs via the `@trixie` rules_distroless apt extension |
-| Go toolchain | `go 1.27.2` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
-| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.21.0`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
+| Runtime Debian snapshot | `20261027T000000Z` | The single Debian snapshot for both the prebuilt FFmpeg artifact (`DEBIAN_SNAPSHOT` in `tools/ffmpeg-dist/{build,publish}.sh`) and the scratch-image runtime debs (`@trixie` rules_distroless apt extension in `MODULE.bazel`); see FFmpeg reproducibility below |
+| Go toolchain | `go 1.27.3` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
+| [Bazel](https://bazel.build) | `9.3.1` (pinned in `.bazelversion`; launched via Bazelisk) | Build system for every target; downloads the pinned Go, Node.js, and other toolchains |
+| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.21.3`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
 | `libfdk-aac` | `libfdk-aac2t64` (Debian trixie package from `@trixie`) | AAC encode support through FFmpeg (`libfdk-aac.so.2` in the ffmpeg image) |
 | busybox / `gettext-base` (`envsubst`) | Debian trixie packages from `@trixie` | Shell + tools for the scratch ffmpeg runtime image |
 | iperf3 | `3.19.1-r1` `.apk` (`@iperf3_apk` http_file) on alpine `3.23.3` (digest-pinned `@alpine_linux_amd64` oci.pull) | Optional bandwidth-test image |
-| Node.js | `24.21.0` (from `tools/streamdeck-plugin/.nvmrc` via rules_nodejs `node_version_from_nvmrc`) | Stream Deck plugin build |
+| Node.js | `26.13.0` (from `tools/streamdeck-plugin/.nvmrc` via rules_nodejs `node_version_from_nvmrc`) | Stream Deck plugin build |
+| [pnpm](https://pnpm.io) | `12.16.1` (from `tools/streamdeck-plugin/package.json` `packageManager`) | Stream Deck plugin dependency install and build |
 
 > Note: the FFmpeg build currently compiles for `sm_75`
 > (Turing, e.g. the T4 in `g4dn` instances). To run the
@@ -300,9 +302,11 @@ fallback clip (`@offline_segment_dist`, via `s3_http_file`).
 When **both** `STRIMSERVER_S3_BUCKET` and
 `STRIMSERVER_S3_REGION` are set, the S3 URL is used as the
 primary download source; when either is unset, the rules fall
-back to the GitHub Release mirror URLs (the same blobs, hosted
-on GitHub), so a plain `make package` / `bazel build //:package`
-works with no AWS configuration:
+back to `mirror_urls`. The offline-segment mirror is live, but
+the FFmpeg artifact mirror is intentionally unpublished pending
+the licensing review described under *FFmpeg reproducibility and
+artifact pipeline*, so any build that fetches `@ffmpeg_dist`
+needs both variables:
 
 ```bash
 export STRIMSERVER_S3_BUCKET="your-bucket-name"   # no s3:// prefix
@@ -439,7 +443,7 @@ value; there is no baked-in default (`SKIP_UPLOAD=1` rebuilds
 and checksums without either variable).
 
 `publish.sh` needs no docker daemon. It pulls
-the pinned `debian:trixie-20260824-slim` base image via the
+the artifact pin's `debian:trixie-20261027-slim` base image via the
 Docker Hub **registry API** (plain `curl` + `jq`), extracts it
 into a rootfs, copies in the shared build script
 `tools/ffmpeg-dist/build.sh`, and runs it inside a chroot. On
@@ -500,7 +504,7 @@ qemu. An already-extracted rootfs can be reused by setting
 `FFMPEG_DIST_ROOTFS`. `publish.sh` then extracts the stripped
 `ffmpeg` binary plus its `BUILD-INFO.txt` provenance record, writes
 `ffmpeg-<ffver>-deb<date>-cuda<ver>-sm<N>-<shortsha>.tar.gz`
-(e.g. `ffmpeg-8.1-deb20260824-cuda13.2.2-sm75-1a748fe.tar.gz`),
+(e.g. `ffmpeg-8.1-deb20261027-cuda13.2.2-sm75-1a748fe.tar.gz`),
 uploads it to the `s3://<bucket>/ffmpeg/` prefix with no ACL
 modification (objects get the bucket's default private ACL; the
 IP-scoped HTTPS-only bucket policy from `scripts/bucket-cidr-policy.sh` is
@@ -509,6 +513,32 @@ paste into `MODULE.bazel`. `BUILD-INFO.txt` records the FFmpeg commit,
 nv-codec-headers tag, Debian snapshot, CUDA component sha256s,
 `-gencode` target, the full `configure` line, and `readelf -d`
 output, so the blob always stays reproducible.
+
+The date embedded in the artifact name is derived from
+`DEBIAN_SNAPSHOT` (`20261027T000000Z`), so the name stays tied to the
+published, reproducible `@ffmpeg_dist` tarball. One snapshot governs
+both surfaces: the prebuilt artifact, through `DEBIAN_SNAPSHOT` in
+`tools/ffmpeg-dist/build.sh` and `tools/ffmpeg-dist/publish.sh`, and
+the runtime image debs, through the `@trixie` rules_distroless apt
+extension in `MODULE.bazel`. There is no split pin to reconcile: a
+snapshot bump moves the artifact name, both `DEBIAN_SNAPSHOT`
+defaults, the apt URI, and this README together.
+
+The GitHub Release mirror assets for these artifacts are intentionally
+unpublished pending a redistribution/licensing review. Builds therefore
+fetch from the private, IP-scoped S3 bucket and require
+`STRIMSERVER_S3_BUCKET` and `STRIMSERVER_S3_REGION`; setting only one of
+the two is an error (see `tools/bazel/s3_download.bzl`). `mirror_urls`
+still records the future release URLs so the gap stays explicit rather
+than silent.
+
+The `//tools/deps-pins` guard (`TestFFmpegDistCoherence`) enforces one
+contract over five locations: the `ffmpeg_dist` artifact name in
+`MODULE.bazel`, the `DEBIAN_SNAPSHOT` defaults in
+`tools/ffmpeg-dist/build.sh` and `tools/ffmpeg-dist/publish.sh`, the
+`@trixie` apt URI in `MODULE.bazel`, and this README. A snapshot bump
+therefore cannot land half-applied, and a divergence at any of the five
+fails the test.
 
 A weekly canary (`.github/workflows/ffmpeg-reproducibility.yml`)
 rebuilds the artifact on an ordinary GitHub runner and compares

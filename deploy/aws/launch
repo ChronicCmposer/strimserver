@@ -64,16 +64,17 @@ import urllib.request
 from dataclasses import dataclass
 
 # Pinned x86_64 Amazon Linux 2023 GPU DLAMI ("Deep Learning Base OSS Nvidia
-# Driver GPU AMI") for us-east-2: ships the NVIDIA driver, containerd, and the
-# NVIDIA container toolkit (CDI) strimserver needs. Pinned (not the /latest SSM
-# float) so the containerd runtime is deterministic across launches.
+# Driver GPU AMI (Amazon Linux 2023) 20261027") for us-east-2: ships the NVIDIA
+# driver, containerd, and the NVIDIA container toolkit (CDI) strimserver needs.
+# Pinned (not the /latest SSM float) so the containerd runtime is deterministic
+# across launches.
 #
 # NOTE: value is the base-oss-nvidia-driver GPU DLAMI (AL2023 x86_64) for
-# us-east-2, resolved via SSM on 2026-10-09 (the current date). Confirm it with
+# us-east-2, resolved via SSM on 2026-10-29 (the current date). Confirm it with
 #   aws ssm get-parameter --region us-east-2 --name "<DEFAULT_DLAMI_SSM_PARAM>"
 # if it ever needs re-resolving; tools/check-deps (ami/dlami, T1) flags when it
 # goes stale. Setting AMI_ID (or DLAMI_SSM_PARAM) overrides the pin.
-DEFAULT_AMI_ID = "ami-0b1794752c0d4fa6c"
+DEFAULT_AMI_ID = "ami-0b8bfb88d687f3529"
 
 # Explicit override only: the /latest SSM parameter for the same DLAMI family.
 # Setting DLAMI_SSM_PARAM re-enables floating resolution instead of the pin.

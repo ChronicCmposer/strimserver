@@ -33,6 +33,9 @@ jobs:
       - name: Run check-deps tests
         run: bazel test //tools/check-deps:all
 
+      - name: Run pin oracle
+        run: bazel test //tools/deps-pins:all
+
   package-build:
     runs-on: ubuntu-latest
     steps:

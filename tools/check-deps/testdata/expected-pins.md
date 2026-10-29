@@ -69,9 +69,9 @@ from the **actual working tree** (no invented values).
 
 | source | file | name | version | kind | tracked_now |
 |---|---|---|---|---|---|
-| MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_amd64 | 2.14.0 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_amd64 | 2.15.0 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_amd64:sha256 | ab90aeb7b066f92a33415b638a50fe5344bbb75a0d32ad30cc248d88f81032ab | integrity | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_arm64 | 2.14.0 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_arm64 | 2.15.0 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_arm64:sha256 | ee7ec5f3453d15ddf106fae5a4d6c71737712348a979d1fe9cd52ec7ea299bae | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | protobuf_c | 1.5.2 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | protobuf_c:sha256 | e2c86271873a79c92b58fef7ebf8de1aa0df4738347a8bd5d4e65a80a16d0d24 | integrity | yes |
@@ -85,11 +85,11 @@ from the **actual working tree** (no invented values).
 | MODULE.bazel:http_archive | `MODULE.bazel` | curl:sha256 | e3de77cfa6367083c776a26647fc9f633b538c06c3baa73d931a252ac8f72b49 | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | mbedtls | 3.6.7 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | mbedtls:sha256 | a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6 | integrity | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | cares | 1.34.8 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | cares | 1.34.9 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | cares:sha256 | c222b6d681096f9444d2c4863d2c1174019e27cacca0a4a5c114d36dd7d7bf78 | integrity | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist | 1.21.2 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist | 1.21.3 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist:sha256 | 121be6e00397e473a95d83c75f4fcd3819a6af3b0e1a50889cba43ab4fab6a27 | integrity | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist_arm64 | 1.21.2 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist_arm64 | 1.21.3 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist_arm64:sha256 | 180a235374a548d9133cdd5e20f5dbd8b01317be1c86e0d7e66df585dc42ed6f | integrity | yes |
 | MODULE.bazel:http_file | `MODULE.bazel` | iperf3_apk | 3.19.1-r1 | version | yes |
 | MODULE.bazel:http_file | `MODULE.bazel` | iperf3_apk:sha256 | c8fa78ac30761d2dc47d5db7b9056a3b5cfdd565af173a4be1e4449a6b7fd664 | integrity | yes |
@@ -98,20 +98,20 @@ from the **actual working tree** (no invented values).
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | platforms | 1.1.0 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | bazel_skylib | 1.9.2 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_shell | 0.8.0 | version | yes |
-| MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_cc | 0.2.26 | version | yes |
+| MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_cc | 0.2.27 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | hermetic_cc_toolchain | 4.3.0 | version | yes |
-| MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_go | 0.64.2 | version | yes |
+| MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_go | 0.65.0 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | gazelle | 0.54.0 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | aspect_bazel_lib | 2.22.5 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_distroless | 0.9.4 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_oci | 2.3.0 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_pkg | 1.3.0 | version | yes |
-| MODULE.bazel:bazel_dep | `MODULE.bazel` | aspect_rules_js | 3.5.1 | version | yes |
+| MODULE.bazel:bazel_dep | `MODULE.bazel` | aspect_rules_js | 3.5.2 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | aspect_rules_ts | 3.10.1 | version | yes |
-| MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_nodejs | 6.7.6 | version | yes |
+| MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_nodejs | 6.7.7 | version | yes |
 | MODULE.bazel:single_version_override | `MODULE.bazel` | aspect_bazel_lib | 2.22.5 | version | yes |
 | MODULE.bazel:single_version_override | `MODULE.bazel` | bazel_lib | 3.7.2 | version | yes |
-| MODULE.bazel:apt.sources_list | `MODULE.bazel` | debian | 20261005T000000Z | version | yes |
+| MODULE.bazel:apt.sources_list | `MODULE.bazel` | debian | 20261027T000000Z | version | yes |
 | MODULE.bazel:apt.install | `MODULE.bazel` | dash | — | version | no |
 | MODULE.bazel:apt.install | `MODULE.bazel` | busybox-static | — | version | no |
 | MODULE.bazel:apt.install | `MODULE.bazel` | gettext-base | — | version | no |
@@ -141,9 +141,9 @@ from the **actual working tree** (no invented values).
 | MODULE.bazel:amd64_sysroot | `MODULE.bazel` | amd64_sysroot:linux_libc | 6.12.38-1cross1 | version | no |
 | MODULE.bazel:amd64_sysroot | `MODULE.bazel` | amd64_sysroot:linux_libc:sha256 | da463ddd3ee96b37c33f16da99c47b03b4e514888d3d853e73253ee73bd0d7d8 | integrity | no |
 | MODULE.bazel:s3_http_archive | `MODULE.bazel` | ffmpeg_dist | 8.1 | version | no |
-| MODULE.bazel:s3_http_archive | `MODULE.bazel` | ffmpeg_dist:sha256 | 44021ca11d9c5a3f1921b57150dfe68562cb291658afbef40b231a3554a82120 | integrity | no |
+| MODULE.bazel:s3_http_archive | `MODULE.bazel` | ffmpeg_dist:sha256 | 344a51efeb498c5e84acd23e8854c3dbac132923049420b76bf7224648685c4f | integrity | no |
 | MODULE.bazel:s3_http_archive | `MODULE.bazel` | ffmpeg_dist_arm64 | 8.1 | version | no |
-| MODULE.bazel:s3_http_archive | `MODULE.bazel` | ffmpeg_dist_arm64:sha256 | ba285eba5bd32fa2095a59dcf5c16822c02c964889de58478569ba93e34c910c | integrity | no |
+| MODULE.bazel:s3_http_archive | `MODULE.bazel` | ffmpeg_dist_arm64:sha256 | 7edafaca50c275e8328a7f244ee541ad65aa3c9cbcce417d417e0af67e662796 | integrity | no |
 | MODULE.bazel:s3_http_file | `MODULE.bazel` | offline_segment_dist | — | version | no |
 | MODULE.bazel:s3_http_file | `MODULE.bazel` | offline_segment_dist:sha256 | 05ff15e41a61e9478b005135699a130e21a7efab21b6a1bcae1aa30bd3182f7d | integrity | no |
 | MODULE.bazel:s3_http_file | `MODULE.bazel` | openssh_dist | — | version | no |
@@ -151,8 +151,8 @@ from the **actual working tree** (no invented values).
 | MODULE.bazel:s3_http_file | `MODULE.bazel` | openssh_dist_arm64 | — | version | no |
 | MODULE.bazel:s3_http_file | `MODULE.bazel` | openssh_dist_arm64:sha256 | 613a9a8366beb76b8299b5d077e611b7acc7ed46deecab73b9ccf5ea56e1423d | integrity | no |
 | MODULE.bazel:qemu_x86_64 repo rule | `MODULE.bazel` | qemu_x86_64_patched | 11.0.4 | version | yes |
-| tools/qemu/build-qemu.sh | `tools/qemu/build-qemu.sh` | distlib | 0.4.3 | version | yes |
-| tools/qemu/build-qemu.sh | `tools/qemu/build-qemu.sh` | distlib-0.4.3-py2.py3-none-any.whl:sha256 | 4b0ce306c966eb73bc3a7b6abad017c556dadd92c44701562cd528ac7fde4d5b | integrity | no |
+| tools/qemu/build-qemu.sh | `tools/qemu/build-qemu.sh` | distlib | 0.4.4 | version | yes |
+| tools/qemu/build-qemu.sh | `tools/qemu/build-qemu.sh` | distlib-0.4.4-py2.py3-none-any.whl:sha256 | cf09d55b1e85a89576b036aeb71550bfd68320f3f21761ca329eadadad918638 | integrity | no |
 | tools/qemu/build-qemu.sh | `tools/qemu/build-qemu.sh` | qemu | 8.2.2 | version | no |
 | tools/qemu/build-qemu.sh | `tools/qemu/build-qemu.sh` | qemu-8.2.2.tar.xz:sha256 | 847346c1b82c1a54b2c38f6edbd85549edeb17430b7d4d3da12620e2962bc4f3 | integrity | no |
 | tools/qemu/build-qemu.sh | `tools/qemu/build-qemu.sh` | qemu-9.2.4.tar.xz:sha256 | f3cc1c4eabfdb288218ac3e33763dbe9e276d8bc890b867a2335d58de2ddd39a | integrity | no |
@@ -173,20 +173,20 @@ from the **actual working tree** (no invented values).
 | tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | nv-codec-headers | n13.0.19.1 | version | yes |
 | tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | NV_CODEC_HEADERS_COMMIT | 88fee5c37318c991a8762d423530f91681e32e3a | version | no |
 | tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | CUDA | 13.2.2 | version | yes |
-| tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | debian | 20261005T000000Z | version | yes |
+| tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | debian | 20261027T000000Z | version | yes |
 | tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | GENCODE | arch=compute_75,code=sm_75 | version | no |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | ffmpeg | 8.1 | version | yes |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | FFMPEG_COMMIT | 1a748fe2cd43e3ead22fafb1b5b7d77f153898a8 | version | no |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | nv-codec-headers | n13.0.19.1 | version | yes |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | NV_CODEC_HEADERS_COMMIT | 88fee5c37318c991a8762d423530f91681e32e3a | version | no |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | CUDA | 13.2.2 | version | yes |
-| tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | debian | 20261005T000000Z | version | yes |
+| tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | debian | 20261027T000000Z | version | yes |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | GENCODE | arch=compute_75,code=sm_75 | version | no |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | qemu | 8.2.2 | version | yes |
-| scripts/upload-artifact.sh | `scripts/upload-artifact.sh` | EXPECTED_SHA256 | 2df93667c7e12f2666be244772a41c653a02cab74880e685623770bd9c86ac34 | integrity | no |
+| scripts/upload-artifact.sh | `scripts/upload-artifact.sh` | EXPECTED_SHA256 | 344a51efeb498c5e84acd23e8854c3dbac132923049420b76bf7224648685c4f | integrity | no |
 | deploy/aws/fish-deploy.sh | `deploy/aws/fish-deploy.sh` | fish | 4.9.3 | version | no |
 | deploy/aws/fish-deploy.sh | `deploy/aws/fish-deploy.sh` | fish-4.9.3-linux-x86_64.tar.xz:sha256 | 8f643d10ad1abb0ef7072764c01ceb5cf61b2d373fda400cf60f0bad69b7e095 | integrity | no |
-| deploy/aws/launch | `deploy/aws/launch` | dlami | ami-0b1794752c0d4fa6c | version | yes |
+| deploy/aws/launch | `deploy/aws/launch` | dlami | ami-0b8bfb88d687f3529 | version | yes |
 | deploy/aws/launch | `deploy/aws/launch` | DEPLOYMENT_TAR_GO_ARM64 | strimserver-deployment-go-arm64.tar | version | no |
 | deploy/aws/launch | `deploy/aws/launch` | RELEASE_DOWNLOAD_URL | https://github.com/ChronicCmposer/strimserver/releases/latest/download/{asset} | version | no |
 | third_party/pin.json | `third_party/libmicrohttpd/pin.json` | libmicrohttpd | 1.0.10 | version | no |
@@ -195,7 +195,7 @@ from the **actual working tree** (no invented values).
 | third_party/pin.json | `third_party/wslay/pin.json` | wslay:sha256 | 90ce68c6dfd614722d44fbb14563a3f6dacc68b548b20ae382ac4f4952c55268 | integrity | no |
 | third_party/pin.json | `third_party/yyjson/pin.json` | yyjson | 0.13.0 | version | no |
 | third_party/pin.json | `third_party/yyjson/pin.json` | yyjson:sha256 | 34e0f62a2bc11ab20d601e8ca1cc2b2079503aa45119a19133d89d19b94a0fae | integrity | no |
-| third_party/pin.json | `third_party/cares/pin.json` | c-ares | 1.34.8 | version | no |
+| third_party/pin.json | `third_party/cares/pin.json` | c-ares | 1.34.9 | version | no |
 | third_party/pin.json | `third_party/cares/pin.json` | c-ares:sha256 | c222b6d681096f9444d2c4863d2c1174019e27cacca0a4a5c114d36dd7d7bf78 | integrity | no |
 | third_party/pin.json | `third_party/containerd-api/pin.json` | containerd-api | 1.12.0 | version | no |
 | third_party/pin.json | `third_party/containerd-api/pin.json` | containerd-api:sha256 | 6978892e8ab09b36f5c09311f856ae07411cd9efd76a5213d125a733f08753fa | integrity | no |
@@ -207,7 +207,7 @@ from the **actual working tree** (no invented values).
 | third_party/pin.json | `third_party/mbedtls/pin.json` | mbedtls:sha256 | a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6 | integrity | no |
 | third_party/pin.json | `third_party/protobuf-c/pin.json` | protobuf-c | 1.5.2 | version | no |
 | third_party/pin.json | `third_party/protobuf-c/pin.json` | protobuf-c:sha256 | e2c86271873a79c92b58fef7ebf8de1aa0df4738347a8bd5d4e65a80a16d0d24 | integrity | no |
-| .env | `.env` | PROJECT_GO_VERSION_TAG | go1.27.2 | version | no |
+| .env | `.env` | PROJECT_GO_VERSION_TAG | go1.27.3 | version | no |
 | .env | `.env` | S3_BUCKET_NAME | strimserver.cvbn.cc | version | no |
 | .env | `.env` | DEPLOYMENT_SRC | s3://strimserver.cvbn.cc/${STRIMSERVER_C_X86_64_DEPLOYMENT_FILE_NAME} | version | no |
 | .env | `.env` | STRIMSERVER_GO_X86_64_DEPLOYMENT_FILE_NAME | strimserver-deployment-go-amd64.tar | version | no |
@@ -225,17 +225,17 @@ from the **actual working tree** (no invented values).
 | streamdeck manifest | `tools/streamdeck-plugin/com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl` | Software.MinimumVersion | 6.6 | version | no |
 | streamdeck manifest | `tools/streamdeck-plugin/com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl` | Nodejs.Version | 24 | version | no |
 | streamdeck manifest | `tools/streamdeck-plugin/com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl` | OS.mac.MinimumVersion | 13 | version | no |
-| package.json | `tools/streamdeck-plugin/package.json` | packageManager | pnpm@9.15.9 | version | yes |
-| package.json | `tools/streamdeck-plugin/package.json` | engines.node | >=24 | version | no |
+| package.json | `tools/streamdeck-plugin/package.json` | packageManager | pnpm@12.16.1 | version | yes |
+| package.json | `tools/streamdeck-plugin/package.json` | engines.node | >=26 | version | no |
 | package.json | `tools/streamdeck-plugin/package.json` | dependencies:@elgato/streamdeck | ^2 | version | yes |
 | package.json | `tools/streamdeck-plugin/package.json` | devDependencies:@rollup/plugin-commonjs | 29.0.3 | version | yes |
 | package.json | `tools/streamdeck-plugin/package.json` | devDependencies:@rollup/plugin-node-resolve | ^16 | version | yes |
 | package.json | `tools/streamdeck-plugin/package.json` | devDependencies:@rollup/plugin-typescript | ^12 | version | yes |
-| package.json | `tools/streamdeck-plugin/package.json` | devDependencies:@types/node | 24.13.3 | version | yes |
+| package.json | `tools/streamdeck-plugin/package.json` | devDependencies:@types/node | 26.6.6 | version | yes |
 | package.json | `tools/streamdeck-plugin/package.json` | devDependencies:rollup | 4.64.5 | version | yes |
 | package.json | `tools/streamdeck-plugin/package.json` | devDependencies:tslib | ^2 | version | yes |
 | package.json | `tools/streamdeck-plugin/package.json` | devDependencies:typescript | 6.0.3 | version | yes |
-| CI with inputs | `.github/workflows/deps-check.yml` | actions/setup-go:go-version | 1.27.2 | version | no |
+| CI with inputs | `.github/workflows/deps-check.yml` | actions/setup-go:go-version | 1.27.3 | version | no |
 | CI with inputs | `.github/workflows/deps-check.yml` | actions/setup-node:node-version-file | tools/streamdeck-plugin/.nvmrc | version | no |
 | CI with inputs | `.github/workflows/deps-check.yml` | actions/setup-node:cache | pnpm | version | no |
 | CI with inputs | `.github/workflows/deps-check.yml` | actions/setup-node:cache-dependency-path | tools/streamdeck-plugin/pnpm-lock.yaml | version | no |
@@ -249,9 +249,9 @@ from the **actual working tree** (no invented values).
 | CI uses | `.github/workflows/deps-check.yml` | actions/setup-node | v7.0.0 | version | yes |
 | CI uses | `.github/workflows/deps-check.yml` | bazelbuild/setup-bazelisk | v3 | version | yes |
 | CI uses | `.github/workflows/controller-ci.yml` | bazelbuild/setup-bazelisk | v3 | version | yes |
-| toolchain | `.bazelversion` | Bazel | 9.3.0 | version | yes |
-| toolchain | `tools/streamdeck-plugin/.nvmrc` | Node | 24.21.0 | version | yes |
-| toolchain | `core/controller/go.mod` | Go | 1.27.2 | version | yes |
+| toolchain | `.bazelversion` | Bazel | 9.3.1 | version | yes |
+| toolchain | `tools/streamdeck-plugin/.nvmrc` | Node | 26.13.0 | version | yes |
+| toolchain | `core/controller/go.mod` | Go | 1.27.3 | version | yes |
 | core/controller/go.mod require | `core/controller/go.mod` | github.com/coder/websocket | v1.8.15 | version | yes |
 | core/controller/go.mod require | `core/controller/go.mod` | github.com/containerd/containerd/api | v1.11.1 | version | yes |
 | core/controller/go.mod require | `core/controller/go.mod` | github.com/containerd/containerd/v2 | v2.3.6 | version | yes |

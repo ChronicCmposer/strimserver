@@ -3,14 +3,14 @@
   "version": "0.0.0",
   "description": "Stream Deck control for the strimserver controller",
   "type": "module",
-  "packageManager": "pnpm@9.15.9",
+  "packageManager": "pnpm@12.16.1",
   "scripts": {
     "build": "rollup -c",
     "test": "node --test src/client/version.test.ts",
     "watch": "rollup -c -w"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "dependencies": {
     "@elgato/streamdeck": "^2"
@@ -19,12 +19,12 @@
     "@rollup/plugin-commonjs": "29.0.3",
     "@rollup/plugin-node-resolve": "^16",
     "@rollup/plugin-typescript": "^12",
-    "@types/node": "24.13.3",
+    "@types/node": "26.6.6",
     "rollup": "4.64.5",
     "tslib": "^2",
     "typescript": "6.0.3"
   },
   "pnpm": {
-    "onlyBuiltDependencies": []
+    "allowBuilds": {}
   }
 }

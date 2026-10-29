@@ -1,4 +1,4 @@
-# BUILD file for the @cares external repo (c-ares 1.34.8 source, pinned in
+# BUILD file for the @cares external repo (c-ares 1.34.9 source, pinned in
 # MODULE.bazel). Builds the whole library as a static cc_library.
 #
 # The release tarball ships no generated ares_config.h (CMake/autotools

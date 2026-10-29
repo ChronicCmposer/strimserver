@@ -48,58 +48,70 @@ var pins = []pin{
 	{
 		name:    "rules_go",
 		file:    "MODULE.bazel",
-		needles: []string{`bazel_dep(name = "rules_go", version = "0.64.2")`},
+		needles: []string{`bazel_dep(name = "rules_go", version = "0.65.0")`},
 	},
 	{
 		name:    "aspect_rules_js",
 		file:    "MODULE.bazel",
-		needles: []string{`bazel_dep(name = "aspect_rules_js", version = "3.5.1")`},
+		needles: []string{`bazel_dep(name = "aspect_rules_js", version = "3.5.2")`},
 	},
 	{
 		name:    "rules_cc",
 		file:    "MODULE.bazel",
-		needles: []string{`bazel_dep(name = "rules_cc", version = "0.2.26")`},
+		needles: []string{`bazel_dep(name = "rules_cc", version = "0.2.27")`},
 	},
 	{
 		name:    "rules_nodejs",
 		file:    "MODULE.bazel",
-		needles: []string{`bazel_dep(name = "rules_nodejs", version = "6.7.6")`},
+		needles: []string{`bazel_dep(name = "rules_nodejs", version = "6.7.7")`},
 	},
 	{
 		name: "golangci-lint-artifacts",
 		file: "MODULE.bazel",
 		needles: []string{
-			"golangci-lint-2.14.0-linux-amd64.tar.gz",
-			"golangci-lint-2.14.0-linux-arm64.tar.gz",
+			"golangci-lint-2.15.0-linux-amd64.tar.gz",
+			"golangci-lint-2.15.0-linux-arm64.tar.gz",
 		},
 	},
 	{
 		name: "mediamtx-artifacts",
 		file: "MODULE.bazel",
 		needles: []string{
-			"mediamtx_v1.21.2_linux_amd64.tar.gz",
-			"mediamtx_v1.21.2_linux_arm64.tar.gz",
+			"mediamtx_v1.21.3_linux_amd64.tar.gz",
+			"mediamtx_v1.21.3_linux_arm64.tar.gz",
 		},
+	},
+	{
+		name:    "c-ares-artifacts",
+		file:    "MODULE.bazel",
+		needles: []string{"c-ares-1.34.9.tar.gz"},
+	},
+	{
+		name:    "cares-pin-json-version-1.34.9",
+		file:    "third_party/cares/pin.json",
+		needles: []string{`"version": "1.34.9"`},
 	},
 	{
 		name:    "debian-snapshot",
 		file:    "MODULE.bazel",
-		needles: []string{`uris = ["https://snapshot.debian.org/archive/debian/20261005T000000Z"]`},
+		needles: []string{`uris = ["https://snapshot.debian.org/archive/debian/20261027T000000Z"]`},
 	},
 	{
+		// D3: the @ffmpeg_dist artifact and the runtime debs converge on one
+		// Debian snapshot, so both producer scripts default to 20261027.
 		name:    "ffmpeg-dist-build",
 		file:    "tools/ffmpeg-dist/build.sh",
-		needles: []string{"DEBIAN_SNAPSHOT:=20261005T000000Z"},
+		needles: []string{"DEBIAN_SNAPSHOT:=20261027T000000Z"},
 	},
 	{
 		name:    "ffmpeg-dist-publish",
 		file:    "tools/ffmpeg-dist/publish.sh",
-		needles: []string{"DEBIAN_SNAPSHOT:-20261005T000000Z}"},
+		needles: []string{"DEBIAN_SNAPSHOT:-20261027T000000Z}"},
 	},
 	{
 		name:    "aws-launch-ami",
 		file:    "deploy/aws/launch",
-		needles: []string{"ami-0b1794752c0d4fa6c"},
+		needles: []string{"ami-0b8bfb88d687f3529"},
 	},
 	{
 		name: "openssh-10.6p1",
@@ -110,9 +122,21 @@ var pins = []pin{
 		},
 	},
 	{
+		// The pinned distlib wheel URL only asserts the version-derived file
+		// name; its sha256 is not yet known and must not be hardcoded here.
+		name:    "qemu-distlib-0.4.4",
+		file:    "tools/qemu/build-qemu.sh",
+		needles: []string{"distlib-0.4.4-py2.py3-none-any.whl"},
+	},
+	{
 		name:    "streamdeck-rollup",
 		file:    "tools/streamdeck-plugin/package.json",
 		needles: []string{`"rollup": "4.64.5"`},
+	},
+	{
+		name:    "streamdeck-package-manager",
+		file:    "tools/streamdeck-plugin/package.json",
+		needles: []string{`"packageManager": "pnpm@12.16.1"`},
 	},
 	{
 		name:    "go-winio",
@@ -125,40 +149,40 @@ var pins = []pin{
 	// failure identifies both the file and the exact value still missing.
 
 	{
-		name:    "bazelversion-9.3.0",
+		name:    "bazelversion-9.3.1",
 		file:    ".bazelversion",
-		needles: []string{"9.3.0"},
+		needles: []string{"9.3.1"},
 	},
 	{
-		name:    "nvmrc-24.21.0",
+		name:    "nvmrc-26.13.0",
 		file:    "tools/streamdeck-plugin/.nvmrc",
-		needles: []string{"24.21.0"},
+		needles: []string{"26.13.0"},
 	},
 	{
-		name:    "controller-gomod-go-1.27.2",
+		name:    "controller-gomod-go-1.27.3",
 		file:    "core/controller/go.mod",
-		needles: []string{"go 1.27.2"},
+		needles: []string{"go 1.27.3"},
 	},
 	{
-		name:    "check-deps-gomod-go-1.27.2",
+		name:    "check-deps-gomod-go-1.27.3",
 		file:    "tools/check-deps/go.mod",
-		needles: []string{"go 1.27.2"},
+		needles: []string{"go 1.27.3"},
 	},
 	{
-		name:          "env-project-go-version-tag-go1.27.2",
+		name:          "env-project-go-version-tag-go1.27.3",
 		file:          ".env",
-		needles:       []string{`PROJECT_GO_VERSION_TAG="go1.27.2"`},
+		needles:       []string{`PROJECT_GO_VERSION_TAG="go1.27.3"`},
 		skipIfMissing: true,
 	},
 	{
-		name:    "deps-check-workflow-go-version-1.27.2",
+		name:    "deps-check-workflow-go-version-1.27.3",
 		file:    ".github/workflows/deps-check.yml",
-		needles: []string{"go-version: 1.27.2"},
+		needles: []string{"go-version: 1.27.3"},
 	},
 	{
-		name:    "deps-strict-workflow-go-version-1.27.2",
+		name:    "deps-strict-workflow-go-version-1.27.3",
 		file:    ".github/workflows/deps-strict.yml",
-		needles: []string{"go-version: 1.27.2"},
+		needles: []string{"go-version: 1.27.3"},
 	},
 	{
 		name:    "controller-gomod-containerd-v2.3.6",

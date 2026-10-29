@@ -96,9 +96,10 @@ QEMU_CACHE="${QEMU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/qemu/qemu-x86_64-patch
 QEMU_PYTHON="${QEMU_PYTHON:-$(command -v python3 || true)}"
 NPROC="${NPROC:-$(nproc)}"
 # qemu's configure-time venv (mkvenv) needs the distlib module; when the
-# chosen python lacks it, provision this pinned wheel (content-addressed URL).
-QEMU_DISTLIB_URL="${QEMU_DISTLIB_URL:-https://files.pythonhosted.org/packages/02/08/9c41fb51ab5b43eb21674aff13df270e8ba6c4b29c8624e328dc7a9482af/distlib-0.4.3-py2.py3-none-any.whl}"
-QEMU_DISTLIB_SHA256="${QEMU_DISTLIB_SHA256:-4b0ce306c966eb73bc3a7b6abad017c556dadd92c44701562cd528ac7fde4d5b}"
+# chosen python lacks it, provision this pinned wheel (distlib 0.4.4,
+# content-addressed URL).
+QEMU_DISTLIB_URL="${QEMU_DISTLIB_URL:-https://files.pythonhosted.org/packages/c1/2b/238f02a4927fa2e27aa995371d240a468b52e42eae44a678434aff736b38/distlib-0.4.4-py2.py3-none-any.whl}"
+QEMU_DISTLIB_SHA256="${QEMU_DISTLIB_SHA256:-cf09d55b1e85a89576b036aeb71550bfd68320f3f21761ca329eadadad918638}"
 
 # --- qemu_is_patched <path> -- true iff <path> is a usable patched qemu ------
 # Requires: non-empty and executable, statically linked ELF ('file' matches
@@ -200,7 +201,7 @@ download_dir="${XDG_CACHE_HOME:-$HOME/.cache}/qemu"
 mkdir -p "$download_dir"
 if ! qemu_python_has_distlib "$QEMU_PYTHON"; then
   echo "==> provisioning distlib for qemu's configure-time venv (mkvenv requires it)"
-  distlib_wheel="$download_dir/distlib-0.4.3-py2.py3-none-any.whl"
+  distlib_wheel="$download_dir/distlib-0.4.4-py2.py3-none-any.whl"
   if [[ ! -f "$distlib_wheel" ]]; then
     curl -fSL --retry 3 -o "$distlib_wheel" "$QEMU_DISTLIB_URL"
   fi

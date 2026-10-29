@@ -36,12 +36,6 @@
     "until": "2027-01-31"
   },
   {
-    "id": "npm/@types/node",
-    "file": "tools/streamdeck-plugin/package.json",
-    "reason": "@types/node upgrade doesn't matter until the .nvmrc is bumped to node 26+; must wait for that.",
-    "until": "2026-12-31"
-  },
-  {
     "id": "go/github.com/containerd/typeurl/v2",
     "file": "core/controller/go.mod",
     "reason": "typeurl v2.3.0 removes gogo support but is not yet coordinated by a containerd release; containerd/v2 v2.3.5 still pins v2.2.3. Wait for a containerd release that coordinates these satellite modules.",
@@ -260,6 +254,12 @@
     "id": "base-image/binutils-x86-64-linux-gnu",
     "file": "MODULE.bazel",
     "reason": "Debian trixie runtime package installed by the apt extension's pinned snapshot (MODULE.bazel apt.install); its version is fixed by the snapshot and has no independent upstream to compare."
+  },
+  {
+    "id": "npm/@types/node",
+    "file": "tools/streamdeck-plugin/package.json",
+    "reason": "Direct npm devDependency declared in package.json; check-deps has no resolver configured for it (the native pnpm batch resolver only reports already-outdated packages, not current pins, and is disabled under the hermetic --offline --native-tools=false gate). Its version is tracked via pnpm-lock.yaml and `pnpm outdated`. Re-evaluate when an npm registry resolver is wired.",
+    "until": "2027-06-30"
   },
   {
     "id": "npm/@elgato/streamdeck",

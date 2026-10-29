@@ -7,7 +7,7 @@ import (
 	"strimserver-check-deps/common"
 )
 
-// PyPI JSON client. Used for the provisioned distlib wheel (0.4.3).
+// PyPI JSON client. Used for the provisioned distlib wheel (0.4.4).
 
 type pypiInfo struct {
 	Version string `json:"version"`
