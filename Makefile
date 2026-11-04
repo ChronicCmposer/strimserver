@@ -6,6 +6,35 @@
 
 S3_BUCKET ?=s3://<bucket-name>
 
+# The GitHub mirror for the pinned FFmpeg artifact is intentionally
+# unpublished, so package/release/publish must fetch it from S3. Exporting the
+# same bucket/region for upload and fetch means one set of env vars configures
+# both sides.
+#
+# Existing STRIMSERVER_S3_* values win; otherwise derive the repo-rule values
+# from the upload-side names. `:=` (not a recursive `=`) is deliberate: the RHS
+# reads the pre-existing environment/command-line value before this assignment
+# shadows it. Placeholder values starting with `<` count as unset.
+# Only strip the prefix when it is actually there; leave other values alone so
+# the placeholder/bare-name guards above still see them unchanged.
+S3_BUCKET_BARE := $(if $(filter s3://%,$(strip $(S3_BUCKET))),$(patsubst s3://%,%,$(strip $(S3_BUCKET))))
+
+STRIMSERVER_S3_BUCKET := $(strip $(if $(filter-out <%,$(strip $(STRIMSERVER_S3_BUCKET))),$(strip $(STRIMSERVER_S3_BUCKET)), \
+	$(if $(filter-out <%,$(strip $(S3_BUCKET_NAME))),$(strip $(S3_BUCKET_NAME)), \
+	$(if $(filter-out <%,$(S3_BUCKET_BARE)),$(S3_BUCKET_BARE)))))
+
+STRIMSERVER_S3_REGION := $(strip $(if $(strip $(STRIMSERVER_S3_REGION)),$(strip $(STRIMSERVER_S3_REGION)), \
+	$(if $(strip $(AWS_REGION)),$(strip $(AWS_REGION)), \
+	$(if $(strip $(AWS_DEFAULT_REGION)),$(strip $(AWS_DEFAULT_REGION)), \
+	$(shell aws configure get region --profile "$${AWS_PROFILE:-strimserver}" 2>/dev/null)))))
+
+# Omit empty flags entirely: Bazel must never receive `--repo_env=NAME=`.
+# The region is only meaningful alongside a bucket, so emit it nested inside
+# the bucket conditional -- never as a lone region flag.
+REPO_ENV := $(if $(STRIMSERVER_S3_BUCKET), \
+	--repo_env=STRIMSERVER_S3_BUCKET=$(STRIMSERVER_S3_BUCKET) \
+	$(if $(STRIMSERVER_S3_REGION),--repo_env=STRIMSERVER_S3_REGION=$(STRIMSERVER_S3_REGION)))
+
 .DEFAULT_GOAL := package
 
 # Build provenance stamped into the controller binaries: the full commit SHA
@@ -24,43 +53,43 @@ prepare:
 	if [ ! -f core/strimserver.env ]; then cp core/strimserver.env.example core/strimserver.env; fi
 
 generate:
-	bazel run //core/controller:generate
+	bazel run $(REPO_ENV) //core/controller:generate
 
 check-generated:
-	bazel test //core/controller:generate_test
+	bazel test $(REPO_ENV) //core/controller:generate_test
 
 controller:
-	bazel build --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //core/controller:strimserver-controller
+	bazel build $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //core/controller:strimserver-controller
 
 test-controller:
-	bazel test --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //core/controller:all
+	bazel test $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //core/controller:all
 
 check-no-twitch-key:
-	bazel build //:check_no_twitch_key
+	bazel build $(REPO_ENV) //:check_no_twitch_key
 
 # Phase 1 stub: list every pinned dependency in the repo (Bazel modules,
 # toolchain versions, downloaded artifacts, CI actions, and script pins).
 check-deps:
-	bazel run //tools/check-deps:check-deps -- --ignore
+	bazel run $(REPO_ENV) //tools/check-deps:check-deps -- --ignore
 
 # LLM/automation-readable form: JSON report to stdout (the console report and
 # bazel INFO logs both go to stderr, so stdout stays pure JSON).
 check-deps-json:
-	@bazel run //tools/check-deps:check-deps -- --json --ignore
+	@bazel run $(REPO_ENV) //tools/check-deps:check-deps -- --json --ignore
 
 package:
-	bazel build --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:package
+	bazel build $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:package
 
 # The arm64 bundle alone (the same tar graph rebuilt under
 # //tools/bazel:linux_arm64 via a platform transition).
 package-arm64:
-	bazel build --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:package_arm64
+	bazel build $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:package_arm64
 
 # ALL FOUR deployment bundles (+ checksums): Go + C controllers, amd64 +
 # arm64. Equivalent to `bazel build //:package_all` (a single analysis pass
 # produces all four).
 package-all:
-	bazel build --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:package_all
+	bazel build $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:package_all
 
 # Attach the bundles + checksums to an existing tag's GitHub Release.
 # Requires the GitHub CLI (`gh auth login`).
@@ -87,7 +116,7 @@ require-build-info:
 
 GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null)
 release: require-build-info
-	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) bazel run --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:release
+	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) bazel run $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:release
 
 # Bump the latest vX.Y.Z git tag and push it (tag-based versioning; git tags
 # are the source of truth). Guards: clean tree, on `dev`, synced with
@@ -96,7 +125,7 @@ bump-version:
 	@if [ -z "$(LEVEL)" ]; then \
 	  echo "usage: make bump-version LEVEL=major|minor|patch" >&2; exit 1; \
 	fi
-	bazel run //:bump_version -- "$(LEVEL)"
+	bazel run $(REPO_ENV) //:bump_version -- "$(LEVEL)"
 
 # Publish everything to S3 in one bazel run: ALL FOUR strimserver deployment
 # tars (Go + C, amd64 + arm64, each with its .sha256), the Stream Deck plugin
@@ -104,7 +133,7 @@ bump-version:
 # S3_BUCKET. Runs a single bazel target rather than the individual publish-*
 # targets (one server/analysis pass).
 publish-all: require-build-info
-	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:publish_all
+	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:publish_all
 
 publish-strimserver: require-build-info
 # The offline fallback clip is bundled directly from MODULE.bazel's
@@ -113,15 +142,15 @@ publish-strimserver: require-build-info
 # Also uploads ALL FOUR deployment tars (strimserver-deployment-{go,c}-{amd64,arm64}.tar
 # + .sha256) and the Stream Deck plugin bundle (strimserver-streamdeck-plugin.zip
 # and .tar.gz).
-	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:publish_strimserver
+	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:publish_strimserver
 
 publish-iperf3:
-	S3_BUCKET=$(S3_BUCKET) bazel run //tools/bandwidth-test:publish_iperf3
+	S3_BUCKET=$(S3_BUCKET) bazel run $(REPO_ENV) //tools/bandwidth-test:publish_iperf3
 
 # Publish ONLY the Stream Deck plugin bundle to S3 (same object keys as
 # publish-strimserver). Publishes both the .zip and .tar.gz variants.
 publish-streamdeck: require-build-info
-	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //tools/streamdeck-plugin:publish_streamdeck
+	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) S3_BUCKET=$(S3_BUCKET) bazel run $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //tools/streamdeck-plugin:publish_streamdeck
 
 check-ffmpeg-dist-deps:
 	./tools/ffmpeg-dist/check-deps.sh

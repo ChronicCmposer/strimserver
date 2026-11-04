@@ -98,6 +98,7 @@ flush_dns_cache() {
   fi
 }
 
+
 kill_streamdeck() {
   # `open -a` on an already-running app just focuses it rather than
   # restarting it, so a stale process would keep its old STRIMSERVER_URL.
@@ -110,6 +111,19 @@ kill_streamdeck() {
     done
     if can_detect_streamdeck && is_streamdeck_running; then
       print -u2 "warning: Elgato Stream Deck did not exit in time; relaunching anyway"
+    fi
+  fi
+  # Plugins are separate node processes that survive the app's exit and get
+  # reparented to launchd, keeping their old STRIMSERVER_URL. Kill them even
+  # when the app itself is not running, so orphans from earlier runs go too.
+  if can_detect_streamdeck && pgrep -f "com.elgato.StreamDeck/Plugins/" >/dev/null 2>&1; then
+    pkill -f "com.elgato.StreamDeck/Plugins/" 2>/dev/null
+    for _ in {1..20}; do
+      pgrep -f "com.elgato.StreamDeck/Plugins/" >/dev/null 2>&1 || break
+      sleep 0.25
+    done
+    if pgrep -f "com.elgato.StreamDeck/Plugins/" >/dev/null 2>&1; then
+      print -u2 "warning: Stream Deck plugins did not exit in time; relaunching anyway"
     fi
   fi
 }

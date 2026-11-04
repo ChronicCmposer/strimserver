@@ -320,6 +320,23 @@ starts. If you change them after a build, run `bazel shutdown`
 and re-run, or pass them explicitly, e.g.
 `bazel build //:package --repo_env=STRIMSERVER_S3_BUCKET=your-bucket-name --repo_env=STRIMSERVER_S3_REGION=<your-region>`.
 
+`make package` and the `make publish-*` targets bridge the upload-side
+variables onto the repo-rule variables automatically, passing them as
+`--repo_env` flags:
+
+- `S3_BUCKET_NAME` (bare bucket name, unlike `S3_BUCKET`) becomes
+  `STRIMSERVER_S3_BUCKET`.
+- `S3_BUCKET` becomes `STRIMSERVER_S3_BUCKET` with any `s3://` prefix stripped
+  (only when the value actually starts with `s3://`).
+- `AWS_REGION` (then `AWS_DEFAULT_REGION`, then the region configured for the
+  `strimserver` AWS profile) becomes `STRIMSERVER_S3_REGION`.
+
+Explicit `STRIMSERVER_S3_*` values still win, and empty/placeholder values are
+omitted rather than passed as empty `--repo_env` flags. Flags are passed as a
+pair: no S3 flags at all unless a bucket resolves, and a region only alongside
+a bucket. This way a single set of exports configures both upload and fetch,
+while an unconfigured machine keeps using the mirrors.
+
 ## Build instructions
 
 Clone the repository:

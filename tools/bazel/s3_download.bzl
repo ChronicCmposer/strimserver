@@ -16,8 +16,10 @@ STRIMSERVER_S3_BUCKET and STRIMSERVER_S3_REGION
 
 def _urls(ctx, s3_key):
     """Build the download URLs: the S3 endpoint first, then the mirrors."""
-    bucket = ctx.getenv("STRIMSERVER_S3_BUCKET")
-    region = ctx.getenv("STRIMSERVER_S3_REGION")
+    # Set-but-empty values count as unset so `--repo_env=NAME=` cannot produce
+    # a malformed S3 URL or trigger the half-configured fail().
+    bucket = ctx.getenv("STRIMSERVER_S3_BUCKET") or None
+    region = ctx.getenv("STRIMSERVER_S3_REGION") or None
 
     if (bucket == None) != (region == None):
         fail(
