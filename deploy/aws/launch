@@ -63,6 +63,8 @@ import time
 import urllib.request
 from dataclasses import dataclass
 
+import known_hosts
+
 # Pinned x86_64 Amazon Linux 2023 GPU DLAMI ("Deep Learning Base OSS Nvidia
 # Driver GPU AMI (Amazon Linux 2023) 20261027") for us-east-2: ships the NVIDIA
 # driver, containerd, and the NVIDIA container toolkit (CDI) strimserver needs.
@@ -362,6 +364,7 @@ class Ssh:
     cmd: list
     user: str
     port: str
+    known_hosts_file: str
 
     @classmethod
     def from_env(cls):
@@ -373,6 +376,7 @@ class Ssh:
             cmd=cmd,
             user=os.environ.get("SSH_USER", "ec2-user"),
             port=os.environ.get("SSH_PORT", "22"),
+            known_hosts_file=known_hosts.known_hosts_path(),
         )
 
 
@@ -517,60 +521,90 @@ def cleanup_stale_hosts_entries():
 
 class Probe(enum.Enum):
     """Outcome of the SSH reachability poll."""
-    READY = "ready"            # sshd answered and key auth works
-    REACHABLE = "reachable"    # sshd answered but auth was refused
-    UNRESOLVED = "unresolved"  # host has no /etc/hosts or DNS entry
-    TIMEOUT = "timeout"        # never answered within the budget
-    SKIPPED = "skipped"        # Ctrl-C, or no ssh client
+    READY = "ready"                      # sshd answered and key auth works
+    REACHABLE = "reachable"              # sshd answered but auth was refused
+    HOST_KEY_MISMATCH = "host_key_mismatch"  # stale key survived a prune
+    UNRESOLVED = "unresolved"            # host has no /etc/hosts or DNS entry
+    TIMEOUT = "timeout"                  # never answered within the budget
+    SKIPPED = "skipped"                  # Ctrl-C, or no ssh client
 
 
 def wait_for_ssh(ssh, host, total=240, interval=5, connect_timeout=5):
     """Poll SSH reachability with the real client, so the handoff to setup does
     not race sshd coming up. Probes the exact path setup will use - same SSH_CMD,
-    SSH_IDENTITY, user, port, and `host` (the raw public IP the bootstrap connects by, since
-    the DDNS name isn't registered until deploy.sh). Because the probe carries
-    StrictHostKeyChecking=accept-new, a successful poll also records `host` in
-    known_hosts as a side effect, so setup's first ssh never stops to ask the
-    operator to trust the host. Returns a Probe member.
+    SSH_IDENTITY, user, port, dedicated known_hosts store, and `host` (the raw
+    public IP the bootstrap connects by, since the DDNS name isn't registered
+    until deploy.sh).
+
+    A refused key is NOT terminal: cloud-init may still be installing the key
+    pair, so the poll keeps trying until the budget expires (movienight's
+    behaviour). A stale host key is pruned once and retried; if it survives that
+    prune the poll returns HOST_KEY_MISMATCH instead of misreporting a
+    security-group problem.
     """
     probe = ssh.cmd + [
         "-o", "BatchMode=yes",
         "-o", f"ConnectTimeout={connect_timeout}",
-        "-o", "StrictHostKeyChecking=accept-new",
+    ] + known_hosts.ssh_options(ssh.known_hosts_file) + [
         "-p", ssh.port, f"{ssh.user}@{host}", "true",
     ]
     deadline = time.monotonic() + total
+    pruned_stale_key = False
+    saw_auth_refused = False
     print(f"waiting for ssh on {host}:{ssh.port} ", end="", flush=True)
     try:
         while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
             try:
-                r = subprocess.run(probe, capture_output=True, text=True)
+                r = subprocess.run(
+                    probe, capture_output=True, text=True,
+                    timeout=min(connect_timeout + 10, max(remaining, 0.1)))
             except FileNotFoundError:
                 print(" (ssh client not found; skipping)")
                 return Probe.SKIPPED
-            if r.returncode == 0:
-                print(" up")
-                return Probe.READY
-            err = r.stderr or ""
-            # A name that resolves nowhere won't start resolving on its own -
-            # bail now instead of retrying uselessly for the whole budget.
-            if any(s in err for s in ("Could not resolve", "Name or service not known",
-                                      "nodename nor servname",
-                                      "Temporary failure in name resolution")):
-                print(f" cannot resolve '{host}'")
-                return Probe.UNRESOLVED
-            # sshd is talking but rejected our key. Real auth failure, or the
-            # instance is still installing the key pair via cloud-init.
-            if "Permission denied" in err or "publickey" in err:
-                print(" up (auth refused)")
-                return Probe.REACHABLE
+            except subprocess.TimeoutExpired:
+                err = ""
+            else:
+                err = r.stderr or ""
+                if r.returncode == 0:
+                    print(" up")
+                    return Probe.READY
+
+                if known_hosts.is_host_key_mismatch(err):
+                    if pruned_stale_key:
+                        print(f" stale host key for '{host}' persists after pruning")
+                        return Probe.HOST_KEY_MISMATCH
+                    try:
+                        known_hosts.forget_host(host, ssh.known_hosts_file)
+                    except known_hosts.KnownHostsError:
+                        pass  # retry below still classifies the mismatch
+                    pruned_stale_key = True
+                    print(".", end="", flush=True)
+                    continue
+
+                # A name that resolves nowhere won't start resolving on its
+                # own - bail now instead of retrying uselessly for the budget.
+                if any(s in err for s in ("Could not resolve", "Name or service not known",
+                                          "nodename nor servname",
+                                          "Temporary failure in name resolution")):
+                    print(f" cannot resolve '{host}'")
+                    return Probe.UNRESOLVED
+
+                # sshd is talking but rejected our key. Keep polling: the
+                # instance may still be installing the key pair via cloud-init.
+                if "Permission denied" in err or "publickey" in err:
+                    saw_auth_refused = True
+
             print(".", end="", flush=True)
-            time.sleep(interval)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
     except KeyboardInterrupt:
         print(" skipped")
         return Probe.SKIPPED
     print(" timeout")
-    return Probe.TIMEOUT
+    return Probe.REACHABLE if saw_auth_refused else Probe.TIMEOUT
 
 
 def effective_ssh_host(public_ip):
@@ -580,11 +614,12 @@ def effective_ssh_host(public_ip):
     return public_ip
 
 
-def offer_exec_setup(setup_host):
+def offer_exec_setup(setup_host, instance_id=None):
     """Offer to hand off to deploy/aws/setup_strimserver, pointed at setup_host,
     by replacing this process (execve). Returns only if the operator declines or
     it cannot run; on accept the process image is replaced and never comes back.
     """
+
     setup = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "setup_strimserver")
 
@@ -595,6 +630,8 @@ def offer_exec_setup(setup_host):
 
     env = dict(os.environ)
     env["SSH_HOST"] = setup_host
+    if instance_id:
+        env["INSTANCE_ID"] = instance_id
 
     print(f"\nabout to run, replacing this process (execve):\n"
           f"    SSH_HOST={setup_host} {setup}\n"
@@ -614,27 +651,48 @@ def offer_exec_setup(setup_host):
         print(f"could not exec {setup}: {e}")
 
 
-def post_launch(cfg, public_ip):
+def post_launch(cfg, public_ip, instance_id):
     """Configure local access to the new instance and offer the setup handoff:
-    remove stale /etc/hosts leftovers from prior deploys, poll ssh by the raw
+    prune the dedicated known_hosts store for the reused IP, poll ssh by the raw
     public IP (the DDNS name strim.example.com doesn't resolve until deploy.sh
-    registers it), then offer the execve handoff. Falls through to printed
-    next-steps if the handoff is declined or unavailable.
+    registers it), then offer the execve handoff only when the probe is READY.
+    Falls through to printed next-steps if the handoff is declined or
+    unavailable.
     """
     ssh = cfg.ssh
     cleanup_stale_hosts_entries()
 
     # Block until sshd answers so the handoff doesn't hit a refused connection.
     # Bootstrap by the raw public IP - the box is unreachable by name until
-    # deploy.sh registers it with Dynamic DNS. accept-new then records that IP
-    # in known_hosts, so a successful poll also means no trust prompt.
+    # deploy.sh registers it with Dynamic DNS. A relaunch can reuse a prior
+    # public IP, so drop its stale key from the dedicated store BEFORE the first
+    # connection; the binding lets a later id change self-heal. The operator's
+    # default known_hosts file is never touched.
     setup_host = effective_ssh_host(public_ip)
+    store = ssh.known_hosts_file
+    known_hosts.ensure_known_hosts_dir(store)
+    try:
+        known_hosts.forget_host(setup_host, store)
+    except known_hosts.KnownHostsError as exc:
+        print(f"warning: could not prune {setup_host} from the private store: {exc}")
+    try:
+        known_hosts.bind_host_instance(setup_host, instance_id, store)
+    except known_hosts.KnownHostsError as exc:
+        print(f"warning: could not record the instance binding: {exc}")
+
     status = wait_for_ssh(ssh, setup_host)
     if status is Probe.TIMEOUT:
         print(f"could not reach ssh; the instance is running but nothing answered "
               f"on tcp/{ssh.port}. Likely the security group doesn't allow "
               f"{ssh.port} from your IP, or EnableExperimentalSsh is false in the "
-              f"stack. setup can be retried once ssh is reachable.")
+              f"stack. Also check SSH_CMD / SSH_IDENTITY and the KEY_NAME used at "
+              f"launch. setup can be retried once ssh is reachable.\n"
+              f"If a stale host key is involved, clear it with:\n"
+              f"  {known_hosts.prune_command(setup_host, store)}")
+    elif status is Probe.HOST_KEY_MISMATCH:
+        print(f"ssh still rejects the host key for '{setup_host}' after pruning "
+              f"the dedicated store. Clear it explicitly and retry:\n"
+              f"  {known_hosts.prune_command(setup_host, store)}")
     elif status is Probe.UNRESOLVED:
         print(f"could not resolve '{setup_host}' - a public IP should connect "
               f"directly; check the instance's networking and retry setup once "
@@ -644,9 +702,10 @@ def post_launch(cfg, public_ip):
               "key may still be installing (retry shortly); otherwise check "
               "SSH_CMD / SSH_IDENTITY and the KEY_NAME used at launch.")
 
-    # Offer to hand straight off to setup by replacing this process. Returns only
-    # if declined/unavailable; on accept it execs and the lines below never print.
-    offer_exec_setup(setup_host)
+    # Offer to hand straight off to setup only when ssh really works. On any
+    # other outcome the next-steps below explain what to fix first.
+    if status is Probe.READY:
+        offer_exec_setup(setup_host, instance_id)
 
     print("\nnext steps:")
     print(f"  SSH_HOST={public_ip} deploy/aws/setup_strimserver")
@@ -719,7 +778,7 @@ def launch_instance(cfg, use_spot, wait):
               "public subnet and relaunch.")
         return
     print(f"\npublic ip: {public_ip}\n")
-    post_launch(cfg, public_ip)
+    post_launch(cfg, public_ip, instance_id)
 
 
 if __name__ == "__main__":
@@ -747,6 +806,8 @@ if __name__ == "__main__":
     require_strimserver_identity()
     try:
         launch_instance(cfg, use_spot=not args.no_spot, wait=args.wait)
+    except known_hosts.KnownHostsError as e:
+        sys.exit(f"private known_hosts store: {e}")
     except subprocess.CalledProcessError as e:
         sys.exit(f"aws call failed: {(e.stderr or '').strip() or e}")
 

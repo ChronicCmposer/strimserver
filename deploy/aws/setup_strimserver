@@ -4,6 +4,11 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
+import known_hosts
+
+
+PROFILE = os.environ.get("AWS_PROFILE", "").strip() or "strimserver"
+
 
 def ssh_identity_flags():
     """['-i', <path>] when SSH_IDENTITY is set, else [] - ssh/scp then rely
@@ -16,7 +21,9 @@ def ssh_identity_flags():
 
 def ssh_run(hostname, username, port, cmd, capture=False):
     ssh_cmd = os.environ.get("SSH_CMD", "ssh")
-    full_cmd = ssh_cmd.split() + ssh_identity_flags() + ["-t", f"{username}@{hostname}", "-p", f"{port}", cmd]
+    full_cmd = (ssh_cmd.split() + ssh_identity_flags()
+                + known_hosts.ssh_options()
+                + ["-p", f"{port}", "-t", f"{username}@{hostname}", cmd])
     print(f"\n>>> Running: {cmd}")
     try:
         result = subprocess.run(full_cmd, text=True, check=True, capture_output=capture)
@@ -35,13 +42,66 @@ def run_ssh_commands(hostname, username, port, commands):
 def scp_to_remote(local_path, hostname, username, port, remote_path):
     scp_cmd = os.environ.get("SCP_CMD", "scp")
     # scp uses -P (uppercase) for the port, unlike ssh's -p.
-    full_cmd = scp_cmd.split() + ssh_identity_flags() + ["-P", f"{port}", local_path, f"{username}@{hostname}:{remote_path}"]
+    full_cmd = (scp_cmd.split() + ssh_identity_flags()
+                + known_hosts.scp_options()
+                + ["-P", f"{port}", local_path, f"{username}@{hostname}:{remote_path}"])
     print(f"\n>>> Uploading: {local_path} -> {username}@{hostname}:{remote_path}")
     try:
         subprocess.run(full_cmd, text=True, check=True)
     except FileNotFoundError:
         print("Error: scp client not found. Make sure OpenSSH is installed.", file=sys.stderr)
         sys.exit(1)
+
+
+def describe_instance_id_for_host(hostname):
+    """Best-effort recovery of the EC2 instance id behind an explicit host.
+
+    Returns the id, or "" when no running/pending instance matches or the AWS
+    CLI is unavailable. A lookup failure must never fail setup: pruning the
+    host from the dedicated store already handles the reused-key case.
+    """
+    filters = (
+        f"Name=ip-address,Values={hostname}",
+        f"Name=dns-name,Values={hostname}",
+    )
+    for instance_filter in filters:
+        try:
+            proc = subprocess.run(
+                ["aws", "--profile", PROFILE, "ec2", "describe-instances",
+                 "--filters", instance_filter,
+                 "Name=instance-state-name,Values=running,pending",
+                 "--query", "Reservations[].Instances[].InstanceId",
+                 "--output", "text"],
+                text=True, capture_output=True, timeout=15)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return ""
+        if proc.returncode != 0:
+            continue
+        ids = (proc.stdout or "").split()
+        if ids and ids[0] != "None":
+            return ids[0]
+    return ""
+
+
+def bind_target_instance(hostname):
+    """Record host -> instance id so a later relaunch self-heals its stale key.
+
+    INSTANCE_ID is used directly when launch passes it through the handoff;
+    otherwise the id is recovered by lookup. A failed lookup only warns.
+    """
+    instance_id = os.environ.get("INSTANCE_ID", "").strip()
+    if not instance_id:
+        instance_id = describe_instance_id_for_host(hostname)
+    if not instance_id:
+        print(f"note: could not resolve an instance id for {hostname}; relying on "
+              f"accept-new (a reused host key must be cleared manually)",
+              file=sys.stderr)
+        return
+    try:
+        known_hosts.bind_host_instance(hostname, instance_id)
+    except known_hosts.KnownHostsError as exc:
+        print(f"warning: could not record the instance binding: {exc}",
+              file=sys.stderr)
 
 
 def resolve_source():
@@ -232,6 +292,18 @@ if __name__ == "__main__":
     SRC, DEPLOYMENT = resolve_source()
     REMOTE_TAR = f"/mnt/nvme/{DEPLOYMENT}"
     scheme = urlparse(SRC).scheme  # 's3', 'https', 'http', or '' for a local path
+
+    # A relaunch can reuse the target's public IP or DNS name, leaving a stale
+    # key in the dedicated store. Drop it (and, when the instance id is cheaply
+    # resolvable, self-heal every host bound to the old instance) before the
+    # first connection. The operator's default known_hosts file is never used.
+    known_hosts.ensure_known_hosts_dir()
+    try:
+        known_hosts.forget_host(HOST)
+    except known_hosts.KnownHostsError as exc:
+        print(f"warning: could not prune {HOST} from the private store: {exc}",
+              file=sys.stderr)
+    bind_target_instance(HOST)
 
     # select nvme drive
     r = ssh_run(HOST, USER, PORT, "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT", capture=True)

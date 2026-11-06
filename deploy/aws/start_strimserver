@@ -6,8 +6,32 @@ set -xeuo pipefail
 : "${SSH_HOST:?SSH_HOST is not set}"
 : "${SSH_USER:?SSH_USER is not set}"
 
-cmd="$SSH_CMD $SSH_USER@$SSH_HOST sudo systemctl start strimserver.service"
+# Dedicated private known_hosts store, shared with known_hosts.py. Never the
+# operator's default known_hosts file: ephemeral instances reuse public IPs.
+known_hosts_file="${STRIMSERVER_KNOWN_HOSTS_FILE:-${XDG_STATE_HOME:-${HOME:-${TMPDIR:-/tmp}}/.local/state}/strimserver/known_hosts}"
+case "$known_hosts_file" in
+  /*) ;;
+  *) known_hosts_file="$PWD/$known_hosts_file" ;;
+esac
+known_hosts_dir="$(dirname "$known_hosts_file")"
+mkdir -p "$known_hosts_dir" || {
+  echo "could not create the private known_hosts directory $known_hosts_dir" >&2
+  exit 1
+}
+chmod 700 "$known_hosts_dir" || {
+  echo "could not secure the private known_hosts directory $known_hosts_dir (mode 0700)" >&2
+  exit 1
+}
 
-read -r -a argv <<< "$cmd"
-exec "${argv[@]}"
+ssh_port="${SSH_PORT:-22}"
+identity_args=()
+if [[ -n "${SSH_IDENTITY:-}" ]]; then
+  identity_args=(-i "$SSH_IDENTITY")
+fi
 
+read -r -a ssh_argv <<< "$SSH_CMD"
+exec "${ssh_argv[@]}" ${identity_args[@]+"${identity_args[@]}"} \
+  -o StrictHostKeyChecking=accept-new \
+  -o "UserKnownHostsFile=$known_hosts_file" \
+  -p "$ssh_port" "$SSH_USER@$SSH_HOST" \
+  sudo systemctl start strimserver.service

@@ -97,6 +97,25 @@ sh_test(
     ],
 )
 
+# known_hosts_test.py covers the dedicated private known_hosts store: path
+# resolution/override, 0700 directory enforcement, ssh/scp option construction,
+# stale-key classification + exact remediation text, and the instance-map
+# self-heal/lock. It is pure stdlib; the sh_test wrapper is only the Bazel
+# entrypoint (this package's tests are shell-based).
+sh_test(
+    name = "known_hosts_test",
+    srcs = ["known_hosts_test.sh"],
+    data = [
+        "known_hosts.py",
+        "known_hosts_test.py",
+        "launch",
+        "setup_strimserver",
+        "start_strimserver",
+        "stop_strimserver",
+        "terminate",
+    ],
+)
+
 # aws_profile_test.sh asserts every AWS-invoking tooling script pins the
 # project-scoped [strimserver] profile AND never calls the AWS CLI directly:
 # every call must route through the shared aws_strim wrapper (a bare
