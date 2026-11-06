@@ -70,12 +70,12 @@ check-no-twitch-key:
 # Phase 1 stub: list every pinned dependency in the repo (Bazel modules,
 # toolchain versions, downloaded artifacts, CI actions, and script pins).
 check-deps:
-	bazel run $(REPO_ENV) //tools/check-deps:check-deps -- --ignore
+	AWS_PROFILE=strimserver bazel run $(REPO_ENV) //tools/check-deps:check-deps -- --ignore
 
 # LLM/automation-readable form: JSON report to stdout (the console report and
 # bazel INFO logs both go to stderr, so stdout stays pure JSON).
 check-deps-json:
-	@bazel run $(REPO_ENV) //tools/check-deps:check-deps -- --json --ignore
+	@AWS_PROFILE=strimserver bazel run $(REPO_ENV) //tools/check-deps:check-deps -- --json --ignore
 
 package:
 	bazel build $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:package
