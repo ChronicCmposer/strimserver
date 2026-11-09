@@ -44,6 +44,7 @@ typedef enum strim_action_kind {
     ACTION_REMOVE_LISTENER,
     ACTION_RECONCILE,
     ACTION_CLEAR_INFLIGHT,
+    ACTION_OP_COMPLETE,
     ACTION_TEARDOWN,
 } strim_action_kind;
 
@@ -58,9 +59,11 @@ typedef struct strim_action {
     strim_controller_status *status_out;    /* ACTION_STATUS               */
     strim_controller_listener listener;     /* ACTION_ADD/REMOVE_LISTENER  */
     void                    *listener_userdata;
-    strim_stage_name         clear_stage;   /* ACTION_CLEAR_INFLIGHT       */
+    strim_stage_name         clear_stage;   /* ACTION_CLEAR_INFLIGHT /
+                                             * ACTION_OP_COMPLETE         */
     uint64_t clear_generation;  /* fire generation stamped at enqueue
-                                 * (ACTION_CLEAR_INFLIGHT)               */
+                                 * (ACTION_CLEAR_INFLIGHT / OP_COMPLETE)  */
+    strim_stage_state        complete_target; /* ACTION_OP_COMPLETE       */
 
     /* blocking-reply handshake (all ACTION_* submits) */
     int  reply_result;
@@ -421,6 +424,7 @@ static int workerpool_submit(strim_workerpool *pool, void (*fn)(void *arg),
 typedef struct strim_op_job {
     strim_controller *c;
     strim_stage_name  stage;
+    strim_stage_state target;
     strim_stage_op    op;
     void             *op_ctx;
     int64_t           timeout_ms;
@@ -432,22 +436,30 @@ static void run_stage_op(void *arg) {
     strim_controller *c = job->c;
 
     int err = job->op(job->op_ctx, job->timeout_ms, &job->cancel);
-    if (err != 0 && !strim_stage_op_superseded(&job->cancel)) {
-        /* Match Go controller.go:308-311: a failed op clears InFlight so the
-         * next reconcile retries. The clear runs through the action queue
-         * (single-writer invariant); it is dropped if the queue is already
-         * closed (shutdown in progress — Teardown owns the stage now).
-         * The clear is stamped with THIS fire's generation and only wipes
-         * InFlight while it is still the live generation: a SUPERSEDED op's
-         * clear must NOT fire — a newer retry owns the stage and its InFlight
-         * marker, and a stale clear would let reconcile fire a third op
-         * concurrently. */
+    if (!strim_stage_op_superseded(&job->cancel)) {
+        /* Report the result through the action queue (single-writer
+         * invariant); it is dropped if the queue is already closed
+         * (shutdown in progress — Teardown owns the stage now). Stamped with
+         * THIS fire's generation: a SUPERSEDED op's result must NOT apply —
+         * a newer retry owns the stage and its InFlight marker.
+         *
+         * Failure clears InFlight so the next reconcile retries (Go
+         * controller.go:308-311).
+         *
+         * Success converges the stage to the op's target state. The Go
+         * controller relies on containerd's TaskExit event to flip Actual; a
+         * successful op is equally authoritative proof and, unlike the event,
+         * cannot be lost (containerd's runc shim can drop /tasks/exit when the
+         * task is deleted right after Wait — containerd issue #14433). Without
+         * this, a lost exit event leaves Actual=Running forever and reconcile
+         * re-fires the stop op every InFlight timeout. */
         strim_action *act = malloc(sizeof *act);
         if (act != NULL) {
             *act = (strim_action){
-                .kind = ACTION_CLEAR_INFLIGHT,
+                .kind = err == 0 ? ACTION_OP_COMPLETE : ACTION_CLEAR_INFLIGHT,
                 .clear_stage = job->stage,
                 .clear_generation = job->cancel.generation,
+                .complete_target = job->target,
                 .self_allocated = true,
             };
             pthread_mutex_lock(&c->q_lock);
@@ -1048,6 +1060,7 @@ void strim_controller_handle_reconcile(strim_controller *c) {
         *job = (strim_op_job){
             .c = c,
             .stage = (strim_stage_name)i,
+            .target = target,
             .op = op,
             .op_ctx = stage->op_ctx,
             .timeout_ms = c->inflight_timeout_ms,
@@ -1186,6 +1199,26 @@ static void run_action(strim_controller *c, strim_action *act) {
              * op could fire and two ops would run concurrently. */
             if (atomic_load(&stage->op_generation) == act->clear_generation) {
                 stage->in_flight_since = 0;
+            }
+            break;
+        }
+        case ACTION_OP_COMPLETE: {
+            strim_stage *stage = &c->stages[act->clear_stage];
+            /* Only the live fire's result applies; a superseded op's result
+             * belongs to a state a newer op already owns. */
+            if (atomic_load(&stage->op_generation) != act->clear_generation) {
+                break;
+            }
+            /* A stage event (TaskStart/TaskExit) clears InFlight and carries
+             * the runtime's observed state; when one arrived it is more
+             * authoritative than the op's target, so leave Actual alone. */
+            if (stage->in_flight_since == 0) {
+                break;
+            }
+            stage->in_flight_since = 0;
+            if (stage->status.actual != act->complete_target) {
+                stage->status.actual = act->complete_target;
+                notify_listeners(c);
             }
             break;
         }

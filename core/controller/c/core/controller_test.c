@@ -1184,6 +1184,58 @@ static void test_listeners(void) {
     strim_controller_destroy(c);
 }
 
+/* A successful op converges Actual to its target even when containerd never
+ * delivers the TaskExit event (runc-shim /tasks/exit race, containerd issue
+ * #14433). Before the fix, Actual stayed Running and reconcile re-fired the
+ * stop op every InFlight timeout forever. */
+static void test_successful_op_converges_without_event(void) {
+    recording_op op;
+    recording_op_init(&op);
+
+    test_setup s;
+    base_setup(&s);
+    g_now_ms = 1000;
+    s.cfg.stages[STRIM_STAGE_SCALE_AND_EGRESS].status.desired =
+        STRIM_STAGE_STOPPED;
+    s.cfg.stages[STRIM_STAGE_SCALE_AND_EGRESS].status.actual =
+        STRIM_STAGE_RUNNING;
+    s.cfg.stages[STRIM_STAGE_SCALE_AND_EGRESS].stop_op = recording_op_fn;
+    s.cfg.stages[STRIM_STAGE_SCALE_AND_EGRESS].op_ctx = &op;
+
+    strim_controller *c = build_controller(&s);
+    CHECK(c != NULL);
+    if (c == NULL) {
+        recording_op_destroy(&op);
+        return;
+    }
+
+    pthread_t tid;
+    CHECK(pthread_create(&tid, NULL, run_thread, c) == 0);
+
+    strim_controller_request_reconcile(c);
+    await_fire(&op);
+    CHECK(recording_op_calls(&op) == 1);
+
+    /* wait_for_ops returns after the worker enqueued OP_COMPLETE; a
+     * subsequent submit is FIFO behind it. */
+    strim_controller_wait_for_ops(c);
+
+    strim_controller_status st;
+    CHECK(strim_controller_submit_status(c, &st) == 0);
+    CHECK(st.stages[STRIM_STAGE_SCALE_AND_EGRESS].actual == STRIM_STAGE_STOPPED);
+
+    /* Converged: no further stop op even after the inflight window passes. */
+    g_now_ms += TEST_INFLIGHT_TIMEOUT_MS + 1;
+    strim_controller_request_reconcile(c);
+    CHECK(strim_controller_submit_status(c, &st) == 0);
+    CHECK(recording_op_calls(&op) == 1);
+
+    strim_controller_close(c);
+    pthread_join(tid, NULL);
+    strim_controller_destroy(c);
+    recording_op_destroy(&op);
+}
+
 /* -------------------------------------------------------------------------
  * Wire-string helpers (the JSON contract the HTTP lane serializes)
  * ------------------------------------------------------------------------- */
@@ -1650,6 +1702,8 @@ int main(void) {
     printf("[ok] test_inflight_timeout_stale_clear_no_third_op\n");
     test_stage_event_updates_actual();
     printf("[ok] test_stage_event_updates_actual\n");
+    test_successful_op_converges_without_event();
+    printf("[ok] test_successful_op_converges_without_event\n");
     test_listeners();
     printf("[ok] test_listeners\n");
     test_submit_surface();

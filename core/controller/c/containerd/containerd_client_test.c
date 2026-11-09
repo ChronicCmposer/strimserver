@@ -2200,7 +2200,7 @@ static void test_lifecycle_stop(void) {
   uint8_t del_task_resp[128];
   size_t get_ctr_len, get_task_len, wait_len, del_task_len;
   struct script_arg sa;
-  struct fstep script[7];
+  struct fstep script[8];
   pthread_t th;
   strim_containerd_client *client = NULL;
   strim_container *ctr = NULL;
@@ -2230,15 +2230,18 @@ static void test_lifecycle_stop(void) {
   script[3].kind = FS_UNARY; /* Tasks/Kill(SIGTERM) */
   script[3].body = NULL;
   script[3].body_len = 0;
-  script[4].kind = FS_UNARY; /* Tasks/Delete */
-  script[4].body = del_task_resp;
-  script[4].body_len = (uint32_t)del_task_len;
-  script[5].kind = FS_UNARY; /* Snapshots/Remove (WithSnapshotCleanup) */
-  script[5].body = NULL;
-  script[5].body_len = 0;
-  script[6].kind = FS_UNARY; /* Containers/Delete */
+  script[4].kind = FS_UNARY; /* Tasks/Get (delete preflight, Go parity) */
+  script[4].body = get_task_resp;
+  script[4].body_len = (uint32_t)get_task_len;
+  script[5].kind = FS_UNARY; /* Tasks/Delete */
+  script[5].body = del_task_resp;
+  script[5].body_len = (uint32_t)del_task_len;
+  script[6].kind = FS_UNARY; /* Snapshots/Remove (WithSnapshotCleanup) */
   script[6].body = NULL;
   script[6].body_len = 0;
+  script[7].kind = FS_UNARY; /* Containers/Delete */
+  script[7].body = NULL;
+  script[7].body_len = 0;
 
   memset(&sa, 0, sizeof(sa));
   sa.listener_fd = lfd;

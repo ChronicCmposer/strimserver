@@ -27,7 +27,11 @@
  *     the desired-state op only when NOT in flight, or when the previous op
  *     exceeded inflight_timeout (a timed-out retry). An op is fired exactly
  *     once per inflight period; a failed op clears InFlight so the next
- *     reconcile retries. Cancellation, supersede, and the known
+ *     reconcile retries, and a successful op converges Actual to its target
+ *     (the Go controller instead waits for containerd's TaskExit event; a
+ *     successful op is equally authoritative and survives a lost event —
+ *     containerd's runc shim can drop /tasks/exit, issue #14433).
+ *     Cancellation, supersede, and the known
  *     event-cleared-InFlight divergence from "never two ops concurrently"
  *     are spelled out once, on strim_stage_op_superseded below.
  *
@@ -219,8 +223,9 @@ int64_t strim_stage_op_remaining_ms(const strim_stage_op_cancel *cancel);
  *                strim_stage_op_superseded() at safe points and bounds RPCs
  *                by strim_stage_op_remaining_ms().
  * Returns 0 on success, non-zero on failure (failure clears InFlight so the
- * next reconcile retries — the Go controller.go:304-312 contract; see the
- * generation-stamped clear in the supersede rationale above). Threading:
+ * next reconcile retries — the Go controller.go:304-312 contract; success
+ * clears InFlight and converges Actual to the op's target — see the
+ * generation-stamped result path in the supersede rationale above). Threading:
  * reconcile-fired ops run on the WORKER POOL (the Go `go func()` launches in
  * handleReconcile, controller.go:299-304); only the Teardown stop op runs on
  * the action-queue thread. Re-entrancy: a worker op calling a blocking

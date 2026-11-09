@@ -1577,6 +1577,49 @@ int strim_containerd_task_wait(strim_task *task, int64_t timeout_ms,
   return 0;
 }
 
+/* Read a task's current status (Tasks/Get). Mirrors the Go client's
+ * task.Delete preflight (t.Status(ctx)): it validates that the task is
+ * stopped before deletion and, because it is a shim round trip, keeps the
+ * runc shim's asynchronous /tasks/exit publish ahead of our Delete. Since
+ * containerd v2.3.0 a client that deletes immediately after Wait can win that
+ * race and lose the TaskExit event (containerd issue #14433). */
+static int task_status_locked(strim_task *task,
+                              containerd_v1_types_Status *status) {
+  containerd_services_tasks_v1_GetRequest req =
+      containerd_services_tasks_v1_GetRequest_init_zero;
+  containerd_services_tasks_v1_GetResponse resp =
+      containerd_services_tasks_v1_GetResponse_init_zero;
+  uint8_t *req_buf = NULL;
+  size_t req_len = 0;
+  uint8_t resp_buf[4096];
+  uint32_t resp_len = 0;
+  int rc;
+
+  req.container_id = task->container_id;
+  if (pb_encode_to_mem(containerd_services_tasks_v1_GetRequest_fields, &req,
+                       &req_buf, &req_len) < 0)
+    return STRIM_CTRD_ERR_NOMEM;
+  rc = shared_unary_locked(task->container->client, M_TASKS_GET, req_buf,
+                           (uint32_t)req_len, resp_buf, sizeof(resp_buf),
+                           &resp_len, CTRD_TIMEOUT_MS);
+  free(req_buf);
+  if (rc != 0)
+    return map_rpc_err(rc);
+  {
+    pb_istream_t is = pb_istream_from_buffer(resp_buf, resp_len);
+    if (!pb_decode(&is, containerd_services_tasks_v1_GetResponse_fields,
+                   &resp))
+      return STRIM_CTRD_ERR_PROTO;
+  }
+  if (!resp.has_process) {
+    pb_release(containerd_services_tasks_v1_GetResponse_fields, &resp);
+    return STRIM_CTRD_ERR_PROTO;
+  }
+  *status = resp.process.status;
+  pb_release(containerd_services_tasks_v1_GetResponse_fields, &resp);
+  return 0;
+}
+
 static int task_delete_locked(strim_task *task, int force) {
   containerd_services_tasks_v1_DeleteTaskRequest req =
       containerd_services_tasks_v1_DeleteTaskRequest_init_zero;
@@ -1585,6 +1628,22 @@ static int task_delete_locked(strim_task *task, int force) {
   uint8_t resp_buf[4096];
   uint32_t resp_len = 0;
   int rc;
+
+  /* Go task.Delete: only a stopped task may be deleted (a created task with
+   * PID 0 is also allowed; Go task.go:393-408). NotFound is tolerated — the
+   * stop path treats it as already gone. */
+  if (!force) {
+    containerd_v1_types_Status status;
+    rc = task_status_locked(task, &status);
+    if (rc == STRIM_CTRD_ERR_NOTFOUND)
+      return 0;
+    if (rc != 0)
+      return rc;
+    if (status != containerd_v1_types_Status_UNKNOWN &&
+        status != containerd_v1_types_Status_STOPPED &&
+        !(status == containerd_v1_types_Status_CREATED && task->pid == 0))
+      return STRIM_CTRD_ERR_RPC; /* task must be stopped before deletion */
+  }
 
   /* force: the Go WithProcessKill contract — Kill(SIGKILL, All=true), wait
    * for the exit, then Delete. The wait uses a dedicated connection so it
