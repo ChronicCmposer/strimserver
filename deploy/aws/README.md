@@ -211,14 +211,25 @@ IP, cleans up stale `/etc/hosts` entries left by pre-DDNS launches (the old
 because `strim.example.com` doesn't resolve until `deploy.sh` registers it),
 polls SSH, and hands off to `setup_strimserver` (execve).
 
-`launch` also defaults the **unset** deployment vars on arm64 (amd64 is
-untouched): `DEPLOYMENT=strimserver-deployment-go-arm64.tar` (the Go controller
-bundle), `DEPLOYMENT_SRC` to the latest arm64 Go GitHub release asset
+`DEPLOYMENT_SRC` is the primary source selector (`s3://`, `http(s)://`, or a
+local path). When `DEPLOYMENT` is unset, `setup_strimserver` derives the on-box
+artifact filename from the **basename** of `DEPLOYMENT_SRC`, so
+`.../strimserver-deployment-c-amd64.tar` lands as
+`/mnt/nvme/strimserver-deployment-c-amd64.tar` — never as a Go-named file.
+`DEPLOYMENT` is an explicit override of that on-box filename; it is required
+only for the legacy `$S3_BUCKET/$DEPLOYMENT` path, which defaults to the
+go-amd64 basename (`strimserver-deployment-go-amd64.tar`).
+
+`launch` defaults the **unset** deployment vars on arm64 (amd64 is untouched):
+when neither `DEPLOYMENT_SRC` nor `S3_BUCKET` is provided, it sets
+`DEPLOYMENT=strimserver-deployment-go-arm64.tar` (the Go controller bundle),
+`DEPLOYMENT_SRC` to the latest arm64 Go GitHub release asset
 (`.../releases/latest/download/strimserver-deployment-go-arm64.tar`), and
-`DEPLOYMENT_SHA256` from the arm64 Go `.sha256` asset. Explicit operator
-values in `.env` always win. The legacy `$S3_BUCKET/$DEPLOYMENT` path still
-applies when `DEPLOYMENT_SRC` is unset and `S3_BUCKET` is configured — with
-`DEPLOYMENT` defaulting to the go-arm64 basename.
+`DEPLOYMENT_SHA256` from the arm64 Go `.sha256` asset. When `DEPLOYMENT_SRC` is
+provided, `launch` leaves `DEPLOYMENT` unset so `setup_strimserver` derives it
+from the source's basename. An explicit `DEPLOYMENT` selects the matching
+default asset/sha when no source is provided. Explicit operator values in
+`.env` always win.
 
 ### 4.4 On-box setup (`setup_strimserver` → `deploy.sh`)
 

@@ -35,17 +35,24 @@ Env vars (typically sourced from deploy/aws/.env):
                         pinned DEFAULT_AMI_ID; arm64: the arm64 DLAMI SSM float)
   DEPLOYMENT_SRC        optional; passed through to setup_strimserver. On arm64
                         launches, when unset (and no S3_BUCKET legacy path), it
-                        defaults to the arm64 Go controller GitHub release asset
-                        (strimserver-deployment-go-arm64.tar); amd64 is untouched
-                        (setup_strimserver's own defaults stay in effect)
+                        defaults to the GitHub release asset for DEPLOYMENT (the
+                        arm64 Go controller bundle unless DEPLOYMENT names
+                        another arm64 bundle); amd64 is untouched
+                        (setup_strimserver's own defaults stay in effect). When
+                        set explicitly, setup_strimserver derives the bundle
+                        name from this source's basename.
   DEPLOYMENT            optional; the bundle basename setup_strimserver extracts
-                        and (legacy) fetches. arm64 defaults to
-                        strimserver-deployment-go-arm64.tar when unset; amd64 is
-                        untouched
+                        and (legacy) fetches. On arm64 launches it is only the
+                        no-source default: when DEPLOYMENT_SRC is unset it
+                        defaults to strimserver-deployment-go-arm64.tar, and an
+                        explicit value selects that bundle's default asset and
+                        .sha256; amd64 is untouched. When DEPLOYMENT_SRC is set,
+                        DEPLOYMENT is left for setup_strimserver to derive from
+                        the source basename.
   DEPLOYMENT_SHA256     optional; passed through to setup_strimserver's integrity
                         check. On the arm64 default (GitHub) path, when unset it
-                        is fetched from the published arm64 Go .sha256 release
-                        asset
+                        is fetched from the published DEPLOYMENT asset's .sha256
+                        release asset; untouched when DEPLOYMENT_SRC is set.
   AWS_REGION            optional; otherwise your CLI's configured region is used
   SSH_HOST              ignored for the bootstrap target: the handoff to
                         setup_strimserver always connects by the instance's raw
@@ -106,10 +113,11 @@ DEFAULT_DLAMI_SSM_PARAM_ARM64 = (
 # its .sha256) -- so no two bundles ever collide on a GitHub release or S3.
 # launch defaults the unset arm64 vars to the Go arm64 bundle (the Go
 # controller is the long-standing default; the C bundles are opted into via
-# DEPLOYMENT_SRC / DEPLOYMENT). //:release and //:publish_all upload all four;
-# setup_strimserver resolves the source from DEPLOYMENT_SRC / DEPLOYMENT
-# (defaulting DEPLOYMENT to the go-arm64 basename here so an arm64 launch never
-# silently fetches the amd64 tar).
+# DEPLOYMENT_SRC / DEPLOYMENT). //:release and //:publish_all upload all four.
+# setup_strimserver derives DEPLOYMENT from DEPLOYMENT_SRC's basename when the
+# source is explicit; the go-arm64 basename here is only the no-source default,
+# so an arm64 launch never silently fetches the amd64 tar. An explicit
+# DEPLOYMENT (with no source) selects that bundle's default asset and .sha256.
 DEPLOYMENT_TAR_GO_ARM64 = "strimserver-deployment-go-arm64.tar"
 RELEASE_DOWNLOAD_URL = (
     "https://github.com/ChronicCmposer/strimserver/releases/latest/download/{asset}"
@@ -133,31 +141,51 @@ def default_deployment_env(cfg):
     """arm64 deployment defaults; amd64 is left untouched so its behavior is
     byte-identical to the pre-dual-arch launches.
 
-    A .env written for the amd64 cutover predates the arm64 bundle, so an arm64
-    launch must not silently fetch the amd64 tar. When the operator left the
-    deployment source unset and no legacy S3_BUCKET path is configured, point
-    DEPLOYMENT_SRC at the Go arm64 GitHub release asset, default DEPLOYMENT to
-    the go-arm64 basename (which also selects the go-arm64 key on the legacy
-    $S3_BUCKET/$DEPLOYMENT path), and default DEPLOYMENT_SHA256 from the
-    published go-arm64 .sha256 asset. Explicit operator values always win
-    (setdefault). The defaults propagate to setup_strimserver through the execve
-    handoff's copied environment.
+    A .env written for the amd64 cutover predates the arm64 bundles, so an arm64
+    launch must not silently fetch the amd64 tar. An explicit DEPLOYMENT_SRC
+    always wins: setup_strimserver derives DEPLOYMENT from its basename, so this
+    function leaves DEPLOYMENT, DEPLOYMENT_SHA256, and the network untouched.
+
+    Only when DEPLOYMENT_SRC is unset does this function apply defaults. It
+    defaults DEPLOYMENT to the go-arm64 basename (which also selects the
+    go-arm64 key on the legacy $S3_BUCKET/$DEPLOYMENT path); an explicit
+    DEPLOYMENT selects that bundle's matching asset and .sha256 instead. When
+    no legacy S3_BUCKET path is configured, it points DEPLOYMENT_SRC at the
+    GitHub release asset for DEPLOYMENT and defaults DEPLOYMENT_SHA256 from the
+    published .sha256 asset. Explicit operator values always win (setdefault).
+    The defaults propagate to setup_strimserver through the execve handoff's
+    copied environment.
     """
     if cfg.arch != "arm64":
         return
-    os.environ.setdefault("DEPLOYMENT", DEPLOYMENT_TAR_GO_ARM64)
+
     src = os.environ.get("DEPLOYMENT_SRC", "").strip()
     bucket = os.environ.get("S3_BUCKET", "").strip()
-    if not src and not bucket:
-        os.environ["DEPLOYMENT_SRC"] = RELEASE_DOWNLOAD_URL.format(asset=DEPLOYMENT_TAR_GO_ARM64)
-        sha = fetch_release_sha256(DEPLOYMENT_TAR_GO_ARM64)
-        if sha:
-            os.environ.setdefault("DEPLOYMENT_SHA256", sha)
-        else:
-            print(f"warning: could not fetch the go-arm64 .sha256 release asset; "
-                  f"DEPLOYMENT_SHA256 left unset (set it manually to verify the "
-                  f"download, or publish the go-arm64 release first)")
-    print(f"arm64 deployment defaults: DEPLOYMENT={os.environ['DEPLOYMENT']}"
+
+    # An explicit source wins outright: setup_strimserver derives the bundle
+    # name from its basename, so this function must not set DEPLOYMENT, fetch a
+    # .sha256, or touch DEPLOYMENT_SHA256.
+    if not src:
+        deployment = os.environ.get("DEPLOYMENT", "").strip() or DEPLOYMENT_TAR_GO_ARM64
+        os.environ.setdefault("DEPLOYMENT", deployment)
+
+        # With no explicit source and no legacy S3_BUCKET path, download the
+        # matching bundle from the GitHub release and default its .sha256.
+        if not bucket:
+            os.environ["DEPLOYMENT_SRC"] = RELEASE_DOWNLOAD_URL.format(asset=deployment)
+            sha = fetch_release_sha256(deployment)
+            if sha:
+                os.environ.setdefault("DEPLOYMENT_SHA256", sha)
+            else:
+                print(f"warning: could not fetch the {deployment} .sha256 release "
+                      f"asset; DEPLOYMENT_SHA256 left unset (set it manually to "
+                      f"verify the download, or publish the {deployment} release "
+                      f"first)")
+
+    deployment_name = os.environ.get("DEPLOYMENT", "").strip()
+    label = (deployment_name
+             or "<derived from DEPLOYMENT_SRC by setup_strimserver>")
+    print(f"arm64 deployment defaults: DEPLOYMENT={label}"
           + (f" DEPLOYMENT_SRC={os.environ['DEPLOYMENT_SRC']}" if os.environ.get("DEPLOYMENT_SRC") else "")
           + (f" DEPLOYMENT_SHA256={os.environ['DEPLOYMENT_SHA256']}"
              if os.environ.get("DEPLOYMENT_SHA256") else ""))

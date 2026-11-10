@@ -988,7 +988,12 @@ controller language — the Go controller is the default
 controller bundles use
 `strimserver-deployment-c-{amd64,arm64}.tar` (`launch` defaults
 the unset arm64 vars to the Go arm64 asset, so an arm64 launch
-never silently fetches the amd64 tar). Set `DEPLOYMENT_SHA256`
+never silently fetches the amd64 tar). The on-box filename is
+derived from the selected source's basename (so
+`.../strimserver-deployment-c-amd64.tar` lands as
+`/mnt/nvme/strimserver-deployment-c-amd64.tar`); `DEPLOYMENT` is
+the legacy `$S3_BUCKET/$DEPLOYMENT` basename and an explicit
+override of that on-box name. Set `DEPLOYMENT_SHA256`
 to verify the download against the checksum produced by
 `make package` / `make release` (each bundle publishes one).
 Your Twitch stream key is supplied here via `TWITCH_STREAM_KEY`

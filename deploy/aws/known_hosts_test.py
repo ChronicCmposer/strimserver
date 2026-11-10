@@ -5,9 +5,11 @@ Run directly with `python3 deploy/aws/known_hosts_test.py` or via the Bazel
 `//deploy/aws:known_hosts_test` sh_test wrapper.
 """
 
+import contextlib
 import fcntl
 import importlib.machinery
 import importlib.util
+import io
 import os
 import re
 import stat
@@ -358,6 +360,169 @@ class SetupWiringTest(unittest.TestCase):
         self.assertIn("UserKnownHostsFile=/tmp/kh", command)
         self.assertEqual(command[command.index("-P") + 1], "2222")
         self.assertNotIn("-p", command)
+
+
+DEPLOYMENT_ASSETS = (
+    "strimserver-deployment-go-amd64.tar",
+    "strimserver-deployment-c-amd64.tar",
+    "strimserver-deployment-go-arm64.tar",
+    "strimserver-deployment-c-arm64.tar",
+)
+
+
+class ResolveSourceTest(unittest.TestCase):
+    """resolve_source() derives the on-box filename from the source basename.
+
+    DEPLOYMENT stays an explicit override; the legacy $S3_BUCKET path keeps
+    defaulting to the go-amd64 bundle.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.setup = _load_script("setup_strimserver", "strimserver_setup")
+
+    def _resolve(self, env):
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.setup.resolve_source()
+
+    def test_s3_source_selects_its_own_basename(self):
+        src = "s3://bucket/strimserver-deployment-c-amd64.tar"
+        self.assertEqual(
+            self._resolve({"DEPLOYMENT_SRC": src}),
+            (src, "strimserver-deployment-c-amd64.tar"))
+
+    def test_every_s3_asset_basename_is_preserved(self):
+        for name in DEPLOYMENT_ASSETS:
+            with self.subTest(name=name):
+                src = f"s3://bucket/{name}"
+                self.assertEqual(self._resolve({"DEPLOYMENT_SRC": src}),
+                                 (src, name))
+
+    def test_every_https_asset_basename_is_preserved(self):
+        for name in DEPLOYMENT_ASSETS:
+            with self.subTest(name=name):
+                src = ("https://github.com/ChronicCmposer/strimserver/"
+                       f"releases/latest/download/{name}")
+                self.assertEqual(self._resolve({"DEPLOYMENT_SRC": src}),
+                                 (src, name))
+
+    def test_local_path_basename_is_preserved(self):
+        src = "~/Downloads/strimserver-deployment-c-amd64.tar"
+        self.assertEqual(
+            self._resolve({"DEPLOYMENT_SRC": src}),
+            (src, "strimserver-deployment-c-amd64.tar"))
+
+    def test_explicit_deployment_overrides_a_differently_basnamed_source(self):
+        src = "s3://bucket/strimserver-deployment-go-arm64.tar"
+        self.assertEqual(
+            self._resolve({
+                "DEPLOYMENT_SRC": src,
+                "DEPLOYMENT": "strimserver-deployment-c-amd64.tar",
+            }),
+            (src, "strimserver-deployment-c-amd64.tar"))
+
+    def test_explicit_deployment_that_disagrees_warns_on_stderr(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            deployment = self._resolve({
+                "DEPLOYMENT_SRC":
+                    "s3://bucket/strimserver-deployment-go-arm64.tar",
+                "DEPLOYMENT": "strimserver-deployment-c-amd64.tar",
+            })[1]
+        self.assertEqual(deployment, "strimserver-deployment-c-amd64.tar")
+        self.assertIn("strimserver-deployment-c-amd64.tar", stderr.getvalue())
+
+    def test_legacy_bucket_defaults_to_go_amd64(self):
+        self.assertEqual(
+            self._resolve({"S3_BUCKET": "s3://bucket"}),
+            ("s3://bucket/strimserver-deployment-go-amd64.tar",
+             "strimserver-deployment-go-amd64.tar"))
+
+    def test_legacy_bucket_honors_explicit_deployment(self):
+        self.assertEqual(
+            self._resolve({
+                "S3_BUCKET": "s3://bucket",
+                "DEPLOYMENT": "strimserver-deployment-c-amd64.tar",
+            }),
+            ("s3://bucket/strimserver-deployment-c-amd64.tar",
+             "strimserver-deployment-c-amd64.tar"))
+
+    def test_no_source_configured_exits(self):
+        with self.assertRaises(SystemExit):
+            self._resolve({})
+
+    def test_source_without_a_filename_exits(self):
+        with self.assertRaises(SystemExit):
+            self._resolve({"DEPLOYMENT_SRC": "s3://bucket/"})
+
+
+class LaunchDeploymentDefaultsTest(unittest.TestCase):
+    """default_deployment_env() must not clobber an operator-provided source
+    and must derive the matching arm64 asset from an explicit DEPLOYMENT."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.launch = _load_launch()
+
+    @staticmethod
+    def _arm64():
+        return mock.Mock(arch="arm64")
+
+    def test_explicit_source_leaves_deployment_for_setup_to_resolve(self):
+        src = ("https://github.com/ChronicCmposer/strimserver/"
+               "releases/latest/download/strimserver-deployment-c-arm64.tar")
+        with mock.patch.dict(os.environ, {"DEPLOYMENT_SRC": src}, clear=True), \
+                mock.patch.object(self.launch, "fetch_release_sha256",
+                                  return_value="deadbeef") as fetch:
+            self.launch.default_deployment_env(self._arm64())
+            self.assertNotIn("DEPLOYMENT", os.environ)
+            fetch.assert_not_called()
+
+    def test_no_source_defaults_all_three_to_go_arm64(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(self.launch, "fetch_release_sha256",
+                                  return_value="deadbeef") as fetch:
+            self.launch.default_deployment_env(self._arm64())
+            self.assertEqual(os.environ["DEPLOYMENT"],
+                             "strimserver-deployment-go-arm64.tar")
+            self.assertTrue(os.environ["DEPLOYMENT_SRC"].endswith(
+                "strimserver-deployment-go-arm64.tar"))
+            self.assertEqual(os.environ["DEPLOYMENT_SHA256"], "deadbeef")
+            fetch.assert_called_once_with(
+                "strimserver-deployment-go-arm64.tar")
+
+    def test_explicit_deployment_selects_the_matching_asset(self):
+        with mock.patch.dict(
+                os.environ,
+                {"DEPLOYMENT": "strimserver-deployment-c-arm64.tar"},
+                clear=True), \
+                mock.patch.object(self.launch, "fetch_release_sha256",
+                                  return_value="deadbeef") as fetch:
+            self.launch.default_deployment_env(self._arm64())
+            self.assertTrue(os.environ["DEPLOYMENT_SRC"].endswith(
+                "strimserver-deployment-c-arm64.tar"))
+            fetch.assert_called_once_with(
+                "strimserver-deployment-c-arm64.tar")
+
+    def test_legacy_bucket_defaults_deployment_without_a_source(self):
+        with mock.patch.dict(os.environ, {"S3_BUCKET": "s3://bucket"},
+                             clear=True), \
+                mock.patch.object(self.launch, "fetch_release_sha256",
+                                  return_value="deadbeef"):
+            self.launch.default_deployment_env(self._arm64())
+            self.assertEqual(os.environ["DEPLOYMENT"],
+                             "strimserver-deployment-go-arm64.tar")
+            self.assertNotIn("DEPLOYMENT_SRC", os.environ)
+
+    def test_amd64_leaves_the_environment_untouched(self):
+        env = {
+            "DEPLOYMENT": "strimserver-deployment-c-amd64.tar",
+            "DEPLOYMENT_SRC": "s3://bucket/strimserver-deployment-c-amd64.tar",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            before = dict(os.environ)
+            self.launch.default_deployment_env(mock.Mock(arch="amd64"))
+            self.assertEqual(dict(os.environ), before)
 
 
 if __name__ == "__main__":

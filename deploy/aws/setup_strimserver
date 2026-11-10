@@ -8,6 +8,7 @@ import known_hosts
 
 
 PROFILE = os.environ.get("AWS_PROFILE", "").strip() or "strimserver"
+DEFAULT_DEPLOYMENT = "strimserver-deployment-go-amd64.tar"
 
 
 def ssh_identity_flags():
@@ -105,23 +106,41 @@ def bind_target_instance(hostname):
 
 
 def resolve_source():
-    """Where the deployment tar comes from.
+    """Where the deployment tar comes from, and the name it lands under.
 
     Precedence:
-      1. DEPLOYMENT_SRC -- s3://..., https://..., http://..., or a local path
-      2. legacy $S3_BUCKET/$DEPLOYMENT
+      1. DEPLOYMENT_SRC -- s3://..., https://..., http://..., or a local path.
+         The on-box filename is derived from the source basename; DEPLOYMENT
+         is an explicit override and, when set, must agree with that basename.
+      2. legacy $S3_BUCKET/$DEPLOYMENT, defaulting to DEFAULT_DEPLOYMENT.
+
+    Returns (src, deployment).
     """
-    deployment = os.environ.get("DEPLOYMENT", "strimserver-deployment-go-amd64.tar")
     src = os.environ.get("DEPLOYMENT_SRC", "").strip()
-    if not src:
-        bucket = os.environ.get("S3_BUCKET", "").strip()
-        if not bucket or "<bucket-name>" in bucket:
-            sys.exit(
-                "No deployment source. Set DEPLOYMENT_SRC to an s3:// URI, an "
-                "https:// URL (e.g. a GitHub release asset), or a local file path."
+    explicit = os.environ.get("DEPLOYMENT", "").strip()
+
+    if src:
+        source_basename = os.path.basename(urlparse(src).path)
+        deployment = explicit or source_basename
+        if not deployment:
+            sys.exit("DEPLOYMENT_SRC has no filename; set DEPLOYMENT explicitly.")
+        if explicit and explicit != source_basename:
+            print(
+                f"warning: DEPLOYMENT={explicit!r} differs from the source "
+                f"basename {source_basename!r}; using the explicit name "
+                f"{explicit!r}.",
+                file=sys.stderr,
             )
-        src = f"{bucket}/{deployment}"
-    return src, deployment
+        return src, deployment
+
+    bucket = os.environ.get("S3_BUCKET", "").strip()
+    if not bucket or "<bucket-name>" in bucket:
+        sys.exit(
+            "No deployment source. Set DEPLOYMENT_SRC to an s3:// URI, an "
+            "https:// URL (e.g. a GitHub release asset), or a local file path."
+        )
+    deployment = explicit or DEFAULT_DEPLOYMENT
+    return f"{bucket}/{deployment}", deployment
 
 def resolve_twitch_key():
     """Operator-supplied Twitch stream key (secret), or None.
