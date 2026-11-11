@@ -53,12 +53,12 @@ var pins = []pin{
 	{
 		name:    "aspect_rules_js",
 		file:    "MODULE.bazel",
-		needles: []string{`bazel_dep(name = "aspect_rules_js", version = "3.5.2")`},
+		needles: []string{`bazel_dep(name = "aspect_rules_js", version = "3.6.0")`},
 	},
 	{
 		name:    "rules_cc",
 		file:    "MODULE.bazel",
-		needles: []string{`bazel_dep(name = "rules_cc", version = "0.2.27")`},
+		needles: []string{`bazel_dep(name = "rules_cc", version = "0.2.28")`},
 	},
 	{
 		name:    "rules_nodejs",
@@ -94,31 +94,31 @@ var pins = []pin{
 	{
 		name:    "debian-snapshot",
 		file:    "MODULE.bazel",
-		needles: []string{`uris = ["https://snapshot.debian.org/archive/debian/20261027T000000Z"]`},
+		needles: []string{`uris = ["https://snapshot.debian.org/archive/debian/20261104T000000Z"]`},
 	},
 	{
 		// D3: the @ffmpeg_dist artifact and the runtime debs converge on one
-		// Debian snapshot, so both producer scripts default to 20261027.
+		// Debian snapshot, so both producer scripts default to 20261104.
 		name:    "ffmpeg-dist-build",
 		file:    "tools/ffmpeg-dist/build.sh",
-		needles: []string{"DEBIAN_SNAPSHOT:=20261027T000000Z"},
+		needles: []string{"DEBIAN_SNAPSHOT:=20261104T000000Z"},
 	},
 	{
 		name:    "ffmpeg-dist-publish",
 		file:    "tools/ffmpeg-dist/publish.sh",
-		needles: []string{"DEBIAN_SNAPSHOT:-20261027T000000Z}"},
+		needles: []string{"DEBIAN_SNAPSHOT:-20261104T000000Z}"},
 	},
 	{
 		name:    "aws-launch-ami",
 		file:    "deploy/aws/launch",
-		needles: []string{"ami-0b8bfb88d687f3529"},
+		needles: []string{"ami-0198b63ccfac121e8"},
 	},
 	{
-		name: "openssh-10.6p1",
+		name: "openssh-10.6p2",
 		file: "tools/openssh/build.sh",
 		needles: []string{
-			"V_10_6_P1",
-			"10.6p1",
+			"V_10_6_P2",
+			"10.6p2",
 		},
 	},
 	{
@@ -136,7 +136,7 @@ var pins = []pin{
 	{
 		name:    "streamdeck-package-manager",
 		file:    "tools/streamdeck-plugin/package.json",
-		needles: []string{`"packageManager": "pnpm@12.16.1"`},
+		needles: []string{`"packageManager": "pnpm@12.18.0"`},
 	},
 	{
 		name:    "go-winio",
@@ -149,40 +149,40 @@ var pins = []pin{
 	// failure identifies both the file and the exact value still missing.
 
 	{
-		name:    "bazelversion-9.3.1",
+		name:    "bazelversion-9.3.2",
 		file:    ".bazelversion",
-		needles: []string{"9.3.1"},
+		needles: []string{"9.3.2"},
 	},
 	{
-		name:    "nvmrc-26.13.0",
+		name:    "nvmrc-26.13.1",
 		file:    "tools/streamdeck-plugin/.nvmrc",
-		needles: []string{"26.13.0"},
+		needles: []string{"26.13.1"},
 	},
 	{
-		name:    "controller-gomod-go-1.27.3",
+		name:    "controller-gomod-go-1.27.4",
 		file:    "core/controller/go.mod",
-		needles: []string{"go 1.27.3"},
+		needles: []string{"go 1.27.4"},
 	},
 	{
-		name:    "check-deps-gomod-go-1.27.3",
+		name:    "check-deps-gomod-go-1.27.4",
 		file:    "tools/check-deps/go.mod",
-		needles: []string{"go 1.27.3"},
+		needles: []string{"go 1.27.4"},
 	},
 	{
-		name:          "env-project-go-version-tag-go1.27.3",
+		name:          "env-project-go-version-tag-go1.27.4",
 		file:          ".env",
-		needles:       []string{`PROJECT_GO_VERSION_TAG="go1.27.3"`},
+		needles:       []string{`PROJECT_GO_VERSION_TAG="go1.27.4"`},
 		skipIfMissing: true,
 	},
 	{
-		name:    "deps-check-workflow-go-version-1.27.3",
+		name:    "deps-check-workflow-go-version-1.27.4",
 		file:    ".github/workflows/deps-check.yml",
-		needles: []string{"go-version: 1.27.3"},
+		needles: []string{"go-version: 1.27.4"},
 	},
 	{
-		name:    "deps-strict-workflow-go-version-1.27.3",
+		name:    "deps-strict-workflow-go-version-1.27.4",
 		file:    ".github/workflows/deps-strict.yml",
-		needles: []string{"go-version: 1.27.3"},
+		needles: []string{"go-version: 1.27.4"},
 	},
 	{
 		name:    "controller-gomod-containerd-v2.3.6",
@@ -190,9 +190,9 @@ var pins = []pin{
 		needles: []string{"github.com/containerd/containerd/v2 v2.3.6"},
 	},
 	{
-		name:    "controller-gomod-klauspost-compress-v1.20.1",
+		name:    "controller-gomod-klauspost-compress-v1.20.4",
 		file:    "core/controller/go.mod",
-		needles: []string{"github.com/klauspost/compress v1.20.1"},
+		needles: []string{"github.com/klauspost/compress v1.20.4"},
 	},
 	{
 		name:    "controller-gomod-otel-v1.47.0",

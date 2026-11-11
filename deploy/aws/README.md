@@ -16,7 +16,7 @@ the production cutover — read it before any arm64 launch.
 | Instance | `g4dn.xlarge` (x86_64 + T4) / `g6.xlarge` (L4) | `g5g.2xlarge` (Graviton2 + T4G) |
 | CPU ISA | x86_64 | arm64, armv8.2-a (Neoverse N1) |
 | GPU / gencode | T4 `sm_75` (L4 `sm_89` on g6) | T4G `sm_75` — same gencode as T4 |
-| AMI | Pinned x86_64 AL2023 NVIDIA DLAMI (`DEFAULT_AMI_ID`, us-east-2) | arm64 AL2023 NVIDIA DLAMI via the SSM float `.../arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id` |
+| AMI | Pinned x86_64 AL2023 NVIDIA DLAMI 20261106 (`DEFAULT_AMI_ID`, us-east-2) | arm64 AL2023 NVIDIA DLAMI via the SSM float `.../arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id` |
 | Controller in image | Go controller (the oracle), pure-Go static `linux/amd64` | Go controller (the oracle), pure-Go static `linux/arm64`; the alternate asm build (`//core/controller/alternate/asm:controller_asm`) is explicit/manual |
 
 The controller image is platform-selected in `core/controller/BUILD.bazel`:
@@ -192,7 +192,7 @@ deploy/aws/launch --type g4dn.xlarge --wait
 ```
 
 The amd64 AMI stays the pinned `DEFAULT_AMI_ID`
-(`ami-0e383fef63b2191d4`, us-east-2 AL2023 NVIDIA DLAMI) so the containerd
+(`ami-0198b63ccfac121e8`, us-east-2 AL2023 NVIDIA DLAMI 20261106) so the containerd
 runtime is deterministic across launches. For a non-us-east-2 region, set
 `AMI_ID` or `DLAMI_SSM_PARAM` explicitly.
 

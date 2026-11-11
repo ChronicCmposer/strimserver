@@ -21,10 +21,10 @@
 #                          is the default and produces the byte-identical
 #                          pinned artifact. All other pins and configure
 #                          flags are arch-independent (GENCODE stays sm_75).
-#   NV_CODEC_HEADERS_TAG   n13.0.19.1
-#   NV_CODEC_HEADERS_COMMIT 88fee5c37318c991a8762d423530f91681e32e3a
-#   CUDA_MANIFEST_URL      https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json
-#   DEBIAN_SNAPSHOT        20261027T000000Z
+#   NV_CODEC_HEADERS_TAG   n13.1.15.0
+#   NV_CODEC_HEADERS_COMMIT 0a6fba9a2820628b8103464f4c8753ee05838baa
+#   CUDA_MANIFEST_URL      https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.5.0.json
+#   DEBIAN_SNAPSHOT        20261104T000000Z
 #   CUDA_COMPONENTS        cuda_nvcc cuda_cudart cuda_crt libnvvm
 #   GENCODE                arch=compute_75,code=sm_75
 #   NPROC                  host nproc (env-overridable)
@@ -46,7 +46,7 @@
 #     with gpgv. (The reference harness hand-copied a gpgv binary into its
 #     rootfs; this bootstrap makes that step reproducible. Both produce the
 #     identical gpgv package.)
-#   * CUDA_COMPONENTS includes cuda_crt and libnvvm (nvcc 13.2.2 needs both).
+#   * CUDA_COMPONENTS includes cuda_crt and libnvvm (nvcc 13.5.0 needs both).
 #   * LD_DEBUG is never set (runtime-only noise that slows qemu).
 # =============================================================================
 set -eux -o pipefail
@@ -75,12 +75,12 @@ case "$FFMPEG_ARCH" in
     exit 1
     ;;
 esac
-: "${NV_CODEC_HEADERS_TAG:=n13.0.19.1}"
-: "${NV_CODEC_HEADERS_COMMIT:=88fee5c37318c991a8762d423530f91681e32e3a}"
-: "${CUDA_MANIFEST_URL:=https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json}"
+: "${NV_CODEC_HEADERS_TAG:=n13.1.15.0}"
+: "${NV_CODEC_HEADERS_COMMIT:=0a6fba9a2820628b8103464f4c8753ee05838baa}"
+: "${CUDA_MANIFEST_URL:=https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.5.0.json}"
 # This snapshot is both the artifact-reproducibility pin for the published
-# @ffmpeg_dist (deb20261027) and the source of the runtime image debs in MODULE.bazel.
-: "${DEBIAN_SNAPSHOT:=20261027T000000Z}"
+# @ffmpeg_dist (deb20261104) and the source of the runtime image debs in MODULE.bazel.
+: "${DEBIAN_SNAPSHOT:=20261104T000000Z}"
 : "${CUDA_COMPONENTS:=cuda_nvcc cuda_cudart cuda_crt libnvvm}"
 : "${GENCODE:=arch=compute_75,code=sm_75}"
 : "${NPROC:=$(nproc)}"
@@ -180,7 +180,7 @@ if [[ "$reuse" != 1 ]]; then
     /usr/local/cuda/bin/nvcc --version
 
     # --- Phase 3: nv-codec-headers (tag for readability, exact commit as pin) ----
-    # The n13.0.19.1 tag is annotated and currently resolves to the pinned commit;
+    # The n13.1.15.0 tag is annotated and currently resolves to the pinned commit;
     # the explicit checkout guards determinism if the tag is ever force-moved.
     rm -rf /opt/nv-codec-headers
     git clone --depth 1 --branch "$NV_CODEC_HEADERS_TAG" \

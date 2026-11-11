@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "description": "Stream Deck control for the strimserver controller",
   "type": "module",
-  "packageManager": "pnpm@12.16.1",
+  "packageManager": "pnpm@12.18.0",
   "scripts": {
     "build": "rollup -c",
     "test": "node --test src/client/version.test.ts",

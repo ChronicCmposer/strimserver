@@ -1,7 +1,7 @@
 // Package pins also contains the single-snapshot oracle for the FFmpeg image.
 //
 // Orchestrator decision D3 converges the prebuilt @ffmpeg_dist artifact and the
-// runtime image onto one Debian snapshot. The same date (20261027) must appear
+// runtime image onto one Debian snapshot. The same date (20261104) must appear
 // in all five places that record it:
 //
 //  1. the MODULE.bazel s3_http_archive(name = "ffmpeg_dist", ...) artifact name
@@ -28,8 +28,8 @@ import (
 
 // agreedSnapshotDate is the single Debian snapshot date every FFmpeg-related
 // pin must record after decision D3. The eight-digit form matches both the
-// artifact name (deb20261027) and the snapshot timestamps (20261027T000000Z).
-const agreedSnapshotDate = "20261027"
+// artifact name (deb20261104) and the snapshot timestamps (20261104T000000Z).
+const agreedSnapshotDate = "20261104"
 
 // snapshotCheck is one location that records a Debian date.
 type snapshotCheck struct {
@@ -68,7 +68,16 @@ func (c snapshotCheck) dates(content string) ([]string, error) {
 	seen := make(map[string]bool, len(matches))
 	found := make([]string, 0, len(matches))
 	for _, match := range matches {
-		date := match[1]
+		// A check's date regexp captures the date in whichever group matched
+		// (alternation, e.g. the README check's several documented forms, can
+		// put it in group 1, 2, or 3). Use the first non-empty group.
+		date := ""
+		for _, group := range match[1:] {
+			if group != "" {
+				date = group
+				break
+			}
+		}
 		if seen[date] {
 			continue
 		}
@@ -109,12 +118,15 @@ var snapshotChecks = []snapshotCheck{
 		describe: "the DEBIAN_SNAPSHOT:- default",
 	},
 	{
-		// README documents the date in several forms (artifact file name,
-		// snapshot timestamp, base-image tag), so every eight-digit date it
-		// mentions must be the agreed one.
+		// README documents the Debian date in specifically FFmpeg-artifact forms:
+		// the artifact file name (deb<date>-), the snapshot timestamp
+		// (<date>T......Z), and the base-image tag (debian:trixie-<date>-slim).
+		// Matching only those forms keeps this coherence check from flagging
+		// unrelated eight-digit dates the README also records (for example the
+		// pinned DLAMI release date in the EC2 section).
 		name:     "readme-documented-snapshot",
 		file:     "README.md",
-		date:     regexp.MustCompile(`(\d{8})`),
+		date:     regexp.MustCompile(`deb(\d{8})-|(\d{8})T\d{6}Z|trixie-(\d{8})-slim`),
 		describe: "the documented Debian snapshot",
 	},
 }

@@ -26,10 +26,10 @@ jobs:
       - uses: bazelbuild/setup-bazelisk@v3
 
       # Go version taken from the `go` directive in core/controller/go.mod
-      # (go 1.27.3; mirrored as PROJECT_GO_VERSION_TAG in .env).
+      # (go 1.27.4; mirrored as PROJECT_GO_VERSION_TAG in .env).
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: 1.27.3
+          go-version: 1.27.4
 
       # Node version from tools/streamdeck-plugin/.nvmrc (Node 24.21.0). The
       # hermetic check does not shell out to pnpm (--native-tools=false), but

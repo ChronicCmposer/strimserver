@@ -77,7 +77,7 @@
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "platforms", "version": "1.1.0", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "bazel_skylib", "version": "1.9.2", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_shell", "version": "0.8.0", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_cc", "version": "0.2.27", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_cc", "version": "0.2.28", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "hermetic_cc_toolchain", "version": "4.3.0", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_go", "version": "0.65.0", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "gazelle", "version": "0.54.0", "kind": "version", "tracked_now": true},
@@ -85,14 +85,14 @@
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_distroless", "version": "0.9.4", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_oci", "version": "2.3.0", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_pkg", "version": "1.3.0", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "aspect_rules_js", "version": "3.5.2", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "aspect_rules_js", "version": "3.6.0", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "aspect_rules_ts", "version": "3.10.1", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_nodejs", "version": "6.7.7", "kind": "version", "tracked_now": true},
 
     {"source": "MODULE.bazel:single_version_override", "file": "MODULE.bazel", "name": "aspect_bazel_lib", "version": "2.22.5", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:single_version_override", "file": "MODULE.bazel", "name": "bazel_lib", "version": "3.7.2", "kind": "version", "tracked_now": true},
 
-    {"source": "MODULE.bazel:apt.sources_list", "file": "MODULE.bazel", "name": "debian", "version": "20261027T000000Z", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:apt.sources_list", "file": "MODULE.bazel", "name": "debian", "version": "20261104T000000Z", "kind": "version", "tracked_now": true},
 
     {"source": "MODULE.bazel:apt.install", "file": "MODULE.bazel", "name": "dash", "version": "", "kind": "version", "tracked_now": false},
     {"source": "MODULE.bazel:apt.install", "file": "MODULE.bazel", "name": "busybox-static", "version": "", "kind": "version", "tracked_now": false},
@@ -128,16 +128,16 @@
     {"source": "MODULE.bazel:amd64_sysroot", "file": "MODULE.bazel", "name": "amd64_sysroot:linux_libc:sha256", "version": "da463ddd3ee96b37c33f16da99c47b03b4e514888d3d853e73253ee73bd0d7d8", "kind": "integrity", "tracked_now": false},
 
     {"source": "MODULE.bazel:s3_http_archive", "file": "MODULE.bazel", "name": "ffmpeg_dist", "version": "8.1", "kind": "version", "tracked_now": false},
-    {"source": "MODULE.bazel:s3_http_archive", "file": "MODULE.bazel", "name": "ffmpeg_dist:sha256", "version": "344a51efeb498c5e84acd23e8854c3dbac132923049420b76bf7224648685c4f", "kind": "integrity", "tracked_now": false},
+    {"source": "MODULE.bazel:s3_http_archive", "file": "MODULE.bazel", "name": "ffmpeg_dist:sha256", "version": "3531de59f1964dd849780d3d247993a1f2028e950873b47ccc05df154eda7e21", "kind": "integrity", "tracked_now": false},
     {"source": "MODULE.bazel:s3_http_archive", "file": "MODULE.bazel", "name": "ffmpeg_dist_arm64", "version": "8.1", "kind": "version", "tracked_now": false},
-    {"source": "MODULE.bazel:s3_http_archive", "file": "MODULE.bazel", "name": "ffmpeg_dist_arm64:sha256", "version": "7edafaca50c275e8328a7f244ee541ad65aa3c9cbcce417d417e0af67e662796", "kind": "integrity", "tracked_now": false},
+    {"source": "MODULE.bazel:s3_http_archive", "file": "MODULE.bazel", "name": "ffmpeg_dist_arm64:sha256", "version": "0884a4c8958677bd423f902b4617adc00d82c0bb2cbbede877583b9f245e1cc7", "kind": "integrity", "tracked_now": false},
 
     {"source": "MODULE.bazel:s3_http_file", "file": "MODULE.bazel", "name": "offline_segment_dist", "version": "", "kind": "version", "tracked_now": false},
     {"source": "MODULE.bazel:s3_http_file", "file": "MODULE.bazel", "name": "offline_segment_dist:sha256", "version": "05ff15e41a61e9478b005135699a130e21a7efab21b6a1bcae1aa30bd3182f7d", "kind": "integrity", "tracked_now": false},
     {"source": "MODULE.bazel:s3_http_file", "file": "MODULE.bazel", "name": "openssh_dist", "version": "", "kind": "version", "tracked_now": false},
-    {"source": "MODULE.bazel:s3_http_file", "file": "MODULE.bazel", "name": "openssh_dist:sha256", "version": "05a2869d27c59c22aaccbad738a91b08f397a82a066c2d6ade4ed68ac00cc8fd", "kind": "integrity", "tracked_now": false},
+    {"source": "MODULE.bazel:s3_http_file", "file": "MODULE.bazel", "name": "openssh_dist:sha256", "version": "74d02eeb7e4eb60c5218fcd7e6c62da5470a6a01264534ea51277ec4eee8946d", "kind": "integrity", "tracked_now": false},
     {"source": "MODULE.bazel:s3_http_file", "file": "MODULE.bazel", "name": "openssh_dist_arm64", "version": "", "kind": "version", "tracked_now": false},
-    {"source": "MODULE.bazel:s3_http_file", "file": "MODULE.bazel", "name": "openssh_dist_arm64:sha256", "version": "613a9a8366beb76b8299b5d077e611b7acc7ed46deecab73b9ccf5ea56e1423d", "kind": "integrity", "tracked_now": false},
+    {"source": "MODULE.bazel:s3_http_file", "file": "MODULE.bazel", "name": "openssh_dist_arm64:sha256", "version": "c306f6388f3f5fbd37bca9421c9c89b08d6201da980a778f4589618779311f34", "kind": "integrity", "tracked_now": false},
 
     {"source": "MODULE.bazel:qemu_x86_64 repo rule", "file": "MODULE.bazel", "name": "qemu_x86_64_patched", "version": "11.0.4", "kind": "version", "tracked_now": true},
 
@@ -151,40 +151,40 @@
 
     {"source": "tools/bazel/qemu_x86_64.bzl", "file": "tools/bazel/qemu_x86_64.bzl", "name": "qemu", "version": "11.0.4", "kind": "version", "tracked_now": true},
 
-    {"source": "tools/openssh/build.sh", "file": "tools/openssh/build.sh", "name": "openssh-portable", "version": "10.6p1", "kind": "version", "tracked_now": true},
-    {"source": "tools/openssh/build.sh", "file": "tools/openssh/build.sh", "name": "OPENSSH_TAG", "version": "V_10_6_P1", "kind": "version", "tracked_now": false},
+    {"source": "tools/openssh/build.sh", "file": "tools/openssh/build.sh", "name": "openssh-portable", "version": "10.6p2", "kind": "version", "tracked_now": true},
+    {"source": "tools/openssh/build.sh", "file": "tools/openssh/build.sh", "name": "OPENSSH_TAG", "version": "V_10_6_P2", "kind": "version", "tracked_now": false},
     {"source": "tools/openssh/build.sh", "file": "tools/openssh/build.sh", "name": "GNU m4", "version": "1.4.21", "kind": "version", "tracked_now": true},
     {"source": "tools/openssh/build.sh", "file": "tools/openssh/build.sh", "name": "m4-1.4.21.tar.gz:sha256", "version": "38ae59f7a30bf9c108193cc5c25fbb06014f21e230c7ede2eff614f7b7c37ed8", "kind": "integrity", "tracked_now": false},
     {"source": "tools/openssh/build.sh", "file": "tools/openssh/build.sh", "name": "SOURCE_DATE_EPOCH", "version": "1786924800", "kind": "version", "tracked_now": false},
 
-    {"source": "tools/openssh/publish.sh", "file": "tools/openssh/publish.sh", "name": "openssh-portable", "version": "10.6p1", "kind": "version", "tracked_now": true},
-    {"source": "tools/openssh/publish.sh", "file": "tools/openssh/publish.sh", "name": "OPENSSH_TAG", "version": "V_10_6_P1", "kind": "version", "tracked_now": false},
+    {"source": "tools/openssh/publish.sh", "file": "tools/openssh/publish.sh", "name": "openssh-portable", "version": "10.6p2", "kind": "version", "tracked_now": true},
+    {"source": "tools/openssh/publish.sh", "file": "tools/openssh/publish.sh", "name": "OPENSSH_TAG", "version": "V_10_6_P2", "kind": "version", "tracked_now": false},
     {"source": "tools/openssh/publish.sh", "file": "tools/openssh/publish.sh", "name": "amazonlinux", "version": "2023.12.20260817.0", "kind": "version", "tracked_now": true},
     {"source": "tools/openssh/publish.sh", "file": "tools/openssh/publish.sh", "name": "qemu", "version": "9.2.4", "kind": "version", "tracked_now": true},
 
     {"source": "tools/ffmpeg-dist/build.sh", "file": "tools/ffmpeg-dist/build.sh", "name": "ffmpeg", "version": "8.1", "kind": "version", "tracked_now": true},
     {"source": "tools/ffmpeg-dist/build.sh", "file": "tools/ffmpeg-dist/build.sh", "name": "FFMPEG_COMMIT", "version": "1a748fe2cd43e3ead22fafb1b5b7d77f153898a8", "kind": "version", "tracked_now": false},
-    {"source": "tools/ffmpeg-dist/build.sh", "file": "tools/ffmpeg-dist/build.sh", "name": "nv-codec-headers", "version": "n13.0.19.1", "kind": "version", "tracked_now": true},
+    {"source": "tools/ffmpeg-dist/build.sh", "file": "tools/ffmpeg-dist/build.sh", "name": "nv-codec-headers", "version": "n13.1.15.0", "kind": "version", "tracked_now": true},
     {"source": "tools/ffmpeg-dist/build.sh", "file": "tools/ffmpeg-dist/build.sh", "name": "NV_CODEC_HEADERS_COMMIT", "version": "88fee5c37318c991a8762d423530f91681e32e3a", "kind": "version", "tracked_now": false},
-    {"source": "tools/ffmpeg-dist/build.sh", "file": "tools/ffmpeg-dist/build.sh", "name": "CUDA", "version": "13.2.2", "kind": "version", "tracked_now": true},
-    {"source": "tools/ffmpeg-dist/build.sh", "file": "tools/ffmpeg-dist/build.sh", "name": "debian", "version": "20261027T000000Z", "kind": "version", "tracked_now": true},
+    {"source": "tools/ffmpeg-dist/build.sh", "file": "tools/ffmpeg-dist/build.sh", "name": "CUDA", "version": "13.5.0", "kind": "version", "tracked_now": true},
+    {"source": "tools/ffmpeg-dist/build.sh", "file": "tools/ffmpeg-dist/build.sh", "name": "debian", "version": "20261104T000000Z", "kind": "version", "tracked_now": true},
     {"source": "tools/ffmpeg-dist/build.sh", "file": "tools/ffmpeg-dist/build.sh", "name": "GENCODE", "version": "arch=compute_75,code=sm_75", "kind": "version", "tracked_now": false},
 
     {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "ffmpeg", "version": "8.1", "kind": "version", "tracked_now": true},
     {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "FFMPEG_COMMIT", "version": "1a748fe2cd43e3ead22fafb1b5b7d77f153898a8", "kind": "version", "tracked_now": false},
-    {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "nv-codec-headers", "version": "n13.0.19.1", "kind": "version", "tracked_now": true},
+    {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "nv-codec-headers", "version": "n13.1.15.0", "kind": "version", "tracked_now": true},
     {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "NV_CODEC_HEADERS_COMMIT", "version": "88fee5c37318c991a8762d423530f91681e32e3a", "kind": "version", "tracked_now": false},
-    {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "CUDA", "version": "13.2.2", "kind": "version", "tracked_now": true},
-    {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "debian", "version": "20261027T000000Z", "kind": "version", "tracked_now": true},
+    {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "CUDA", "version": "13.5.0", "kind": "version", "tracked_now": true},
+    {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "debian", "version": "20261104T000000Z", "kind": "version", "tracked_now": true},
     {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "GENCODE", "version": "arch=compute_75,code=sm_75", "kind": "version", "tracked_now": false},
     {"source": "tools/ffmpeg-dist/publish.sh", "file": "tools/ffmpeg-dist/publish.sh", "name": "qemu", "version": "8.2.2", "kind": "version", "tracked_now": true},
 
-    {"source": "scripts/upload-artifact.sh", "file": "scripts/upload-artifact.sh", "name": "EXPECTED_SHA256", "version": "344a51efeb498c5e84acd23e8854c3dbac132923049420b76bf7224648685c4f", "kind": "integrity", "tracked_now": false},
+    {"source": "scripts/upload-artifact.sh", "file": "scripts/upload-artifact.sh", "name": "EXPECTED_SHA256", "version": "3531de59f1964dd849780d3d247993a1f2028e950873b47ccc05df154eda7e21", "kind": "integrity", "tracked_now": false},
 
     {"source": "deploy/aws/fish-deploy.sh", "file": "deploy/aws/fish-deploy.sh", "name": "fish", "version": "4.9.3", "kind": "version", "tracked_now": false},
     {"source": "deploy/aws/fish-deploy.sh", "file": "deploy/aws/fish-deploy.sh", "name": "fish-4.9.3-linux-x86_64.tar.xz:sha256", "version": "8f643d10ad1abb0ef7072764c01ceb5cf61b2d373fda400cf60f0bad69b7e095", "kind": "integrity", "tracked_now": false},
 
-    {"source": "deploy/aws/launch", "file": "deploy/aws/launch", "name": "dlami", "version": "ami-0b8bfb88d687f3529", "kind": "version", "tracked_now": true},
+    {"source": "deploy/aws/launch", "file": "deploy/aws/launch", "name": "dlami", "version": "ami-0198b63ccfac121e8", "kind": "version", "tracked_now": true},
     {"source": "deploy/aws/launch", "file": "deploy/aws/launch", "name": "DEPLOYMENT_TAR_GO_ARM64", "version": "strimserver-deployment-go-arm64.tar", "kind": "version", "tracked_now": false},
     {"source": "deploy/aws/launch", "file": "deploy/aws/launch", "name": "RELEASE_DOWNLOAD_URL", "version": "https://github.com/ChronicCmposer/strimserver/releases/latest/download/{asset}", "kind": "version", "tracked_now": false},
 
@@ -207,7 +207,7 @@
     {"source": "third_party/pin.json", "file": "third_party/protobuf-c/pin.json", "name": "protobuf-c", "version": "1.5.2", "kind": "version", "tracked_now": false},
     {"source": "third_party/pin.json", "file": "third_party/protobuf-c/pin.json", "name": "protobuf-c:sha256", "version": "e2c86271873a79c92b58fef7ebf8de1aa0df4738347a8bd5d4e65a80a16d0d24", "kind": "integrity", "tracked_now": false},
 
-    {"source": ".env", "file": ".env", "name": "PROJECT_GO_VERSION_TAG", "version": "go1.27.3", "kind": "version", "tracked_now": false},
+    {"source": ".env", "file": ".env", "name": "PROJECT_GO_VERSION_TAG", "version": "go1.27.4", "kind": "version", "tracked_now": false},
     {"source": ".env", "file": ".env", "name": "S3_BUCKET_NAME", "version": "strimserver.cvbn.cc", "kind": "version", "tracked_now": false},
     {"source": ".env", "file": ".env", "name": "DEPLOYMENT_SRC", "version": "s3://strimserver.cvbn.cc/${STRIMSERVER_C_X86_64_DEPLOYMENT_FILE_NAME}", "kind": "version", "tracked_now": false},
     {"source": ".env", "file": ".env", "name": "STRIMSERVER_GO_X86_64_DEPLOYMENT_FILE_NAME", "version": "strimserver-deployment-go-amd64.tar", "kind": "version", "tracked_now": false},
@@ -227,7 +227,7 @@
     {"source": "streamdeck manifest", "file": "tools/streamdeck-plugin/com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl", "name": "Nodejs.Version", "version": "24", "kind": "version", "tracked_now": false},
     {"source": "streamdeck manifest", "file": "tools/streamdeck-plugin/com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl", "name": "OS.mac.MinimumVersion", "version": "13", "kind": "version", "tracked_now": false},
 
-    {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "packageManager", "version": "pnpm@12.16.1", "kind": "version", "tracked_now": true},
+    {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "packageManager", "version": "pnpm@12.18.0", "kind": "version", "tracked_now": true},
     {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "engines.node", "version": ">=26", "kind": "version", "tracked_now": false},
     {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "dependencies:@elgato/streamdeck", "version": "^2", "kind": "version", "tracked_now": true},
     {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "devDependencies:@rollup/plugin-commonjs", "version": "29.0.3", "kind": "version", "tracked_now": true},
@@ -238,7 +238,7 @@
     {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "devDependencies:tslib", "version": "^2", "kind": "version", "tracked_now": true},
     {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "devDependencies:typescript", "version": "6.0.3", "kind": "version", "tracked_now": true},
 
-    {"source": "CI with inputs", "file": ".github/workflows/deps-check.yml", "name": "actions/setup-go:go-version", "version": "1.27.3", "kind": "version", "tracked_now": false},
+    {"source": "CI with inputs", "file": ".github/workflows/deps-check.yml", "name": "actions/setup-go:go-version", "version": "1.27.4", "kind": "version", "tracked_now": false},
     {"source": "CI with inputs", "file": ".github/workflows/deps-check.yml", "name": "actions/setup-node:node-version-file", "version": "tools/streamdeck-plugin/.nvmrc", "kind": "version", "tracked_now": false},
     {"source": "CI with inputs", "file": ".github/workflows/deps-check.yml", "name": "actions/setup-node:cache", "version": "pnpm", "kind": "version", "tracked_now": false},
     {"source": "CI with inputs", "file": ".github/workflows/deps-check.yml", "name": "actions/setup-node:cache-dependency-path", "version": "tools/streamdeck-plugin/pnpm-lock.yaml", "kind": "version", "tracked_now": false},
@@ -254,9 +254,9 @@
     {"source": "CI uses", "file": ".github/workflows/deps-check.yml", "name": "bazelbuild/setup-bazelisk", "version": "v3", "kind": "version", "tracked_now": true},
     {"source": "CI uses", "file": ".github/workflows/controller-ci.yml", "name": "bazelbuild/setup-bazelisk", "version": "v3", "kind": "version", "tracked_now": true},
 
-    {"source": "toolchain", "file": ".bazelversion", "name": "Bazel", "version": "9.3.1", "kind": "version", "tracked_now": true},
-    {"source": "toolchain", "file": "tools/streamdeck-plugin/.nvmrc", "name": "Node", "version": "26.13.0", "kind": "version", "tracked_now": true},
-    {"source": "toolchain", "file": "core/controller/go.mod", "name": "Go", "version": "1.27.3", "kind": "version", "tracked_now": true},
+    {"source": "toolchain", "file": ".bazelversion", "name": "Bazel", "version": "9.3.2", "kind": "version", "tracked_now": true},
+    {"source": "toolchain", "file": "tools/streamdeck-plugin/.nvmrc", "name": "Node", "version": "26.13.1", "kind": "version", "tracked_now": true},
+    {"source": "toolchain", "file": "core/controller/go.mod", "name": "Go", "version": "1.27.4", "kind": "version", "tracked_now": true},
 
     {"source": "core/controller/go.mod require", "file": "core/controller/go.mod", "name": "github.com/coder/websocket", "version": "v1.8.15", "kind": "version", "tracked_now": true},
     {"source": "core/controller/go.mod require", "file": "core/controller/go.mod", "name": "github.com/containerd/containerd/api", "version": "v1.11.1", "kind": "version", "tracked_now": true},

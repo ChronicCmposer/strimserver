@@ -1,29 +1,5 @@
 [
   {
-    "id": "script-pin/CUDA",
-    "file": "tools/ffmpeg-dist/build.sh",
-    "reason": "CUDA upgrade to 13.3.1 requires NVIDIA driver 610 to be present in the latest AWS dlami for Amazon Linux 2023; must wait until that happens.",
-    "until": "2026-12-31"
-  },
-  {
-    "id": "script-pin/CUDA",
-    "file": "tools/ffmpeg-dist/publish.sh",
-    "reason": "CUDA upgrade to 13.3.1 requires NVIDIA driver 610 to be present in the latest AWS dlami for Amazon Linux 2023; must wait until that happens.",
-    "until": "2026-12-31"
-  },
-  {
-    "id": "script-pin/nv-codec-headers",
-    "file": "tools/ffmpeg-dist/build.sh",
-    "reason": "nv-codec-headers upgrade to 13.1.x requires NVIDIA driver 610 to be present in the latest AWS dlami for Amazon Linux 2023; must wait until that happens.",
-    "until": "2026-12-31"
-  },
-  {
-    "id": "script-pin/nv-codec-headers",
-    "file": "tools/ffmpeg-dist/publish.sh",
-    "reason": "nv-codec-headers upgrade to 13.1.x requires NVIDIA driver 610 to be present in the latest AWS dlami for Amazon Linux 2023; must wait until that happens.",
-    "until": "2026-12-31"
-  },
-  {
     "id": "script-pin/qemu",
     "file": "tools/ffmpeg-dist/publish.sh",
     "reason": "qemu 8.2.2 is the byte-identity pin for the ffmpeg-dist artifact and is required to build ffmpeg with nvcc and cicc; qemu 9.2.4+ fails to build successfully per prior investigation. The upstream 11.1.1 would be a major jump that breaks the committed buildkit-direct-execve patch series and the guest-CPUID/codegen identity contract. Re-evaluate only when the ffmpeg pin advances.",
@@ -355,5 +331,17 @@
     "id": "tool-binary/qemu_x86_64_patched",
     "file": "MODULE.bazel",
     "reason": "Patched qemu-x86_64 built by the qemu_x86_64 repo rule for cross-stripping the amd64 mediamtx binary; its version tracks the qemu script pin, so it is not independently resolvable."
+  },
+  {
+    "id": "go/github.com/Microsoft/go-winio",
+    "file": "core/controller/go.mod",
+    "reason": "Windows-only dependency (all containerd usage is //go:build windows); no Linux build or runtime impact. v0.6.4 requires golang.org/x/sys v0.49.0, which is held pending containerd/grpc coordination. Wait for a containerd release that coordinates it.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "go/github.com/moby/sys/capability",
+    "file": "core/controller/go.mod",
+    "reason": "Pre-1.0 module (v0.4.0 -> v0.5.0 may break API); not imported by containerd v2.3.6 or by this controller's compiled graph, so controller tests cannot validate compatibility, and no containerd release coordinates it. Re-evaluate on a containerd release that ships capability v0.5.x.",
+    "until": "2027-06-30"
   }
 ]

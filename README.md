@@ -200,20 +200,20 @@ gracefully on shutdown.
 
 | Component | Version / source | Where used |
 | --- | --- | --- |
-| NVIDIA CUDA redistributables | `13.2.2` (`cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm`; per-component sha256 pinned via the `redistrib_13.2.2.json` manifest) | Compile the FFmpeg artifact in `tools/ffmpeg-dist` (producer-only; not needed for a normal package build) |
-| Prebuilt FFmpeg artifact | `ffmpeg-8.1-deb20261027-cuda13.2.2-sm75-1a748fe.tar.gz` (sha256 pinned in `MODULE.bazel` via `s3_http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
+| NVIDIA CUDA redistributables | `13.5.0` (`cuda_nvcc`, `cuda_cudart`, `cuda_crt`, `libnvvm`; per-component sha256 pinned via the `redistrib_13.5.0.json` manifest) | Compile the FFmpeg artifact in `tools/ffmpeg-dist` (producer-only; not needed for a normal package build) |
+| Prebuilt FFmpeg artifact | `ffmpeg-8.1-deb20261104-cuda13.5.0-sm75-1a748fe.tar.gz` (sha256 pinned in `MODULE.bazel` via `s3_http_archive(name = "ffmpeg_dist", ...)`) | The single `ffmpeg` binary the image ships; fetched once and assembled by rules_oci |
 | [FFmpeg](https://github.com/FFmpeg/FFmpeg) | `8.1` at commit `1a748fe` (tip of `release/8.1`, 2026-08-28; pinned and baked into the prebuilt artifact) | Custom FFmpeg build with NVENC/NVDEC, CUDA filters, RTSP/SRT/RTMP-related muxing, and `libfdk_aac` |
-| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.0.19.1` at commit `88fee5c` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
+| [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) | `n13.1.15.0` at commit `0a6fba9` (pinned in the artifact build) | NVIDIA codec integration for FFmpeg |
 | FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
-| Runtime Debian snapshot | `20261027T000000Z` | The single Debian snapshot for both the prebuilt FFmpeg artifact (`DEBIAN_SNAPSHOT` in `tools/ffmpeg-dist/{build,publish}.sh`) and the scratch-image runtime debs (`@trixie` rules_distroless apt extension in `MODULE.bazel`); see FFmpeg reproducibility below |
-| Go toolchain | `go 1.27.3` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
-| [Bazel](https://bazel.build) | `9.3.1` (pinned in `.bazelversion`; launched via Bazelisk) | Build system for every target; downloads the pinned Go, Node.js, and other toolchains |
+| Runtime Debian snapshot | `20261104T000000Z` | The single Debian snapshot for both the prebuilt FFmpeg artifact (`DEBIAN_SNAPSHOT` in `tools/ffmpeg-dist/{build,publish}.sh`) and the scratch-image runtime debs (`@trixie` rules_distroless apt extension in `MODULE.bazel`); see FFmpeg reproducibility below |
+| Go toolchain | `go 1.27.4` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
+| [Bazel](https://bazel.build) | `9.3.2` (pinned in `.bazelversion`; launched via Bazelisk) | Build system for every target; downloads the pinned Go, Node.js, and other toolchains |
 | [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.21.3`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
 | `libfdk-aac` | `libfdk-aac2t64` (Debian trixie package from `@trixie`) | AAC encode support through FFmpeg (`libfdk-aac.so.2` in the ffmpeg image) |
 | busybox / `gettext-base` (`envsubst`) | Debian trixie packages from `@trixie` | Shell + tools for the scratch ffmpeg runtime image |
 | iperf3 | `3.19.1-r1` `.apk` (`@iperf3_apk` http_file) on alpine `3.23.3` (digest-pinned `@alpine_linux_amd64` oci.pull) | Optional bandwidth-test image |
-| Node.js | `26.13.0` (from `tools/streamdeck-plugin/.nvmrc` via rules_nodejs `node_version_from_nvmrc`) | Stream Deck plugin build |
-| [pnpm](https://pnpm.io) | `12.16.1` (from `tools/streamdeck-plugin/package.json` `packageManager`) | Stream Deck plugin dependency install and build |
+| Node.js | `26.13.1` (from `tools/streamdeck-plugin/.nvmrc` via rules_nodejs `node_version_from_nvmrc`) | Stream Deck plugin build |
+| [pnpm](https://pnpm.io) | `12.18.0` (from `tools/streamdeck-plugin/package.json` `packageManager`) | Stream Deck plugin dependency install and build |
 
 > Note: the FFmpeg build currently compiles for `sm_75`
 > (Turing, e.g. the T4 in `g4dn` instances). To run the
@@ -460,7 +460,7 @@ value; there is no baked-in default (`SKIP_UPLOAD=1` rebuilds
 and checksums without either variable).
 
 `publish.sh` needs no docker daemon. It pulls
-the artifact pin's `debian:trixie-20261027-slim` base image via the
+the artifact pin's `debian:trixie-20261104-slim` base image via the
 Docker Hub **registry API** (plain `curl` + `jq`), extracts it
 into a rootfs, copies in the shared build script
 `tools/ffmpeg-dist/build.sh`, and runs it inside a chroot. On
@@ -521,7 +521,7 @@ qemu. An already-extracted rootfs can be reused by setting
 `FFMPEG_DIST_ROOTFS`. `publish.sh` then extracts the stripped
 `ffmpeg` binary plus its `BUILD-INFO.txt` provenance record, writes
 `ffmpeg-<ffver>-deb<date>-cuda<ver>-sm<N>-<shortsha>.tar.gz`
-(e.g. `ffmpeg-8.1-deb20261027-cuda13.2.2-sm75-1a748fe.tar.gz`),
+(e.g. `ffmpeg-8.1-deb20261104-cuda13.5.0-sm75-1a748fe.tar.gz`),
 uploads it to the `s3://<bucket>/ffmpeg/` prefix with no ACL
 modification (objects get the bucket's default private ACL; the
 IP-scoped HTTPS-only bucket policy from `scripts/bucket-cidr-policy.sh` is
@@ -532,7 +532,7 @@ nv-codec-headers tag, Debian snapshot, CUDA component sha256s,
 output, so the blob always stays reproducible.
 
 The date embedded in the artifact name is derived from
-`DEBIAN_SNAPSHOT` (`20261027T000000Z`), so the name stays tied to the
+`DEBIAN_SNAPSHOT` (`20261104T000000Z`), so the name stays tied to the
 published, reproducible `@ffmpeg_dist` tarball. One snapshot governs
 both surfaces: the prebuilt artifact, through `DEBIAN_SNAPSHOT` in
 `tools/ffmpeg-dist/build.sh` and `tools/ffmpeg-dist/publish.sh`, and
@@ -885,12 +885,14 @@ schema and policy are in
 ## AWS EC2 deployment target
 
 The intended deployment target is an AWS EC2 GPU instance
-running the latest Amazon Linux 2023 Deep Learning AMI
-(DLAMI), with the instance's NVMe ephemeral storage mounted
-at `/mnt/nvme`. The `launch` helper defaults to `g6.xlarge`;
-pick an instance whose GPU matches the FFmpeg `-gencode`
-target (see the build note above) or adjust the target
-accordingly.
+running an Amazon Linux 2023 Deep Learning AMI (DLAMI), with
+the instance's NVMe ephemeral storage mounted at `/mnt/nvme`.
+For amd64 the `launch` helper is **pinned** to the 20261106
+Amazon Linux 2023 DLAMI (arm64 floats via the SSM `/latest`
+parameter); set `AMI_ID` or `DLAMI_SSM_PARAM` to override the
+pin. The helper defaults to `g6.xlarge`; pick an instance whose
+GPU matches the FFmpeg `-gencode` target (see the build note
+above) or adjust the target accordingly.
 
 Expected target characteristics:
 

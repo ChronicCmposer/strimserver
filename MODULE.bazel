@@ -9,10 +9,10 @@ bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 
-# rules_cc is pinned to 0.2.27 (not the historical 0.1.1): hermetic_cc_toolchain
+# rules_cc is pinned to 0.2.28 (not the historical 0.1.1): hermetic_cc_toolchain
 # 4.3.0 requires >= 0.2.14, and bzlmod's max-version selection already resolves
-# 0.2.27 in practice. Declaring it keeps --check_direct_dependencies happy.
-bazel_dep(name = "rules_cc", version = "0.2.27")
+# 0.2.28 in practice. Declaring it keeps --check_direct_dependencies happy.
+bazel_dep(name = "rules_cc", version = "0.2.28")
 
 # --- Hermetic musl C toolchain (Wave 0-A) ----------------------------------
 # The new C controller layer (//core/controller/c) is built statically against
@@ -48,7 +48,7 @@ bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
 bazel_dep(name = "rules_distroless", version = "0.9.4")
 bazel_dep(name = "rules_oci", version = "2.3.0")
 bazel_dep(name = "rules_pkg", version = "1.3.0")
-bazel_dep(name = "aspect_rules_js", version = "3.5.2")
+bazel_dep(name = "aspect_rules_js", version = "3.6.0")
 bazel_dep(name = "aspect_rules_ts", version = "3.10.1")
 bazel_dep(name = "rules_nodejs", version = "6.7.7")
 
@@ -158,7 +158,7 @@ apt.sources_list(
     ],
     suites = ["trixie"],
     types = ["deb"],
-    uris = ["https://snapshot.debian.org/archive/debian/20261027T000000Z"],
+    uris = ["https://snapshot.debian.org/archive/debian/20261104T000000Z"],
 )
 apt.install(
     dependency_set = "trixie",
@@ -511,7 +511,7 @@ cc_library(
 )
 """,
     sha256 = "26e311a867ef831d2378a33e772b1f21924261eedcefe08f7ce852c6176c2836",
-    url = "https://snapshot.debian.org/archive/debian/20261027T000000Z/pool/main/p/protobuf/libprotobuf-dev_3.21.12-11+deb13u1_arm64.deb",
+    url = "https://snapshot.debian.org/archive/debian/20261104T000000Z/pool/main/p/protobuf/libprotobuf-dev_3.21.12-11+deb13u1_arm64.deb",
 )
 
 deb_extract(
@@ -528,7 +528,7 @@ cc_library(
 )
 """,
     sha256 = "405ec6e7b5dd99b73a84f4671af03b0b0d94b4a372c36a49c0f94457f40b36a9",
-    url = "https://snapshot.debian.org/archive/debian/20261027T000000Z/pool/main/p/protobuf/libprotoc-dev_3.21.12-11+deb13u1_arm64.deb",
+    url = "https://snapshot.debian.org/archive/debian/20261104T000000Z/pool/main/p/protobuf/libprotoc-dev_3.21.12-11+deb13u1_arm64.deb",
 )
 
 deb_extract(
@@ -537,7 +537,7 @@ deb_extract(
 exports_files(["usr/bin/protoc"])
 """,
     sha256 = "a873f75cbdf8054a23687e7c9b39ca1a93545edd22a581f4caa560756678f658",
-    url = "https://snapshot.debian.org/archive/debian/20261027T000000Z/pool/main/p/protobuf/protobuf-compiler_3.21.12-11+deb13u1_arm64.deb",
+    url = "https://snapshot.debian.org/archive/debian/20261104T000000Z/pool/main/p/protobuf/protobuf-compiler_3.21.12-11+deb13u1_arm64.deb",
 )
 
 # Hermetic amd64 glibc static sysroot for the clang cross-toolchain that
@@ -551,11 +551,11 @@ amd64_sysroot = use_repo_rule("//tools/bazel:amd64_sysroot.bzl", "amd64_sysroot"
 amd64_sysroot(
     name = "amd64_sysroot",
     libc6_sha256 = "54ef8425cbc7c45888981e6ef23529df4d056688a6c71a415fcc95a404522b9f",
-    libc6_url = "https://snapshot.debian.org/archive/debian/20261027T000000Z/pool/main/c/cross-toolchain-base/libc6-dev-amd64-cross_2.41-11cross1_all.deb",
+    libc6_url = "https://snapshot.debian.org/archive/debian/20261104T000000Z/pool/main/c/cross-toolchain-base/libc6-dev-amd64-cross_2.41-11cross1_all.deb",
     libgcc_sha256 = "c6642e5d83ad232573c2a45efb5b407b06eb61af2220eb1c922d0380dd446286",
-    libgcc_url = "https://snapshot.debian.org/archive/debian/20261027T000000Z/pool/main/g/gcc-14-cross/libgcc-14-dev-amd64-cross_14.2.0-19cross1_all.deb",
+    libgcc_url = "https://snapshot.debian.org/archive/debian/20261104T000000Z/pool/main/g/gcc-14-cross/libgcc-14-dev-amd64-cross_14.2.0-19cross1_all.deb",
     linux_libc_sha256 = "da463ddd3ee96b37c33f16da99c47b03b4e514888d3d853e73253ee73bd0d7d8",
-    linux_libc_url = "https://snapshot.debian.org/archive/debian/20261027T000000Z/pool/main/c/cross-toolchain-base/linux-libc-dev-amd64-cross_6.12.38-1cross1_all.deb",
+    linux_libc_url = "https://snapshot.debian.org/archive/debian/20261104T000000Z/pool/main/c/cross-toolchain-base/linux-libc-dev-amd64-cross_6.12.38-1cross1_all.deb",
 )
 
 # --- iperf3 image (rules_oci, keeping the alpine base) ----------------------
@@ -628,23 +628,23 @@ http_archive(
 # env vars (no committed defaults); when they are unset, the GitHub Release
 # mirrors below are used.
 #
-# LEGAL: the GitHub Release mirror assets for these deb20261027 artifacts are
+# LEGAL: the GitHub Release mirror assets for these deb20261104 artifacts are
 # intentionally UNPUBLISHED pending a redistribution/licensing review. Until
 # they are cleared, builds must fetch from S3 and therefore require
 # STRIMSERVER_S3_BUCKET + STRIMSERVER_S3_REGION (private, IP-scoped bucket).
 s3_http_archive(
     name = "ffmpeg_dist",
-    s3_key = "ffmpeg/ffmpeg-8.1-deb20261027-cuda13.2.2-sm75-1a748fe.tar.gz",
-    sha256 = "344a51efeb498c5e84acd23e8854c3dbac132923049420b76bf7224648685c4f",
-    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/ffmpeg-artifacts/ffmpeg-8.1-deb20261027-cuda13.2.2-sm75-1a748fe.tar.gz"],
+    s3_key = "ffmpeg/ffmpeg-8.1-deb20261104-cuda13.5.0-sm75-1a748fe.tar.gz",
+    sha256 = "3531de59f1964dd849780d3d247993a1f2028e950873b47ccc05df154eda7e21",
+    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/ffmpeg-artifacts/ffmpeg-8.1-deb20261104-cuda13.5.0-sm75-1a748fe.tar.gz"],
     build_file_content = "exports_files([\"ffmpeg\", \"BUILD-INFO.txt\"])",
 )
 
 s3_http_archive(
     name = "ffmpeg_dist_arm64",
-    s3_key = "ffmpeg/ffmpeg-8.1-deb20261027-cuda13.2.2-sm75-1a748fe-arm64.tar.gz",
-    sha256 = "7edafaca50c275e8328a7f244ee541ad65aa3c9cbcce417d417e0af67e662796",
-    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/ffmpeg-artifacts/ffmpeg-8.1-deb20261027-cuda13.2.2-sm75-1a748fe-arm64.tar.gz"],
+    s3_key = "ffmpeg/ffmpeg-8.1-deb20261104-cuda13.5.0-sm75-1a748fe-arm64.tar.gz",
+    sha256 = "0884a4c8958677bd423f902b4617adc00d82c0bb2cbbede877583b9f245e1cc7",
+    mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/ffmpeg-artifacts/ffmpeg-8.1-deb20261104-cuda13.5.0-sm75-1a748fe-arm64.tar.gz"],
     build_file_content = "exports_files([\"ffmpeg\", \"BUILD-INFO.txt\"])",
 )
 
@@ -699,7 +699,7 @@ s3_http_file(
     downloaded_file_name = "openssh-experimental.rpm",
     mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental.rpm"],
     s3_key = "openssh/openssh-experimental.rpm",
-    sha256 = "05a2869d27c59c22aaccbad738a91b08f397a82a066c2d6ade4ed68ac00cc8fd",
+    sha256 = "74d02eeb7e4eb60c5218fcd7e6c62da5470a6a01264534ea51277ec4eee8946d",
 )
 
 s3_http_file(
@@ -708,7 +708,7 @@ s3_http_file(
     downloaded_file_name = "openssh-experimental-aarch64.rpm",
     mirror_urls = ["https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental-aarch64.rpm"],
     s3_key = "openssh/openssh-experimental-aarch64.rpm",
-    sha256 = "613a9a8366beb76b8299b5d077e611b7acc7ed46deecab73b9ccf5ea56e1423d",
+    sha256 = "c306f6388f3f5fbd37bca9421c9c89b08d6201da980a778f4589618779311f34",
 )
 
 # --- Stream Deck plugin (rollup) ------------------------------------------

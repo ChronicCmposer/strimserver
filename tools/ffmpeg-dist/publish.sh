@@ -37,10 +37,10 @@
 #                        linux-sbsa, derived in build.sh) and the -arm64
 #                        artifact-name discriminator. Default amd64 is
 #                        byte-identical to the pre-parameterization behavior.
-#   NV_CODEC_HEADERS_TAG default n13.0.19.1
-#   NV_CODEC_HEADERS_COMMIT default 88fee5c37318c991a8762d423530f91681e32e3a
-#   CUDA_MANIFEST_URL    default .../redistrib_13.2.2.json
-#   DEBIAN_SNAPSHOT      default 20261027T000000Z
+#   NV_CODEC_HEADERS_TAG default n13.1.15.0
+#   NV_CODEC_HEADERS_COMMIT default 0a6fba9a2820628b8103464f4c8753ee05838baa
+#   CUDA_MANIFEST_URL    default .../redistrib_13.5.0.json
+#   DEBIAN_SNAPSHOT      default 20261104T000000Z
 #   CUDA_COMPONENTS      default "cuda_nvcc cuda_cudart cuda_crt libnvvm"
 #   GENCODE              default arch=compute_75,code=sm_75
 #   NPROC                host nproc (env-overridable)
@@ -104,12 +104,12 @@ unset _ss_root
 FFMPEG_VERSION="${FFMPEG_VERSION:-8.1}"
 FFMPEG_COMMIT="${FFMPEG_COMMIT:-1a748fe2cd43e3ead22fafb1b5b7d77f153898a8}"
 FFMPEG_ARCH="${FFMPEG_ARCH:-amd64}"
-NV_CODEC_HEADERS_TAG="${NV_CODEC_HEADERS_TAG:-n13.0.19.1}"
-NV_CODEC_HEADERS_COMMIT="${NV_CODEC_HEADERS_COMMIT:-88fee5c37318c991a8762d423530f91681e32e3a}"
-CUDA_MANIFEST_URL="${CUDA_MANIFEST_URL:-https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.2.2.json}"
+NV_CODEC_HEADERS_TAG="${NV_CODEC_HEADERS_TAG:-n13.1.15.0}"
+NV_CODEC_HEADERS_COMMIT="${NV_CODEC_HEADERS_COMMIT:-0a6fba9a2820628b8103464f4c8753ee05838baa}"
+CUDA_MANIFEST_URL="${CUDA_MANIFEST_URL:-https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.5.0.json}"
 # This snapshot is both the artifact-reproducibility pin for the published
-# @ffmpeg_dist (deb20261027) and the source of the runtime image debs in MODULE.bazel.
-DEBIAN_SNAPSHOT="${DEBIAN_SNAPSHOT:-20261027T000000Z}"
+# @ffmpeg_dist (deb20261104) and the source of the runtime image debs in MODULE.bazel.
+DEBIAN_SNAPSHOT="${DEBIAN_SNAPSHOT:-20261104T000000Z}"
 CUDA_COMPONENTS="${CUDA_COMPONENTS:-cuda_nvcc cuda_cudart cuda_crt libnvvm}"
 GENCODE="${GENCODE:-arch=compute_75,code=sm_75}"
 NPROC="${NPROC:-$(nproc)}"

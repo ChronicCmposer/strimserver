@@ -28,7 +28,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 S3_BUCKET_NAME="${S3_BUCKET_NAME:?S3_BUCKET_NAME is required (e.g. your-bucket-name)}"
 S3_KEY_PREFIX="${S3_KEY_PREFIX:-ffmpeg}"
 AWS_REGION="${AWS_REGION:?AWS_REGION is required}"
-EXPECTED_SHA256="${EXPECTED_SHA256:-344a51efeb498c5e84acd23e8854c3dbac132923049420b76bf7224648685c4f}"
+EXPECTED_SHA256="${EXPECTED_SHA256:-3531de59f1964dd849780d3d247993a1f2028e950873b47ccc05df154eda7e21}"
 SKIP_SHA_CHECK="${SKIP_SHA_CHECK:-}"
 
 # --- guard: awscli must be installed and configured ---
