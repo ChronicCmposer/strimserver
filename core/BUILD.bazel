@@ -18,6 +18,26 @@ exports_files([
 # this exact path if it doesn't exist yet -- see README's Build instructions.
 exports_files(["strimserver.env"])
 
+# Secret-leakage / log-hygiene gate: no xtrace in the runtime or deploy
+# scripts, `umask 027` before sourcing the env file, no passphrase prints, and
+# sentinel runtime tests proving the Twitch key never reaches stdout/stderr.
+sh_test(
+    name = "security_hygiene_test",
+    srcs = ["security_hygiene_test.sh"],
+    args = [
+        "$(location :transcode.sh)",
+        "$(location //core/controller:entrypoint.sh)",
+        "$(location //deploy/aws:deploy.sh)",
+        "$(location //deploy/aws/lib:deploy.sh)",
+    ],
+    data = [
+        ":transcode.sh",
+        "//core/controller:entrypoint.sh",
+        "//deploy/aws:deploy.sh",
+        "//deploy/aws/lib:deploy.sh",
+    ],
+)
+
 # Regenerated from the controller's env spec; see //core/controller:generate.
 write_source_files(
     name = "write_env_example",

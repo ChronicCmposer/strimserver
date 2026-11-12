@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+# Secrets are written below (SRT passphrase); make the default creation mode
+# private and never rely on a later chmod alone.
+umask 077
 
+# Pure deploy helpers live beside this script in the bundle (lib/deploy.sh) and
+# in the repo (deploy/aws/lib/deploy.sh). Resolve relative to this file so both
+# layouts work.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/deploy.sh
+source "$script_dir/lib/deploy.sh"
 
 mkdir -p /mnt/nvme/deploy-tmp
 export TMPDIR=/mnt/nvme/deploy-tmp
@@ -40,7 +49,7 @@ mkdir -p /mnt/nvme/bin
 if [ ! -f /mnt/nvme/config/strimserver.env ] && [ -f /mnt/nvme/strimserver.env ]; then
    mv /mnt/nvme/strimserver.env /mnt/nvme/config/strimserver.env
 fi
-if [ -f /mnt/nvme/mediamtx.yaml.template ]; then
+if [ -f /mnt/nvme/mediamtx.yaml.template ] && [ ! -f /mnt/nvme/config/mediamtx.yaml.template ]; then
    mv /mnt/nvme/mediamtx.yaml.template /mnt/nvme/config/mediamtx.yaml.template
 fi
 if [ -f /mnt/nvme/transcode.sh ]; then
@@ -113,6 +122,8 @@ else
    printf "Twitch will fail when toggled until TWITCH_STREAM_KEY is set in\n"
    printf "%s.\n\n" "$ENV_FILE"
 fi
+# Enforce the env-file mode unconditionally, including the key-absent path.
+chmod 600 "$ENV_FILE"
 # ------------------------------------------------------------------------------
 
 # NVIDIA GPU runtime: arch-aware. setup-gpu.sh sources lib/nvidia.sh and
@@ -130,15 +141,17 @@ fi
 bash ./setup-gpu.sh
 
 # containerd
+# A re-run must not prepend a second root/state pair: duplicate TOML keys make
+# containerd fail with "toml: key root is already defined". The helper reads the
+# existing config via `sudo cat` (failing closed when it is unreadable) and
+# strips any existing root/state assignment before adding the canonical pair.
 printf "configuring containerd...\n"
-set -x
-{
-   printf "root='/mnt/nvme/containerd'\n"
-   printf "state='/mnt/nvme/containerd-state'\n\n"
-
-} | cat - /etc/containerd/config.toml | sudo tee /etc/containerd/config.toml
+containerd_config_tmp="$(mktemp)"
+deploy_prepend_containerd_root_state \
+   /etc/containerd/config.toml "$containerd_config_tmp" sudo
+sudo install -m 644 "$containerd_config_tmp" /etc/containerd/config.toml
+rm -f "$containerd_config_tmp"
 sudo systemctl restart containerd.service
-set +x
 printf "containerd configured!\n"
 
 
@@ -146,7 +159,6 @@ printf "containerd configured!\n"
 # Enabled but not started: the container images are imported further below, and
 # the first start stays an explicit operator action (deploy/aws/start_strimserver).
 printf "installing systemd service file...\n"
-set -x
 
 sudo install -D -m 644 /mnt/nvme/strimserver.service /etc/systemd/system/strimserver.service
 
@@ -154,33 +166,26 @@ rm -f /mnt/nvme/strimserver.service
 
 sudo systemctl daemon-reload
 sudo systemctl enable strimserver.service
-set +x
 printf "systemd service file installed and enabled!\n"
 
 # import images
 printf "importing images (%s)...\n" "$CONTROLLER_VARIANT"
 CONTAINERD_NAMESPACE="strimserver"
-set -x
 sudo ctr -n $CONTAINERD_NAMESPACE i import controller-container.tar
 sudo ctr -n $CONTAINERD_NAMESPACE i import ffmpeg-container.tar
 sudo ctr -n $CONTAINERD_NAMESPACE i import mediamtx-container.tar
 rm -f {controller,ffmpeg,mediamtx}-container.tar
-set +x
 printf "image import started!\n"
 
-# Generate an SRT passphrase once. On a re-run keep the existing passphrase so
-# the operator's already-configured encoder keeps working.
-SRT_READ_PASSPHRASE_FILE=/mnt/nvme/srt-passphrase
-if [ -f "$SRT_READ_PASSPHRASE_FILE" ]; then
-   printf "keeping the existing SRT passphrase...\n"
-   SRT_READ_PASSPHRASE="$(cat "$SRT_READ_PASSPHRASE_FILE")"
-else
-   printf "generating SRT passphrase...\n"
-   SRT_READ_PASSPHRASE="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 70)"
-   printf "%s\n" "$SRT_READ_PASSPHRASE" > "$SRT_READ_PASSPHRASE_FILE"
-fi
+# Generate an SRT passphrase once (0600 root:root), never printing its value.
+# On a re-run the helper keeps the existing passphrase so the operator's
+# already-configured encoder keeps working.
+SRT_PASSPHRASE_FILE=/mnt/nvme/srt-passphrase
+printf "preparing SRT passphrase...\n"
+deploy_write_srt_passphrase "$SRT_PASSPHRASE_FILE" sudo
+SRT_READ_PASSPHRASE="$(sudo cat "$SRT_PASSPHRASE_FILE")"
 export SRT_READ_PASSPHRASE
-printf "srt passphrase ready!\n"
+printf "srt passphrase file: %s (0600)\n" "$SRT_PASSPHRASE_FILE"
 
 source /mnt/nvme/fish-deploy.sh
 rm -f /mnt/nvme/fish-deploy.sh
@@ -204,20 +209,15 @@ fi
 printf "tool installation complete!\n"
 
 printf "setting hostname...\n"
-set -x
 sudo hostnamectl set-hostname $TARGET_HOSTNAME
-set +x
 printf "hostname set to %s\n" $(hostname)
 
 printf "creating video-files directory...\n"
-set -x
 VIDEO_FILES_DIRECTORY=/mnt/nvme/video-files
 mkdir -p $VIDEO_FILES_DIRECTORY
-set +x
 printf "video-files directory created: %s\n" "$VIDEO_FILES_DIRECTORY"
 
 printf "configuring offline segment...\n"
-set -x
 OFFLINE_SEGMENT_FILE_NAME=strimserver-offline-2160p60.mp4
 # Re-runnable: the bundled clip is only moved when it is still present (a
 # re-run, or a volume that already holds it, must not fail here).
@@ -226,15 +226,15 @@ if [ -f "$OFFLINE_SEGMENT_FILE_NAME" ]; then
 else
    printf "offline segment already installed; skipping the move\n"
 fi
-set +x
 printf "offline segment configured: %s\n" "$OFFLINE_SEGMENT_FILE_NAME"
 
-printf "creating logs directory...\n"
-set -x
+# Logs are created by the containerd shim, not by entrypoint.sh, so a process
+# umask cannot set their modes on a fresh host. Pre-create the directory 0750
+# and the three logs 0640 root:root, then normalize any file created later.
+printf "preparing logs directory...\n"
 LOGS_DIRECTORY=/mnt/nvme/logs
-sudo mkdir -p $LOGS_DIRECTORY
-set +x
-printf "logs directory created: %s\n" "$LOGS_DIRECTORY"
+deploy_prepare_logs_directory "$LOGS_DIRECTORY" sudo
+printf "logs directory ready: %s\n" "$LOGS_DIRECTORY"
 
 # printf "starting services...\n"
 # set -x
@@ -242,8 +242,6 @@ printf "logs directory created: %s\n" "$LOGS_DIRECTORY"
 # 	strimserver.service
 # set +x
 # printf "services started!\n"
-
-printf "srt passphrase: %s\n\n" "$SRT_READ_PASSPHRASE"
 
 # --- Namecheap Dynamic DNS (gated by ENABLE_DDNS) -----------------------------
 # Dynamic DNS is optional. When ENABLE_DDNS=true, the box is referenceable as
@@ -277,21 +275,17 @@ if [ "$ENABLE_DDNS" = "true" ]; then
 
    # 2) install the strim-ddns unit + timer and arm the 6-hour refresh
    printf "installing strim-ddns unit and timer...\n"
-   set -x
    sudo install -D -m 644 /mnt/nvme/strim-ddns.service /etc/systemd/system/strim-ddns.service
    sudo install -D -m 644 /mnt/nvme/strim-ddns.timer /etc/systemd/system/strim-ddns.timer
    rm -f /mnt/nvme/strim-ddns.service /mnt/nvme/strim-ddns.timer
    sudo systemctl daemon-reload
    sudo systemctl enable --now strim-ddns.timer
-   set +x
    printf "strim-ddns unit and timer installed and enabled!\n"
 
    # 3) import the strim-ddns image
    printf "importing strim-ddns image...\n"
-   set -x
    sudo ctr -n $CONTAINERD_NAMESPACE i import strim-ddns-container.tar
    rm -f strim-ddns-container.tar
-   set +x
    printf "strim-ddns image imported!\n"
 
    # 4) one-shot refresh now so $DDNS_FQDN points at this box immediately. The
@@ -299,9 +293,7 @@ if [ "$ENABLE_DDNS" = "true" ]; then
    #    /mnt/nvme/config/strimserver.env via EnvironmentFile; DDNS_IP is left
    #    empty so the client omits ip= and Namecheap uses the requester IP.
    printf "refreshing %s -> %s...\n" "$DDNS_FQDN" "$PUBLIC_IP"
-   set -x
    sudo systemctl start strim-ddns.service
-   set +x
    printf "%s refresh done!\n" "$DDNS_FQDN"
 
    # 5) verify the record resolves to this box (bounded: 24 retries with 5s
@@ -353,13 +345,13 @@ if [ "$ENABLE_DDNS" = "true" ]; then
    # printf "Services running on %s: %s \n\n" "$INSTANCE_TYPE" "$PUBLIC_IP"
    printf "ssh %s \"sudo systemctl start strimserver.service\"\n\n" "$DDNS_FQDN"
 
-   printf "configure-local-encoder.zsh --strimserver-host %s --passphrase %s\n\n" "$DDNS_FQDN" "$SRT_READ_PASSPHRASE"
+   printf "SRT passphrase: read it on the host from %s (0600)\n\n" "$SRT_PASSPHRASE_FILE"
 else
    printf "\nDDNS is disabled (ENABLE_DDNS is not \"true\" in %s).\n" "$ENV_FILE"
    printf "The box is reachable by public IP only; no Dynamic DNS record is refreshed.\n\n"
    printf "ssh %s \"sudo systemctl start strimserver.service\"\n\n" "$PUBLIC_IP"
 
-   printf "configure-local-encoder.zsh --strimserver-host %s --passphrase %s\n\n" "$PUBLIC_IP" "$SRT_READ_PASSPHRASE"
+   printf "SRT passphrase: read it on the host from %s (0600)\n\n" "$SRT_PASSPHRASE_FILE"
 fi
 
 # --- success-only cleanup ----------------------------------------------------
@@ -368,5 +360,7 @@ fi
 printf "cleaning up deployment payloads...\n"
 rm -f /mnt/nvme/setup-gpu.sh
 rm -f /mnt/nvme/lib/nvidia.sh
+rm -f /mnt/nvme/lib/deploy.sh
+rmdir /mnt/nvme/lib 2>/dev/null || true
 rm -f /mnt/nvme/deploy.sh
 

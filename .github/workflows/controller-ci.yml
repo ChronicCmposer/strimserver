@@ -30,6 +30,9 @@ jobs:
       - name: Run controller tests
         run: bazel test //core/controller:all
 
+      - name: Run secret-hygiene test
+        run: bazel test //core:security_hygiene_test
+
       - name: Run check-deps tests
         run: bazel test //tools/check-deps:all
 
@@ -54,3 +57,6 @@ jobs:
 
       - name: Build the arm64 deployment package
         run: bazel build //:package_arm64
+
+      - name: Build all four deployment bundles (Go + C, amd64 + arm64)
+        run: bazel build //:package_all

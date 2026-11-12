@@ -1,11 +1,49 @@
 #!/bin/sh
+# ffmpeg stage runner. The env file holds the Twitch stream key, so xtrace
+# stays off, the umask is tightened, and ffmpeg stderr is passed through a
+# redaction filter before it can reach the logs.
+set -euo pipefail
+umask 027
 
-set -xeuo pipefail
-FFMPEG="/ffmpeg"
+FFMPEG_BIN="${FFMPEG_BIN:-/ffmpeg}"
+ENV_FILE="${STRIMSERVER_ENV_FILE:-/strimserver.env}"
 
 set -a
-. /strimserver.env
+. "$ENV_FILE"
 set +a
+
+# Run ffmpeg behind a FIFO so its stderr can be redacted in-flight. The active
+# stage function does NOT exec past the filter: it waits for ffmpeg, waits for
+# the filter to drain, and returns ffmpeg's exit status unchanged.
+run_ffmpeg() {
+   fifo_dir="$(mktemp -d "${TMPDIR:-/tmp}/strimserver-transcode.XXXXXX")" || {
+      printf 'transcode: cannot create temp dir for the stderr filter\n' >&2
+      return 1
+   }
+   fifo="$fifo_dir/stderr.fifo"
+   if ! mkfifo "$fifo"; then
+      printf 'transcode: cannot create the stderr filter FIFO\n' >&2
+      rm -rf "$fifo_dir"
+      return 1
+   fi
+   if [ -n "${TWITCH_STREAM_KEY:-}" ]; then
+      sed "s|${TWITCH_STREAM_KEY}|REDACTED|g" <"$fifo" >&2 &
+   else
+      cat <"$fifo" >&2 &
+   fi
+   filter_pid=$!
+   nice -n "$FFMPEG_NICE" "$FFMPEG_BIN" "$@" 2>"$fifo" &
+   ffmpeg_pid=$!
+   # The shell now owns ffmpeg instead of exec'ing it, so forward shutdown
+   # signals explicitly; otherwise a container stop would orphan the encoder.
+   trap 'kill -TERM "$ffmpeg_pid" 2>/dev/null || true' TERM INT
+   ffmpeg_status=0
+   wait "$ffmpeg_pid" || ffmpeg_status=$?
+   trap - TERM INT
+   wait "$filter_pid" || true
+   rm -rf "$fifo_dir"
+   return "$ffmpeg_status"
+}
 
 # loglevel is a string or a number containing one of the following values:
 #
@@ -73,7 +111,7 @@ normalize() {
 
    AUDIO_FILTER="aresample=out_sample_rate=48000:out_sample_fmt=s16:out_chlayout=stereo"
 
-   exec nice -n "$FFMPEG_NICE" "$FFMPEG" \
+   run_ffmpeg \
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -noauto_conversion_filters \
      -init_hw_device cuda=strim_gpu:0 \
@@ -159,7 +197,7 @@ scale_and_egress() {
 
    AUDIO_FILTER="aresample=out_sample_rate=48000:out_sample_fmt=s16:out_chlayout=stereo"
 
-   exec nice -n "$FFMPEG_NICE" "$FFMPEG" \
+   run_ffmpeg \
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -noauto_conversion_filters \
      -init_hw_device cuda=strim_gpu:0 \
@@ -244,7 +282,7 @@ single_stage_egress() {
 
    AUDIO_FILTER="aresample=out_sample_rate=48000:out_sample_fmt=s16:out_chlayout=stereo"
 
-   exec nice -n "$FFMPEG_NICE" "$FFMPEG" \
+   run_ffmpeg \
      -loglevel "$FFMPEG_LOG_LEVEL" \
      -noauto_conversion_filters \
      -init_hw_device cuda=strim_gpu:0 \
@@ -294,6 +332,8 @@ single_stage_egress() {
 }
 
 STAGE="${1:?usage: transcode.sh <normalize|scale_and_egress|single_stage_egress>}"
+
+printf 'transcode: stage=%s\n' "$STAGE"
 
 case "$STAGE" in
    normalize|scale_and_egress|single_stage_egress) "$STAGE" ;;

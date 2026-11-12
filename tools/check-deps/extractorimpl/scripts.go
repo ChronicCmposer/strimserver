@@ -162,11 +162,29 @@ func ExtractScripts(root string) ([]common.Dependency, []common.ExtractionUnknow
 			unknowns = append(unknowns, common.ExtractionUnknown{File: rel, Reason: "cannot read discovered script: " + err.Error()})
 			continue
 		}
-		if scriptPinCarrierRe.Match(data) {
+		if hasRealPinCarrier(data) {
 			unknowns = append(unknowns, common.ExtractionUnknown{File: rel, Reason: unspecifiedPinReason})
 		}
 	}
 	return deps, unknowns
+}
+
+// fakePinPrefix marks a test-harness fixture variable, never a real dependency
+// pin. The driver-upgrade tests simulate devices with FAKE_* values such as
+// FAKE_PROC_VERSION; treating those as pinned dependencies would fail the strict
+// check on fixture data rather than on a real contract.
+const fakePinPrefix = "FAKE_"
+
+// hasRealPinCarrier reports whether a script assigns at least one pin-like
+// variable that is not a FAKE_* test fixture. Discovery stays fail-closed for
+// genuine pins; only the explicitly fake harness namespace is exempt.
+func hasRealPinCarrier(data []byte) bool {
+	for _, match := range scriptPinCarrierRe.FindAllString(string(data), -1) {
+		if !strings.HasPrefix(match, fakePinPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ExtractScripts must keep satisfying the common.Extractor contract.

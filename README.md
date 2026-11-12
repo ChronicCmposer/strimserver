@@ -183,10 +183,14 @@ gracefully on shutdown.
   artifact — `make package` never includes it inside
   `strimserver-deployment-go-amd64.tar`.
 - EC2 setup automation for formatting and mounting NVMe
-  ephemeral storage at `/mnt/nvme`, installing the systemd
-  unit, importing the OCI images into containerd, generating
-  the SRT passphrase, and preparing config/log/video
-  directories.
+  ephemeral storage at `/mnt/nvme`, enforcing/upgrading the host
+  GPU driver to the pinned `620.70.06` floor (fail-closed, no
+  reboot; see `deploy/aws/lib/nvidia.sh`), installing the systemd
+  unit, importing the OCI images into containerd, generating the
+  SRT passphrase (`0600`, never printed), and preparing
+  config/log/video directories (logs `0750`/`0640` root:root). The
+  on-box `deploy.sh` sources pure helpers from `lib/deploy.sh` for
+  the passphrase, containerd root/state, and log-directory work.
 - Local encoder helper scripts for pointing the encoder at
   the `strim.example.com` Dynamic DNS hostname (no `/etc/hosts`
   edits), writing the SRT passphrase into a local env file,
@@ -667,6 +671,8 @@ The deployment bundle contains:
 - `controller-container.tar`, `ffmpeg-container.tar`, `mediamtx-container.tar`
 - `strimserver-offline-2160p60.mp4`
 - `deploy.sh`, `fish-deploy.sh`, `imdslib.sh`, `prompt_login.fish`
+- `setup-gpu.sh`, `lib/nvidia.sh` (driver floor/upgrade mechanics),
+  `lib/deploy.sh` (pure deploy helpers sourced by `deploy.sh`)
 - `strimserver.service` — the per-bundle systemd unit generated from `deploy/aws/strimserver.service.template`, carrying the bundle's controller image and container name
 - `strimserver.env`, `mediamtx.yaml.template`, `transcode.sh`, `notify` (the static `notify` binary, bind-mounted into the mediamtx container at `/mnt/nvme/bin/notify`)
 - `openssh-experimental.rpm` (always included; from the pinned `@openssh_dist` artifact)
@@ -906,8 +912,12 @@ Expected target characteristics:
   determinism, but the pin covers the **image**, not the installed GPU driver.
 - GPU/container runtime: NVIDIA container tooling supplied by the DLAMI; the
   installed driver is brought to the `nvidia-open 620.70.06` floor (CUDA 13.5,
-  `sm_75`, GSP firmware required) by `deploy/aws/setup-gpu.sh`, which fails
-  closed if the floor cannot be met.
+  `sm_75`, GSP firmware required) by `deploy/aws/setup-gpu.sh` via
+  `deploy/aws/lib/nvidia.sh`, which fails closed if the floor cannot be met. A
+  below-floor host is upgraded from an offline-staged, signature-verified RPM
+  closure, with GPU holders drained, the module reloaded and verified against
+  `/proc/driver/nvidia/version` (no reboot); an interrupted swap leaves a resume
+  marker for the next `setup-gpu.sh` run.
 - Storage: NVMe ephemeral device formatted as `ext4` and
   mounted at `/mnt/nvme` by `deploy/aws/setup_strimserver`.
 - Runtime: containerd with its root and state directories

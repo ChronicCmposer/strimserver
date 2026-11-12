@@ -1,14 +1,18 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
-exports_files([
-    "deploy.sh",
-    "fish-deploy.sh",
-    "imdslib.sh",
-    "prompt_login.fish",
-    "setup-gpu.sh",
-    "strim-ddns.service.template",
-    "strim-ddns.timer",
-])
+exports_files(
+    [
+        "deploy.sh",
+        "fish-deploy.sh",
+        "imdslib.sh",
+        "prompt_login.fish",
+        "setup-gpu.sh",
+        "strim-ddns.service.template",
+        "strim-ddns.timer",
+    ],
+    # deploy.sh is consumed by //core:security_hygiene_test.
+    visibility = ["//visibility:public"],
+)
 
 # --- Generated systemd units (Go / C controller variants) --------------------
 # Both controller variants share ONE unit template (strimserver.service.template)
@@ -77,6 +81,20 @@ expand_template(
         "__CONTAINER__": "strim-ddns",
     },
     visibility = ["//visibility:public"],
+)
+
+# --- Deploy helper unit tests ------------------------------------------------
+# deploy_helpers_test.sh drives the pure helpers in lib/deploy.sh (passphrase
+# generation/containerd root+state/logs-dir) through a recording fake sudo, so
+# the suite needs no root. `deploy.sh` is a data input for the static
+# no-passphrase-print assertion.
+sh_test(
+    name = "deploy_helpers_test",
+    srcs = ["deploy_helpers_test.sh"],
+    data = [
+        "//deploy/aws/lib:deploy.sh",
+        "deploy.sh",
+    ],
 )
 
 # --- Offline tests: project-scoped [strimserver] operator account (11b) ------

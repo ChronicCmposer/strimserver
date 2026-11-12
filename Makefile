@@ -115,7 +115,10 @@ require-build-info:
 	fi
 
 GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null)
-release: require-build-info
+# Gate the release on the secret scan: a bundle that carries the Twitch stream
+# key must never be published. check-no-twitch-key fails the build if the key
+# reaches any packaged output.
+release: require-build-info check-no-twitch-key
 	GIT_TAG=$(GIT_TAG) GIT_COMMIT=$(GIT_COMMIT) bazel run $(REPO_ENV) --action_env=GIT_TAG=$(GIT_TAG) --action_env=GIT_COMMIT=$(GIT_COMMIT) //:release
 
 # Bump the latest vX.Y.Z git tag and push it (tag-based versioning; git tags

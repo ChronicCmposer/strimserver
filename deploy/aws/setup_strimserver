@@ -35,6 +35,27 @@ def ssh_run(hostname, username, port, cmd, capture=False):
     return result
 
 
+def ssh_write_secret(hostname, username, port, remote_path, value):
+    """Create a remote secret file with umask 077 (never scp-then-chmod).
+
+    The value is streamed over stdin so it never enters an argv, no TTY is
+    allocated (so the line discipline cannot echo it), and the remote umask
+    makes the newly created file 0600. An existing file is re-tightened to 0600.
+    """
+    ssh_cmd = os.environ.get("SSH_CMD", "ssh")
+    remote_cmd = f"umask 077; cat > {remote_path} && chmod 600 {remote_path}"
+    full_cmd = (ssh_cmd.split() + ssh_identity_flags()
+                + known_hosts.ssh_options()
+                + ["-p", f"{port}", f"{username}@{hostname}", remote_cmd])
+    print(f"\n>>> Writing secret to: {username}@{hostname}:{remote_path}")
+    try:
+        result = subprocess.run(full_cmd, input=value + "\n", text=True, check=True)
+    except FileNotFoundError:
+        print("Error: ssh client not found. Make sure OpenSSH is installed.", file=sys.stderr)
+        sys.exit(1)
+    print(f"[exit status: {result.returncode}]")
+
+
 def run_ssh_commands(hostname, username, port, commands):
     for cmd in commands:
         ssh_run(hostname, username, port, cmd, capture=False)
@@ -201,18 +222,13 @@ def resolve_twitch_key():
 
 
 def transfer_twitch_key(key, hostname, username, port):
-    """Write the key to a local 0600 temp file, scp it to the box, then scrub locally."""
-    import stat
-    import tempfile
-    fd, tmp = tempfile.mkstemp(prefix="twitch-key-")
-    try:
-        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)  # 0600
-        with os.fdopen(fd, "w") as fh:
-            fh.write(key + "\n")
-        scp_to_remote(tmp, hostname, username, port, "/mnt/nvme/twitch-stream-key")
-    finally:
-        os.remove(tmp)
-    ssh_run(hostname, username, port, "chmod 600 /mnt/nvme/twitch-stream-key")
+    """Stream the key over stdin to a file created with umask 077.
+
+    Previously scp wrote the destination under the remote default umask and a
+    second `chmod 600` closed the window; creating it 0600 from the first byte
+    removes that exposure and keeps the value out of argv entirely.
+    """
+    ssh_write_secret(hostname, username, port, "/mnt/nvme/twitch-stream-key", key)
 
 
 def resolve_ddns_password():
@@ -451,11 +467,15 @@ if __name__ == "__main__":
 
     # 3) extract + hand off to deploy.sh
     run_ssh_commands(HOST, USER, PORT, [
+        # Remove stale bundle helpers before extraction so a leftover
+        # lib/deploy.sh from a prior bundle cannot shadow the new one.
+        "cd /mnt/nvme && rm -f lib/deploy.sh lib/nvidia.sh",
         f"cd /mnt/nvme && tar -xvf {DEPLOYMENT}",
         f"cd /mnt/nvme && rm -f {DEPLOYMENT}",
         "cd /mnt/nvme && chmod +x deploy.sh",
         "cd /mnt/nvme && chmod +x setup-gpu.sh",
         "cd /mnt/nvme && chmod +x lib/nvidia.sh",
+        "cd /mnt/nvme && chmod +x lib/deploy.sh",
         "cd /mnt/nvme && ./deploy.sh",
     ])
 

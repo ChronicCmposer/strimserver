@@ -5,6 +5,7 @@
 exports_files(
     [
         "aws_profile.sh",
+        "deploy.sh",
         "nvidia.sh",
     ],
     visibility = ["//visibility:public"],

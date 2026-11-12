@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -87,6 +88,10 @@ int main(int argc, char **argv) {
     int nice_value;
     int render_only = 0;
     char *exec_argv[3];
+
+    /* Defence-in-depth: any file created after this point is not group/world
+     * writable, matching the shell entrypoints' `umask 027`. */
+    umask(027);
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--render-only") == 0) {

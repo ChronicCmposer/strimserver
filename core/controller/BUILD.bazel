@@ -12,6 +12,12 @@ load("//tools/bazel:go_bin.bzl", "go_bin")
 
 exports_files(["go.mod", "go.sum"])
 
+# Consumed by //core:security_hygiene_test's static/runtime checks.
+exports_files(
+    ["entrypoint.sh"],
+    visibility = ["//core:__pkg__"],
+)
+
 # Build provenance (Version + Commit) injected as a generated Go source. The
 # genrule reads GIT_TAG / GIT_COMMIT from the action env (--action_env in the
 # Makefile); unset -> 0.0.0 / unknown.

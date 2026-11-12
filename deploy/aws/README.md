@@ -42,6 +42,50 @@ floor: it detects the installed driver, upgrades to the pinned NEVRA when below
 the floor, never downgrades, confirms `gsp_tu10x.bin`, and **fails closed** if
 the floor cannot be met.
 
+#### Driver upgrade mechanics (`lib/nvidia.sh`)
+
+`deploy/aws/setup-gpu.sh` sources `deploy/aws/lib/nvidia.sh` (bundled as
+`lib/nvidia.sh`) and calls `nvidia_ensure_driver_floor` before any `nvidia-smi`
+guard. The upgrade path is offline-staged and ordered so a failure never leaves
+the host without a usable driver:
+
+1. **Detect** the installed version with precedence `proc -> modinfo -> rpm ->
+   nvidia-smi`. The *verification* path is stricter: it reads only
+   `/proc/driver/nvidia/version` so an on-disk 620 with a still-loaded 595 can
+   never be reported healthy.
+2. **At/above the floor but not loaded** (module on disk, nothing serving the
+   GPU): run `depmod -a` + `modprobe nvidia`, then re-verify. Nothing is
+   reinstalled.
+3. **Below the floor:** add the per-arch CUDA repo and import its signing key,
+   then stage the full 620 dependency closure with `dnf install --downloadonly`
+   into `/mnt/nvme/nvidia-rpm` (plus any RPM-managed
+   fabricmanager/persistenced unit packages). The staged RPMs must include
+   `nvidia-open`, `nvidia-driver-cuda`, and a kmod/DKMS kernel module, must
+   pass `rpm -K`, and must contain an `nvidia.ko` for the running kernel before
+   the old driver is touched. The new stage is swapped in atomically
+   (backup -> rename -> drop backup).
+4. **Resume marker:** the first destructive action writes
+   `/var/lib/strimserver/driver-upgrade.state`. On any later failure the marker
+   is left in place so re-running `setup-gpu.sh` resumes the same upgrade;
+   rollback is an explicit operator action (reinstall the previous `nvidia-open`
+   and `depmod`/`modprobe`). There is no reboot and no auto-rollback service.
+5. **Drain holders:** stop `strimserver`, fabricmanager, the DCGM *exporter*
+   before `nvidia-dcgm`, then persistenced and containerd; wait (bounded) for
+   the DCGM units to go inactive and fail if any `/dev/nvidia*` holder survives.
+   DCGM/exporter stay stopped afterwards — strimserver never uses them.
+6. **Swap:** remove a `.run`-managed payload when present, install the validated
+   closure offline (`--allowerasing --disableexcludes=all --disablerepo='*'`),
+   confirm the module for the running kernel is 620, remove only a stale
+   below-floor DKMS build, `depmod -a`, unload the old module graph
+   dependency-first, then `modprobe nvidia` + `nvidia_uvm`.
+7. **Verify:** proc driver at/above the floor, `nvidia-smi` compute capability
+   `7.5`, `/dev/nvidia0`, and the GSP firmware file; then restore persistenced /
+   fabricmanager and remove the marker.
+
+The upgrade therefore needs outbound access to the NVIDIA CUDA repository at
+deploy time; the RPM payload itself is staged locally before removal so an
+interrupted install is recoverable from `/mnt/nvme/nvidia-rpm`.
+
 **arm64 caveat:** `nvidia-open-620.70.06-1.amzn2023.noarch` is published in
 `amzn2023/sbsa`, but AL2023 **generic Arm64 is outside the vendor's 620 support
 matrix** (and `sbsa` `cuda-drivers` tops out at 610.57.04). The arm64 RPM epoch
@@ -274,7 +318,10 @@ disabled; the operator's settings are propagated to the box at deploy time and
 written into the on-box `strimserver.env`, exactly like the Twitch key.
 
 `deploy.sh` runs the same flow on both architectures; the arm64 rollout adds
-the GPU-runtime step:
+the GPU-runtime step. The script sources pure helpers from `lib/deploy.sh`
+(bundled beside it) for the passphrase, containerd root/state rewrite, and
+logs-directory preparation; those helpers take the privilege prefix from the
+call site and are unit-tested by `deploy_helpers_test.sh`.
 
 Before sourcing the on-box config, `deploy.sh` merges the transferred
 `ENABLE_DDNS` / `DDNS_HOST` / `DDNS_DOMAIN` (from `/mnt/nvme/ddns-config`) into
@@ -302,13 +349,19 @@ bundled defaults (DDNS disabled) stay in effect.
    imported in the next step).
 5. Import the three images into the `strimserver` namespace:
    `ctr -n strimserver i import {controller,ffmpeg,mediamtx}-container.tar`.
-6. Generate a 70-char SRT read passphrase → `/mnt/nvme/srt-passphrase`.
+6. Generate a 70-char SRT read passphrase into `/mnt/nvme/srt-passphrase`
+   (root:root `0600`, created once and kept on re-run). The value is **never
+   printed**: the deploy log names the file only, and the operator reads it on
+   the host with `sudo cat /mnt/nvme/srt-passphrase`.
 7. `fish-deploy.sh` — skipped loudly on aarch64 (pinned fish 4.3.1 is
    x86_64-only; fish is an operator convenience shell, not a dependency).
 8. `dnf install htop`; install `openssh-experimental.rpm` when present — on
    arm64 expect the skip warning until an arm64 RPM is published (Section 7).
 9. Set hostname, create `/mnt/nvme/{video-files,logs}`, move the offline
-   segment into `video-files`.
+   segment into `video-files`. The logs directory is prepared as `0750`
+   root:root with the three expected log files pre-created `0640`
+   (containerd's shim creates them, so a process umask cannot set their mode),
+   and any existing regular file under it is normalized to `0640` root:root.
 10. Configure Namecheap Dynamic DNS (`$DDNS_HOST.$DDNS_DOMAIN`, from the
     operator settings injected above): install the transferred password to
     `/etc/strim-ddns/password` (root:root `0600`, transfer file scrubbed),

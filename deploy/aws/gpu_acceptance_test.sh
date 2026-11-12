@@ -36,6 +36,28 @@ check "driver detected (${driver:-none})" test -n "$driver"
 check "driver >= floor $NVIDIA_DRIVER_FLOOR" \
   bash -c 'nvidia_driver_ge "$1" "$2"' _ "$driver" "$NVIDIA_DRIVER_FLOOR"
 
+# --- loaded driver via the STRICT /proc reader ------------------------------
+# nvidia-smi reports what userspace sees; /proc reports the loaded module. Both
+# must agree the host is on 620 (an on-disk 620 with a loaded 595 is a failure).
+proc_driver="$(nvidia__proc_version || true)"
+check "proc reports driver >= floor (found ${proc_driver:-none})" \
+  bash -c 'nvidia_driver_ge "$1" "$2"' _ "$proc_driver" "$NVIDIA_DRIVER_FLOOR"
+
+# --- GPU device node --------------------------------------------------------
+device_node="${NVIDIA_DEVICE_NODE:-/dev/nvidia0}"
+check "GPU device node exists at $device_node" test -e "$device_node"
+
+# --- DCGM must be left inactive after the driver swap -----------------------
+# strimserver never uses DCGM, and nv-hostengine holds /dev/nvidia*.
+if command -v systemctl >/dev/null 2>&1; then
+  check "nvidia-dcgm.service is inactive" \
+    bash -c '! systemctl is-active --quiet nvidia-dcgm.service'
+  check "nvidia-dcgm-exporter.service is inactive" \
+    bash -c '! systemctl is-active --quiet nvidia-dcgm-exporter.service'
+else
+  check "systemctl is available to check DCGM state" false
+fi
+
 # --- compute capability (T4/T4G = 7.5) --------------------------------------
 cap="$(nvidia_compute_cap_of_smi || true)"
 check "compute capability is 7.5 (found ${cap:-none})" test "$cap" = "7.5"

@@ -63,6 +63,8 @@ begin_case() {
   export NVIDIA_STAGE_DIR="$case_tmp/stage"
   export NVIDIA_FIRMWARE_ROOT="$case_tmp/fw"
   export NVIDIA_RESUME_MARKER="$case_tmp/driver-upgrade.state"
+  export NVIDIA_PROC_VERSION_FILE="$case_tmp/proc-version"
+  export NVIDIA_DEVICE_NODE="$case_tmp/nvidia0"
   export FAKE_GPU_CALLS_PREP="$case_tmp"
   export SUDO=fake-sudo
 }
@@ -71,10 +73,17 @@ end_case() {
   fake_gpu_cleanup
   PATH="$case_path"
   command rm -rf "$case_tmp"
-  unset NVIDIA_STAGE_DIR NVIDIA_FIRMWARE_ROOT NVIDIA_RESUME_MARKER SUDO \
-    FAKE_REPORTED_DRIVER FAKE_RPM_INSTALLED FAKE_RUN_MANAGED FAKE_DNF_RC \
-    FAKE_DNF_UPGRADES_DRIVER FAKE_PKG_AVAILABLE FAKE_MODPROBE_RC FAKE_ARCH \
-    FAKE_STRIMSERVER_ACTIVE FAKE_FABRICMANAGER_UNIT
+  unset NVIDIA_STAGE_DIR NVIDIA_FIRMWARE_ROOT NVIDIA_RESUME_MARKER \
+    NVIDIA_PROC_VERSION_FILE NVIDIA_DEVICE_NODE SUDO FAKE_PROC_FILE \
+    FAKE_GPU_BINDIR FAKE_GPU_CALLS FAKE_DNF_ARGV FAKE_GPU_STATE \
+    FAKE_REPORTED_DRIVER FAKE_PROC_VERSION FAKE_PROC_VERSION_STUCK FAKE_RPM_INSTALLED \
+    FAKE_RUN_MANAGED FAKE_DNF_RC FAKE_DNF_DOWNLOADONLY_RC FAKE_DNF_CLOSURE_INCOMPLETE \
+    FAKE_DNF_KEY_MISSING FAKE_DNF_UPGRADES_DRIVER FAKE_PKG_AVAILABLE FAKE_MODPROBE_RC \
+    FAKE_MODULE_LOADED FAKE_MODULES FAKE_ARCH FAKE_KERNEL_RELEASE FAKE_NEVRA \
+    FAKE_STRIMSERVER_ACTIVE FAKE_FABRICMANAGER_UNIT FAKE_DCGM_UNIT FAKE_DCGM_EXPORTER_UNIT \
+    FAKE_DCGM_ACTIVE FAKE_DCGM_EXPORTER_ACTIVE FAKE_DCGM_STUCK FAKE_DCGM_EXPORTER_STUCK \
+    FAKE_KERNEL_MODULE_VARIANT FAKE_DKMS_STATUS FAKE_DKMS_RC FAKE_SMI_RC FAKE_SMI_MISSING \
+    FAKE_HOLDER FAKE_UNINSTALL_RC FAKE_RMMOD_BUSY FAKE_PAYLOAD_MISSING_MODULE
 }
 
 call_index() { fake_gpu_first_index "$1"; }
@@ -103,6 +112,10 @@ case_amd64_upgrade_then_cdi() {
     bash -c 'a=$(awk "/rm .*nvidia.yaml/{print NR; exit}" "$1"); b=$(awk "/nvidia-ctk cdi generate/{print NR; exit}" "$1"); [[ -n "$a" && -n "$b" && "$a" -lt "$b" ]]' _ "$FAKE_GPU_CALLS"
   check "amd64: clears stale nvidia.yml before generating" \
     bash -c 'a=$(awk "/rm .*nvidia.yml/{print NR; exit}" "$1"); b=$(awk "/nvidia-ctk cdi generate/{print NR; exit}" "$1"); [[ -n "$a" && -n "$b" && "$a" -lt "$b" ]]' _ "$FAKE_GPU_CALLS"
+  check "amd64: verification reads the 620 proc version" \
+    bash -c 'grep -q "620\.70\.06" "$1"' _ "$NVIDIA_PROC_VERSION_FILE"
+  check "amd64: never starts DCGM after the swap" \
+    bash -c '! grep -Eq "systemctl start nvidia-dcgm" "$1"' _ "$FAKE_GPU_CALLS"
   end_case
 }
 
@@ -115,6 +128,38 @@ case_failed_upgrade_no_cdi() {
 
   check "failed upgrade: setup-gpu.sh exits non-zero" test "$rc" -ne 0
   check "failed upgrade: no CDI spec generated" bash -c '! grep -q "nvidia-ctk cdi generate" "$1"' _ "$FAKE_GPU_CALLS"
+  end_case
+}
+
+# --- GPU init failure must block CDI generation ----------------------------
+case_gpu_init_fails_no_cdi() {
+  begin_case
+  export FAKE_ARCH=x86_64 FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_SMI_RC=1
+  fake_gpu_install
+  bash "$setup_gpu" >/dev/null 2>&1; local rc=$?
+
+  check "gpu init failure: setup-gpu.sh exits non-zero" test "$rc" -ne 0
+  check "gpu init failure: no CDI spec generated" \
+    bash -c '! grep -q "nvidia-ctk cdi generate" "$1"' _ "$FAKE_GPU_CALLS"
+  end_case
+}
+
+# --- DCGM units are drained and left stopped, never restarted --------------
+case_dcgm_drained_not_restarted() {
+  begin_case
+  export FAKE_ARCH=x86_64 FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_DCGM_UNIT=1 FAKE_DCGM_EXPORTER_UNIT=1
+  export FAKE_DCGM_ACTIVE=1 FAKE_DCGM_EXPORTER_ACTIVE=1
+  fake_gpu_install
+  bash "$setup_gpu" >/dev/null 2>&1; local rc=$?
+
+  check "dcgm (setup-gpu): exits 0" test "$rc" -eq 0
+  check "dcgm (setup-gpu): exporter stopped before dcgm" \
+    before 'systemctl stop nvidia-dcgm-exporter.service' 'systemctl stop nvidia-dcgm.service'
+  check "dcgm (setup-gpu): neither unit restarted" \
+    bash -c '! grep -Eq "systemctl (start|enable).*nvidia-dcgm" "$1"' _ "$FAKE_GPU_CALLS"
+  check "dcgm (setup-gpu): both left inactive" \
+    bash -c '[[ "$(cat "$1/dcgm_active")" == 0 && "$(cat "$1/dcgm_exporter_active")" == 0 ]]' _ "$FAKE_GPU_STATE"
   end_case
 }
 
@@ -138,6 +183,8 @@ case_arm64_runtime() {
 
 case_amd64_upgrade_then_cdi
 case_failed_upgrade_no_cdi
+case_gpu_init_fails_no_cdi
+case_dcgm_drained_not_restarted
 case_arm64_runtime
 
 if [[ "$failures" -ne 0 ]]; then

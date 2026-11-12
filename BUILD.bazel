@@ -114,6 +114,20 @@ pkg_files(
     strip_prefix = strip_prefix.files_only(),
 )
 
+# deploy.sh sources "$script_dir/lib/deploy.sh", so the helper must keep its
+# lib/ path in the bundle just like lib/nvidia.sh. A dedicated pkg_files (not
+# bundle_exec_scripts) prevents strip_prefix.files_only() from flattening it to
+# /mnt/nvme/deploy.sh and colliding with the executable deploy.sh. 0755.
+pkg_files(
+    name = "bundle_deploy_lib",
+    srcs = ["//deploy/aws/lib:deploy.sh"],
+    attributes = pkg_attributes(mode = "0755"),
+    renames = {
+        "//deploy/aws/lib:deploy.sh": "lib/deploy.sh",
+    },
+    strip_prefix = strip_prefix.files_only(),
+)
+
 # The systemd unit is the SECOND bundle member that differs per language (the
 # controller image below is the first): the Go bundle ships the generated Go
 # unit (//deploy/aws:strimserver_unit_go) and the C bundle the generated C unit
@@ -277,6 +291,7 @@ pkg_tar(
         ":bundle_exec_scripts",
         ":bundle_scripts",
         ":bundle_nvidia_lib",
+        ":bundle_deploy_lib",
     ],
     out = "strimserver-deployment-go-amd64.unchecked.tar",
     # Manual: the base tar is built ONLY inside the two arch transitions below.
@@ -370,6 +385,7 @@ pkg_tar(
         ":bundle_exec_scripts",
         ":bundle_scripts",
         ":bundle_nvidia_lib",
+        ":bundle_deploy_lib",
     ],
     out = "strimserver-deployment-c.unchecked.tar",
     tags = ["manual"],
