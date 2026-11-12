@@ -58,7 +58,11 @@ the host without a usable driver:
    reinstalled.
 3. **Below the floor:** add the per-arch CUDA repo and import its signing key,
    then stage the full 620 dependency closure with `dnf install --downloadonly`
-   into `/mnt/nvme/nvidia-rpm`. The required `nvidia-open` NEVRA is staged first
+   into `/mnt/nvme/nvidia-rpm`. The stage leaf is created under a root-owned
+   `mktemp -d` and normalized to `0755`; a missing parent is created `0755`,
+   while an existing mount root such as `/mnt/nvme` is only checked for
+   traversal and never chmodded blindly (see *Staging directory access* below).
+   The required `nvidia-open` NEVRA is staged first
    in its own transaction; any RPM-managed fabricmanager/persistenced unit
    package is **availability-gated** (matching arch, exactly one version
    at/above `620.70.06`) and staged separately. An unavailable or failed
@@ -113,15 +117,63 @@ the host without a usable driver:
 
 The upgrade therefore needs outbound access to the NVIDIA CUDA repository at
 deploy time; the RPM payload itself is staged locally before removal so an
-interrupted install is recoverable from `/mnt/nvme/nvidia-rpm`.
+interrupted install is recoverable from `/mnt/nvme/nvidia-rpm`. A stage that
+fails validation **before the swap** leaves the host on its existing driver
+(595 on the reference host); the old driver is never uninstalled first.
+
+#### Staging directory access
+
+`lib/nvidia.sh` stages into a root-owned `mktemp -d`, so the leaf starts at
+`0700 root:root`. Every validator (`rpm -K`, staged-version, kernel-module,
+GSP, and DKMS checks) runs as the **deploying user**, which must therefore be
+able to read and traverse the stage leaf **and every parent component** down to
+the mount root. A `0755` leaf under a `0700` parent is still inaccessible.
+
+- **Parent policy.** A missing stage parent is created `0755` (with `install -d
+  -m 0755`). An **existing** parent — in particular the mount root `/mnt/nvme`,
+  which also holds the SRT passphrase and other deploy state — is only checked
+  for traversal; it is never `chmod`ed blindly. If an existing parent is not
+  traversable, the run fails with `[closure]` guidance to fix it.
+- **DNF success is not staging success.** `dnf install --downloadonly` can exit
+  `0` and write every RPM while the deploying user still cannot see the files.
+  Staging succeeds only when the staged RPM set passes the access guard and all
+  validators; a stage that is missing, empty, unreadable, or non-traversable
+  fails closed.
+- **Failure diagnostics.** An access failure prints an `nvidia: ERROR [closure]`
+  (or `[kernel-module]` for a kernel-module consumer) line naming the caller
+  (`$(id -un)`), the failing directory or path component, its mode/owner when
+  `stat` succeeds, and an explicit statement that no driver action was taken.
+  It also prints `namei -l <dir>` when available so the operator can see which
+  component denies traversal.
+
+Inspect the stage without taking any driver action using the read-only
+stage-only mode (`NVIDIA_STAGE_ONLY=1` or `setup-gpu.sh --stage-only`). It runs
+repo setup, stages the closure, runs every validator, and exits `0` **before**
+the resume marker, drain, uninstall, or install:
+
+```sh
+NVIDIA_STAGE_ONLY=1 ./setup-gpu.sh      # or: ./setup-gpu.sh --stage-only
+namei -l /mnt/nvme/nvidia-rpm           # every component must be traversable
+```
+
+Run stage-only as the **deploying user** — the same unprivileged account that
+runs `deploy.sh`, which uses `sudo` internally. Do **not** prefix it with
+`sudo`: as root the readability assertions pass trivially and stop proving that
+the deploy user can traverse the stage. Then confirm the printed stage directory
+is `0755` and `namei -l` shows no permission denial. The failure text from a bad
+stage is the same one DNF-success misdiagnosis produced in the field; treat it
+as a permissions/path problem, not a DNF/`--destdir` problem.
 
 **Rollback artifact requirement:** because the 595 branch is not in the CUDA
 repository, an in-place rollback needs a **preserved pre-upgrade artifact** — the
 original 595 `.run` installer or the previous `nvidia-rpm` closure — archived
-off-host before the first destructive step. Without one, the only rollback is to
-replace the instance from the pinned AMI; `setup-gpu.sh` never downgrades and
-the deployment bundle contains no driver. Preserve the 595 artifact before
-upgrading, and treat its absence as a decision to replace rather than roll back.
+off-host before the first destructive step. The reference host is `.run`-managed
+and the stage closure lives on instance-store `/mnt/nvme`, so stopping or
+terminating the instance **loses the stage closure**; a stage kept only on the
+host is not a rollback artifact. Without a verified off-host 595 artifact,
+rollback is **replacement-only**: replace the instance from the pinned AMI.
+`setup-gpu.sh` never downgrades and the deployment bundle contains no driver.
+Preserve and verify the 595 artifact before upgrading (see §6).
 
 **arm64 caveat:** `nvidia-open-620.70.06-1.amzn2023.noarch` is published in
 `amzn2023/sbsa`, but AL2023 **generic Arm64 is outside the vendor's 620 support
@@ -579,6 +631,7 @@ assembly controller; `image_smoke_test` exercises the assembled image layout.
 | Host GPU | driver, temps, ffmpeg attach | `nvidia-smi`; `sudo systemctl status nvidia-persistenced` |
 | Containerd | containers / tasks in the namespace | `sudo ctr -n strimserver containers list`; `sudo ctr -n strimserver tasks list` |
 | NVMe scratch | mount source, free space | `findmnt -n -o SOURCE,FSTYPE /mnt/nvme`; `df -h /mnt/nvme` |
+| Driver stage | leaf/parent readable and traversable | `sudo namei -l /mnt/nvme/nvidia-rpm`; `sudo stat -c '%a %U:%G' /mnt/nvme/nvidia-rpm` |
 
 **NVMe / instance store:** `/mnt/nvme` is instance-store scratch and the
 containerd root/state. Everything under it — containerd root/state,
@@ -590,24 +643,42 @@ EBS-backed `/mnt/nvme` is kept unless the operator explicitly migrates it (stop
 services, back up `config/strimserver.env`, the SRT passphrase, logs, and any
 video files, unmount, then re-run with `--format`). `setup_strimserver` is an
 operator-side script obtained from the git tag, not a member of the deployment
-tar.
+tar. Stopping the instance therefore also **loses the staged `nvidia-rpm`
+closure** (the stage lives under `/mnt/nvme`); a stage that exists only on the
+host is never a durable rollback artifact.
+
+**Staging preflight:** before any drain/uninstall/install, run the read-only
+stage-only mode as the deploying user (`NVIDIA_STAGE_ONLY=1 ./setup-gpu.sh` or
+`./setup-gpu.sh --stage-only`, **not** under `sudo`) and confirm the stage leaf
+is `0755` and `namei -l /mnt/nvme/nvidia-rpm` shows no permission denial. A
+stage that fails validation **before the swap** leaves the host on its existing
+driver (595 on the reference host); do not manually uninstall or reboot to
+"retry". DNF exiting `0` alone does not prove staging succeeded — the
+fail-closed access guard is what proves it (see §1.1, *Staging directory
+access*).
 
 **Rollback:** the deployment tar is fully self-contained — the three image tars
 plus config/scripts live inside it, with no external runtime dependencies. To
 revert, point `DEPLOYMENT_SRC` at the previously published bundle (keeping
 `DEPLOYMENT_SHA256` authoritative), then relaunch the previous architecture,
 e.g. `deploy/aws/launch --type g4dn.xlarge --wait`. Tear down the abandoned
-instance with `deploy/aws/terminate -y` (matches the `Project` tag).
+instance with `deploy/aws/terminate -y` (matches the `Project` tag). This
+reverts the application only; driver rollback has a separate artifact
+requirement, covered next.
 
 **Host-driver caveat:** the bundle contains no driver. Reverting
 `DEPLOYMENT_SRC` reverts the application, **not** the host driver — a host that
 already runs `620.70.06` keeps it. Because `setup-gpu.sh` never downgrades, there
-is no automated driver rollback: to go back below the floor, replace the instance
-from the pinned AMI (Tier B) rather than reinstalling in place. An in-place
-rollback is possible only if a 595 `.run` installer or the previous `nvidia-rpm`
-closure was preserved off-host before the upgrade (see §1.1); those artifacts
-are not bundled, so a manual `nvidia-uninstall` + preserved-595 reinstall is a
-last-resort operator action, not an automated rollback.
+is no automated driver rollback. An in-place rollback requires a **verified
+artifact preserved off-host before the upgrade** — the original 595 `.run`
+installer or the previous 595 RPM closure — not a stage left on the host: the
+reference host is `.run`-managed and its stage lives on instance-store
+`/mnt/nvme`, so stopping or terminating the instance loses the stage closure.
+Without a verified off-host 595 artifact, rollback is **replacement-only**:
+replace the instance from the pinned AMI (Tier B) rather than reinstalling in
+place. Those artifacts are not bundled, so a manual `nvidia-uninstall` +
+preserved-595 reinstall is a last-resort operator action only when the artifact
+has been verified (see §1.1).
 
 ## 7. Known blockers / TODOs — CRITICAL
 

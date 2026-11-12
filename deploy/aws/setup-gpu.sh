@@ -86,6 +86,19 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib/nvidia.sh"
 SUDO="${SUDO:-sudo}"
 
+# --stage-only: stage + validate the 620 closure and exit before any driver
+# action (no marker, drain, uninstall, or install). NVIDIA_STAGE_ONLY=1 is the
+# equivalent environment form.
+for arg in "$@"; do
+   case "$arg" in
+      --stage-only) export NVIDIA_STAGE_ONLY=1 ;;
+      *)
+         printf 'setup-gpu.sh: unknown argument: %s\n' "$arg" >&2
+         exit 2
+         ;;
+   esac
+done
+
 # --- arch detection ----------------------------------------------------------
 MACHINE="$(uname -m)"
 if [[ "$MACHINE" == "aarch64" ]]; then
@@ -114,6 +127,13 @@ if ! nvidia_ensure_driver_floor; then
    printf "\n*** ERROR: the NVIDIA driver is below the %s floor and could not be upgraded/recovered. ***\n" "$NVIDIA_DRIVER_FLOOR"
    printf "Inspect the nvidia: ERROR lines above for the failing state and its recovery command.\n\n"
    exit 1
+fi
+
+# Stage-only mode stops here: the closure has been staged and validated, and no
+# driver action (marker, drain, uninstall, install) was taken.
+if [[ "${NVIDIA_STAGE_ONLY:-0}" == "1" ]]; then
+   printf "stage-only: staged and validated the %s closure; no driver action taken\n" "$NVIDIA_DRIVER_FLOOR"
+   exit 0
 fi
 
 # --- fail-loud guard: no driver AND nothing left to install ------------------

@@ -34,6 +34,25 @@
 #   FAKE_COMPUTE_CAP          compute_cap reported by nvidia-smi (default 7.5)
 #   FAKE_DNF_RC               rc for `dnf install` (offline) (default 0)
 #   FAKE_DNF_DOWNLOADONLY_RC  rc for `dnf install --downloadonly` (default 0)
+#   FAKE_DNF_EMPTY            1 -> a downloadonly call exits 0 but writes no RPMs
+#                             (applied after token availability; overrides
+#                             FAKE_DNF_DOWNLOADONLY_RC)
+#   FAKE_OPTIONAL_DOWNLOAD_RC rc for a downloadonly call whose package token is
+#                             an optional nvidia-fabricmanager/persistenced
+#   FAKE_DNF_DOWNLOADONLY_CHMOD
+#                             mode applied to the stage dir after a downloadonly
+#                             call, modelling a transaction that leaves the leaf
+#                             root-only again
+#   FAKE_CHMOD_RC             nonzero rc for stage-targeted `chmod`; a recording
+#                             fake `chmod` delegates to FAKE_REAL_CHMOD otherwise
+#   FAKE_VERSIONLOCK_CP_RC    nonzero rc for a `cp` that writes a
+#                             *.nvidia-upgrade.* versionlock backup
+#   FAKE_VERSIONLOCK_TEE_RC   nonzero rc for a `tee` that writes a versionlock
+#                             file (simulates a failed filtered write)
+#   FAKE_DNF_STAGE_STDERR     text emitted on stderr by a downloadonly call
+#                             (models captured DNF lock/stale-metadata errors)
+#   FAKE_RPM_UNREADABLE       1 -> `rpm -K`/`-qlp`/`-qp` fail without a readable
+#                             target (root-safe simulation of an access denial)
 #   FAKE_DNF_CLOSURE_INCOMPLETE 1 -> stage writes only the nvidia-open meta RPM
 #   FAKE_DNF_KEY_MISSING      1 -> `rpm --import` and `rpm -K` fail
 #   FAKE_PKG_AVAILABLE        0 -> `dnf install --downloadonly` fails
@@ -123,13 +142,15 @@ fake_gpu_install() {
   FAKE_REAL_MKDIR="$(type -P mkdir)"
   FAKE_REAL_RM="$(type -P rm)"
   FAKE_REAL_CP="$(type -P cp)"
-  export FAKE_REAL_MKDIR FAKE_REAL_RM FAKE_REAL_CP
+  FAKE_REAL_CHMOD="$(type -P chmod)"
+  FAKE_REAL_TEE="$(type -P tee)"
+  export FAKE_REAL_MKDIR FAKE_REAL_RM FAKE_REAL_CP FAKE_REAL_CHMOD FAKE_REAL_TEE
   FAKE_GPU_BINDIR="$(mktemp -d)"
   FAKE_GPU_CALLS="$(mktemp)"
   FAKE_DNF_ARGV="$(mktemp)"
   FAKE_GPU_STATE="$(mktemp -d)"
   export FAKE_GPU_BINDIR FAKE_GPU_CALLS FAKE_DNF_ARGV FAKE_GPU_STATE \
-    FAKE_REAL_MKDIR FAKE_REAL_RM FAKE_REAL_CP
+    FAKE_REAL_MKDIR FAKE_REAL_RM FAKE_REAL_CP FAKE_REAL_CHMOD
 
   # The proc file and device node are always redirected into the state dir
   # unless a test chose its own. This keeps the library hermetic.
@@ -318,9 +339,33 @@ case "$subcmd" in
           exit 1
         fi
       done
+      # A success that writes nothing models the user-visible empty stage
+      # independently of permissions.
+      if [[ "${FAKE_DNF_EMPTY:-0}" == "1" ]]; then
+        exit 0
+      fi
+      # An optional transaction may fail on its own; the caller warns and keeps
+      # the required closure.
+      if [[ -n "${FAKE_OPTIONAL_DOWNLOAD_RC:-}" ]]; then
+        for tok in "${positionals[@]}"; do
+          case "$tok" in
+            nvidia-fabricmanager-*|nvidia-persistenced-*)
+              printf 'fake dnf: optional download failed: %s\n' "$tok" >&2
+              exit "$FAKE_OPTIONAL_DOWNLOAD_RC" ;;
+          esac
+        done
+      fi
       closure_dest "$stage_dest" "${FAKE_ARCH:-x86_64}" \
         "${FAKE_DNF_CLOSURE_INCOMPLETE:-0}" \
         "$(cat "$FAKE_GPU_STATE/kmod_variant" 2>/dev/null || echo kmod)"
+      if [[ -n "${FAKE_DNF_DOWNLOADONLY_CHMOD:-}" ]]; then
+        "$FAKE_REAL_CHMOD" "${FAKE_DNF_DOWNLOADONLY_CHMOD}" "$stage_dest" 2>/dev/null || true
+      fi
+      # Model captured DNF stderr (lock/stale-metadata diagnostics) so the
+      # caller must surface it in its actionable [closure] message.
+      if [[ -n "${FAKE_DNF_STAGE_STDERR:-}" ]]; then
+        printf '%s\n' "$FAKE_DNF_STAGE_STDERR" >&2
+      fi
       exit "${FAKE_DNF_DOWNLOADONLY_RC:-0}"
     fi
     rc="${FAKE_DNF_RC:-0}"
@@ -482,6 +527,9 @@ case "$args" in
     ;;
   *'-qlp'*|*'-q'*'-p'*'-l'*)
     rpmfile="${pkgs[${#pkgs[@]}-1]:-}"
+    # An unreadable target must fail, exactly as the real rpm would under the
+    # invoking user; FAKE_RPM_UNREADABLE keeps that simulation root-safe.
+    [[ "${FAKE_RPM_UNREADABLE:-0}" == "1" || ! -r "$rpmfile" ]] && exit 1
     base="${rpmfile##*/}"
     case "$base" in
       kmod-nvidia-open-dkms-*|nvidia-open-dkms-*)
@@ -513,6 +561,7 @@ case "$args" in
     # A file query reads the staged RPM's own header, not host state. Derive the
     # version from the staged filename so a mismatched staged RPM is visible.
     rpmfile="${pkgs[${#pkgs[@]}-1]:-}"
+    [[ "${FAKE_RPM_UNREADABLE:-0}" == "1" || ! -r "$rpmfile" ]] && exit 1
     base="${rpmfile##*/}"
     staged_version="$version"
     if [[ "$base" =~ [-:]([0-9]+\.[0-9]+\.[0-9]+)- ]]; then
@@ -527,6 +576,8 @@ case "$args" in
     ;;
   *'-K'*)
     [[ "${FAKE_DNF_KEY_MISSING:-0}" == "1" ]] && exit 1
+    rpmfile="${pkgs[${#pkgs[@]}-1]:-}"
+    [[ "${FAKE_RPM_UNREADABLE:-0}" == "1" || ! -r "$rpmfile" ]] && exit 1
     exit 0
     ;;
   *'kmod-nvidia-open-dkms'*)
@@ -902,8 +953,49 @@ SHIM
   cat >"$FAKE_GPU_BINDIR/cp" <<'SHIM'
 #!/usr/bin/env bash
 printf 'cp %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+# A versionlock backup is the only cp that writes a .nvidia-upgrade.* path;
+# FAKE_VERSIONLOCK_CP_RC simulates a backup failure.
+if [[ -n "${FAKE_VERSIONLOCK_CP_RC:-}" ]]; then
+  for a in "$@"; do
+    case "$a" in
+      *.nvidia-upgrade.*) exit "$FAKE_VERSIONLOCK_CP_RC" ;;
+    esac
+  done
+fi
 "$FAKE_REAL_CP" "$@" 2>/dev/null && exit 0
 exit 0
+SHIM
+
+  # --- tee (recording, delegating) ----------------------------------------
+  # A versionlock filtered write goes through `tee`; FAKE_VERSIONLOCK_TEE_RC
+  # simulates a failed filtered write while leaving marker writes intact.
+  cat >"$FAKE_GPU_BINDIR/tee" <<'SHIM'
+#!/usr/bin/env bash
+printf 'tee %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+if [[ -n "${FAKE_VERSIONLOCK_TEE_RC:-}" ]]; then
+  target="${*: -1}"
+  case "$target" in
+    *versionlock*) exit "$FAKE_VERSIONLOCK_TEE_RC" ;;
+  esac
+fi
+exec "${FAKE_REAL_TEE:-tee}" "$@"
+SHIM
+
+  # --- chmod (recording, delegating) ---------------------------------------
+  # Records every call so a test can prove the stage dir was normalized, honors
+  # FAKE_CHMOD_RC for stage-targeted calls, and otherwise runs the real chmod.
+  cat >"$FAKE_GPU_BINDIR/chmod" <<'SHIM'
+#!/usr/bin/env bash
+printf 'chmod %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+if [[ -n "${NVIDIA_STAGE_DIR:-}" && -n "${FAKE_CHMOD_RC:-}" \
+    && "${FAKE_CHMOD_RC:-0}" != "0" ]]; then
+  target="${*: -1}"
+  case "$target" in
+    "${NVIDIA_STAGE_DIR}"|"${NVIDIA_STAGE_DIR}".tmp.*|"${NVIDIA_STAGE_DIR}".tmp.*/*|"${NVIDIA_STAGE_DIR}"/*)
+      exit "$FAKE_CHMOD_RC" ;;
+  esac
+fi
+exec "${FAKE_REAL_CHMOD:-chmod}" "$@"
 SHIM
 
   # --- fake-sudo ------------------------------------------------------------

@@ -99,7 +99,13 @@ with a warning; a staged prebuilt kmod must carry `nvidia.ko` while a staged
 kernel-devel/headers present. The upgrade restores only units that were active
 before the drain (fabricmanager start failure is non-fatal; persistenced failure
 is fatal), and an in-place rollback requires a pre-upgrade 595 artifact
-preserved off-host.
+preserved off-host. Staging itself is a permissions-sensitive step: the root-owned
+`mktemp` stage and every parent component must be readable and traversable by the
+deploying user, and DNF exiting `0` does not by itself prove staging succeeded —
+an unreadable, empty, or non-traversable stage fails closed with `[closure]`
+diagnostics. Use the read-only stage-only mode (`NVIDIA_STAGE_ONLY=1` /
+`setup-gpu.sh --stage-only`) to verify the stage before any drain or install. See
+`deploy/aws/README.md` §1.1 (*Staging directory access*) and §6.
 
 ### Controller API and behavior
 
@@ -934,9 +940,16 @@ Expected target characteristics:
   prebuilt kmod must carry `nvidia.ko` while a staged `kmod-nvidia-open-dkms`
   must carry `dkms.conf` with `dkms` and matching kernel-devel/headers present.
   Restore touches only units that were active before the drain (a fabricmanager
-  start failure is non-fatal; persistenced failure is fatal). An in-place
-  rollback needs a preserved pre-upgrade 595 `.run`/RPM artifact, otherwise the
-  instance is replaced (see `deploy/aws/README.md` §1.1).
+  start failure is non-fatal; persistenced failure is fatal). The root-owned
+  `mktemp` stage and all of its parent components must be readable/traversable by
+  the deploying user; a missing stage parent is created `0755`, an existing mount
+  root is only checked for traversal, and a DNF `0` exit alone does not prove
+  staging succeeded. Verify it with the read-only stage-only mode
+  (`NVIDIA_STAGE_ONLY=1` / `setup-gpu.sh --stage-only`) before any drain or
+  install. An in-place rollback needs a verified pre-upgrade 595 `.run`/RPM
+  artifact preserved off-host (the instance-store stage closure is lost on
+  stop); otherwise the instance is replaced. See `deploy/aws/README.md` §1.1 and
+  §6.
 - Storage: the NVMe instance-store device is selected by model
   (`Amazon EC2 NVMe Instance Storage`; numeric first match when
   several exist), safety-checked, then reused or formatted `ext4`

@@ -35,16 +35,22 @@
 #               not be imported. Nothing has been uninstalled; `rpm -K` and the
 #               offline install would fail without the key. Recovery: import the
 #               key manually (`sudo rpm --import <url>`) then re-run.
-#   [closure]   dnf could not stage the FULL 620 dependency closure, a staged
-#               RPM failed `rpm -K`, or a required package is missing. Nothing
-#               has been uninstalled. Recovery: `sudo dnf install -y
-#               --downloadonly --disableexcludes=all --destdir <dir>
-#               <NEVRA>` and inspect.
+#   [closure]   dnf could not stage the FULL 620 dependency closure, the stage
+#               directory (leaf or any parent component) is missing, empty,
+#               unreadable, or not traversable by the deploying user, a staged
+#               RPM failed `rpm -K`, a required package is missing, or the
+#               versionlock backup/filtered write failed. Nothing has been
+#               uninstalled. The stage leaf is normalized to 0755; a missing
+#               parent is created 0755, while an existing mount root is only
+#               checked for traversal and never chmodded blindly. Recovery:
+#               inspect `namei -l <dir>` and `stat -c '%a %U:%G' <dir>` as the
+#               deploying user, fix traversal, then re-run.
 #   [kernel-module] the staged payload cannot serve the RUNNING kernel: a kmod
-#               has no nvidia.ko, a DKMS RPM has no dkms.conf, the dkms tool or
-#               kernel-devel/headers are missing, the staged DKMS source cannot
-#               build for `uname -r`, the installed 620 build is absent, or GSP
-#               firmware is missing. The old driver is never removed first.
+#               has no nvidia.ko, a DKMS RPM has no dkms.conf, the staged stage
+#               is unreadable, the dkms tool or kernel-devel/headers are missing,
+#               the staged DKMS source cannot build for `uname -r`, the installed
+#               620 build is absent, or GSP firmware is missing. The old driver
+#               is never removed first.
 #               Recovery: verify `dkms status`, `modinfo -k $(uname -r) nvidia`,
 #               the kernel-devel match, and the 620 GSP firmware.
 #   [optional]  an optional unit (fabricmanager/persistenced) was omitted or
@@ -70,8 +76,10 @@
 #               modules cannot initialize Turing without GSP.
 #   [verify]    after the swap the loaded driver is still below the floor, or
 #               nvidia-smi / /dev/nvidia0 show the GPU did not initialize.
-#   [resume]    the resume marker could not be written. The upgrade aborts
-#               BEFORE the drain so nothing destructive has happened.
+#   [resume]    the resume marker could not be written atomically, or it is
+#               truncated/missing fields. A write failure aborts BEFORE the
+#               drain; a malformed marker is treated conservatively (persistenced
+#               is restored, never recaptured post-drain as inactive).
 #   [rollback] / [resume] are not error states: on any post-marker failure the
 #               resume marker is left in place and the operator is told to
 #               re-run setup-gpu.sh (resume) or restore the previous driver
@@ -81,6 +89,17 @@
 #               whose strict /proc driver is already at the floor short-circuits
 #               directly to restore/verify. No `strimserver-driver-resume.service`
 #               exists; the marker is a plain file and resume is a manual re-run.
+#
+# Stage-only inspection
+# ---------------------
+#   NVIDIA_STAGE_ONLY=1 (or setup-gpu.sh --stage-only) runs repo setup + stage +
+#   every validator and exits 0 BEFORE the resume marker, drain, uninstall, or
+#   install. Use it to prove the stage dir is 0755 and every parent is
+#   traversable by the deploying user without touching a running driver.
+#
+# Rollback assumptions: a successful swap removes the old driver. Keep a
+# verified off-host artifact of the previous driver (or accept replacement-only
+# rollback); never rely on the stage dir surviving an instance stop.
 #
 # Restore semantics: nvidia__restore starts fabricmanager only when it was
 # active AND its 620 package was staged (a start failure is a loud warning on a
@@ -257,6 +276,21 @@ nvidia__detect_installed_version() {
     return 0
   fi
   if version="$(nvidia_driver_of_smi)"; then
+    printf '%s\n' "$version"
+    return 0
+  fi
+  return 1
+}
+
+# On-disk version only (rpm then modinfo), never nvidia-smi. Used on resume to
+# decide whether the 620 payload is already installed but merely unloaded.
+nvidia__on_disk_version() {
+  local version
+  if version="$(nvidia__rpm_version)"; then
+    printf '%s\n' "$version"
+    return 0
+  fi
+  if version="$(nvidia__modinfo_version)"; then
     printf '%s\n' "$version"
     return 0
   fi
@@ -442,10 +476,7 @@ nvidia__optional_unit_packages() {
 nvidia__validate_closure() {
   local dir="$1" machine="${2:-$(uname -m)}"
 
-  if ! compgen -G "$dir/*.rpm" >/dev/null; then
-    nvidia__fail closure "no RPMs were staged in $dir"
-    return 1
-  fi
+  nvidia__assert_stage_readable "$dir" closure || return 1
   if ! compgen -G "$dir/nvidia-open-*.rpm" >/dev/null; then
     nvidia__fail closure "staged closure is missing nvidia-open-*.rpm"
     return 1
@@ -464,7 +495,19 @@ nvidia__validate_closure() {
 # Validate every staged RPM's signature/digest. Requires the repo key.
 nvidia__validate_signatures() {
   local sudo_cmd="$1" dir="$2" rpmfile
-  for rpmfile in "$dir"/*.rpm; do
+  local -a rpms=()
+  local had_nullglob=0
+
+  nvidia__assert_stage_readable "$dir" closure || return 1
+  shopt -q nullglob || had_nullglob=1
+  shopt -s nullglob
+  rpms=("$dir"/*.rpm)
+  (( had_nullglob == 1 )) && shopt -u nullglob
+  if (( ${#rpms[@]} == 0 )); then
+    nvidia__fail closure "no staged RPMs in $dir for $(id -un) (empty or inaccessible); no driver action was taken"
+    return 1
+  fi
+  for rpmfile in "${rpms[@]}"; do
     [[ -e "$rpmfile" ]] || continue
     if ! "$sudo_cmd" rpm -K "$rpmfile" >/dev/null 2>&1; then
       nvidia__fail closure "staged RPM signature/digest check failed: $rpmfile"
@@ -478,6 +521,7 @@ nvidia__validate_signatures() {
 # the real source-only DKMS payload, not the legacy prebuilt-module variant).
 nvidia__staged_dkms_has_conf() {
   local sudo_cmd="$1" dir="$2" rpmfile
+  nvidia__assert_stage_readable "$dir" kernel-module || return 1
   for rpmfile in "$dir"/kmod-nvidia-open-dkms-*.rpm "$dir"/nvidia-open-dkms-*.rpm; do
     [[ -e "$rpmfile" ]] || continue
     if "$sudo_cmd" rpm -qlp "$rpmfile" 2>/dev/null | grep -q 'dkms\.conf'; then
@@ -493,8 +537,19 @@ nvidia__staged_dkms_has_conf() {
 # no kernel module and is exempt. This gate runs before any uninstall.
 nvidia__staged_payload_has_running_module() {
   local sudo_cmd="$1" dir="$2" rpmfile base listing kernel
+  local -a rpms=()
+  local had_nullglob=0
   kernel="$(uname -r)"
-  for rpmfile in "$dir"/*.rpm; do
+  nvidia__assert_stage_readable "$dir" kernel-module || return 1
+  shopt -q nullglob || had_nullglob=1
+  shopt -s nullglob
+  rpms=("$dir"/*.rpm)
+  (( had_nullglob == 1 )) && shopt -u nullglob
+  if (( ${#rpms[@]} == 0 )); then
+    nvidia__fail kernel-module "no staged RPMs in $dir for $(id -un) (empty or inaccessible); no driver action was taken"
+    return 1
+  fi
+  for rpmfile in "${rpms[@]}"; do
     [[ -e "$rpmfile" ]] || continue
     base="${rpmfile##*/}"
     case "$base" in
@@ -527,12 +582,14 @@ nvidia__staged_payload_has_running_module() {
 # True when a glob matches at least one file in the staging directory.
 nvidia__staged_has_glob() {
   local dir="$1" pattern="$2"
+  nvidia__assert_stage_readable "$dir" closure || return 1
   compgen -G "$dir/$pattern" >/dev/null
 }
 
 # Print the first staged RPM matching a shell glob (e.g. dkms-*.rpm).
 nvidia__staged_rpm() {
   local dir="$1" pattern="$2" rpmfile
+  nvidia__assert_stage_readable "$dir" closure || return 1
   for rpmfile in "$dir"/$pattern; do
     [[ -e "$rpmfile" ]] || continue
     printf '%s\n' "$rpmfile"
@@ -544,6 +601,7 @@ nvidia__staged_rpm() {
 # Print the staged DKMS source RPM (the kmod-nvidia-open-dkms name preferred).
 nvidia__staged_dkms_rpm() {
   local dir="$1" rpmfile
+  nvidia__assert_stage_readable "$dir" kernel-module || return 1
   for rpmfile in "$dir"/kmod-nvidia-open-dkms-*.rpm "$dir"/nvidia-open-dkms-*.rpm; do
     [[ -e "$rpmfile" ]] || continue
     printf '%s\n' "$rpmfile"
@@ -560,6 +618,7 @@ nvidia__ensure_dkms_prereqs() {
   local -a install_rpms=()
   kernel="$(uname -r)"
 
+  nvidia__assert_stage_readable "$dir" kernel-module || return 1
   if ! command -v dkms >/dev/null 2>&1; then
     if rpmfile="$(nvidia__staged_rpm "$dir" 'dkms-*.rpm')"; then
       install_rpms+=("$rpmfile")
@@ -612,6 +671,7 @@ nvidia__register_dkms_source() {
   local extracted=0
   src_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-open-$NVIDIA_DRIVER_FLOOR"
 
+  nvidia__assert_stage_readable "$dir" kernel-module || return 1
   if [[ ! -f "$src_dir/dkms.conf" ]]; then
     extracted=1
     if ! rpmfile="$(nvidia__staged_dkms_rpm "$dir")"; then
@@ -681,9 +741,22 @@ nvidia__prove_dkms_build() {
 # the new one provably cannot initialize a T4.
 nvidia__staged_payload_has_gsp() {
   local sudo_cmd="$1" dir="$2" rpmfile firmware
+  local -a rpms=()
+  local had_nullglob=0
   firmware="$NVIDIA_FIRMWARE_ROOT/nvidia/$NVIDIA_DRIVER_FLOOR/gsp_tu10x.bin"
   [[ -f "$firmware" ]] && return 0
-  for rpmfile in "$dir"/*.rpm; do
+  # The host-firmware short-circuit above deliberately reads no stage; only now
+  # must a missing/unreadable stage fail closed.
+  nvidia__assert_stage_readable "$dir" kernel-module || return 1
+  shopt -q nullglob || had_nullglob=1
+  shopt -s nullglob
+  rpms=("$dir"/*.rpm)
+  (( had_nullglob == 1 )) && shopt -u nullglob
+  if (( ${#rpms[@]} == 0 )); then
+    nvidia__fail kernel-module "no staged RPMs in $dir for $(id -un) (empty or inaccessible); no driver action was taken"
+    return 1
+  fi
+  for rpmfile in "${rpms[@]}"; do
     [[ -e "$rpmfile" ]] || continue
     if "$sudo_cmd" rpm -qlp "$rpmfile" 2>/dev/null | grep -q "/lib/firmware/nvidia/$NVIDIA_DRIVER_FLOOR/gsp_tu10x.bin"; then
       return 0
@@ -698,7 +771,19 @@ nvidia__staged_payload_has_gsp() {
 # accept the floor and nothing else.
 nvidia__assert_staged_versions() {
   local sudo_cmd="$1" dir="$2" rpmfile version
-  for rpmfile in "$dir"/nvidia-*.rpm "$dir"/libnvidia-*.rpm; do
+  local -a rpms=()
+  local had_nullglob=0
+
+  nvidia__assert_stage_readable "$dir" closure || return 1
+  shopt -q nullglob || had_nullglob=1
+  shopt -s nullglob
+  rpms=("$dir"/nvidia-*.rpm "$dir"/libnvidia-*.rpm)
+  (( had_nullglob == 1 )) && shopt -u nullglob
+  if (( ${#rpms[@]} == 0 )); then
+    nvidia__fail closure "no staged nvidia-*/libnvidia-* RPMs in $dir for $(id -un) (empty or inaccessible); no driver action was taken"
+    return 1
+  fi
+  for rpmfile in "${rpms[@]}"; do
     [[ -e "$rpmfile" ]] || continue
     version="$("$sudo_cmd" rpm -qp --qf '%{VERSION}' "$rpmfile" 2>/dev/null || true)"
     nvidia__is_version "$version" || continue
@@ -710,28 +795,169 @@ nvidia__assert_staged_versions() {
 }
 
 # Temporarily clear below-floor optional-package locks so the 620 optional
-# package can be staged. The original file is restored from an EXIT trap.
+# package can be staged. The original file is restored from an EXIT trap with
+# the sudo_cmd that created the backup. A backup or filtered-write failure is a
+# hard [closure] error: continuing with a half-written versionlock file could
+# change the resolver for the rest of the run.
 nvidia__versionlock_restore() {
   [[ -n "${nvidia__versionlock_backup:-}" ]] || return 0
-  "${SUDO:-sudo}" cp -p "${nvidia__versionlock_backup}" "${nvidia__versionlock_path}" 2>/dev/null || true
-  "${SUDO:-sudo}" rm -f "${nvidia__versionlock_backup}" 2>/dev/null || true
+  local sudo_cmd="${nvidia__versionlock_sudo:-${SUDO:-sudo}}"
+  # Restore the earlier backup BEFORE clearing our own backup marker.
+  "$sudo_cmd" cp -p "${nvidia__versionlock_backup}" "${nvidia__versionlock_path}" 2>/dev/null || true
+  "$sudo_cmd" rm -f "${nvidia__versionlock_backup}" 2>/dev/null || true
   nvidia__versionlock_backup=""
+  nvidia__versionlock_path=""
+  nvidia__versionlock_sudo=""
 }
 
 nvidia__versionlock_clear() {
   local sudo_cmd="$1" file="${NVIDIA_VERSIONLOCK_FILE:-/etc/dnf/plugins/versionlock.list}"
-  local backup filtered
+  local backup filtered="" rc=0
   [[ -f "$file" ]] || return 0
-  backup="$("$sudo_cmd" mktemp "${file}.nvidia-upgrade.XXXXXX" 2>/dev/null)" || return 0
+
+  # Restore any earlier backup before taking a new one, so repeated stage
+  # attempts never stack backups.
+  nvidia__versionlock_restore
+
+  backup="$("$sudo_cmd" mktemp "${file}.nvidia-upgrade.XXXXXX" 2>/dev/null)" || {
+    nvidia__fail closure "could not create a versionlock backup for $file (nothing was uninstalled)"
+    return 1
+  }
   if ! "$sudo_cmd" cp -p "$file" "$backup" 2>/dev/null; then
     "$sudo_cmd" rm -f "$backup" 2>/dev/null || true
-    return 0
+    nvidia__fail closure "could not back up the versionlock file $file (nothing was uninstalled)"
+    return 1
   fi
   nvidia__versionlock_backup="$backup"
   nvidia__versionlock_path="$file"
-  filtered="$("$sudo_cmd" grep -Ev 'nvidia-(fabricmanager|persistenced)-' "$file" 2>/dev/null || true)"
-  printf '%s\n' "$filtered" | "$sudo_cmd" tee "$file" >/dev/null 2>&1 || true
+  nvidia__versionlock_sudo="$sudo_cmd"
+
+  filtered="$("$sudo_cmd" grep -Ev 'nvidia-(fabricmanager|persistenced)-' "$file" 2>/dev/null)" || rc=$?
+  if (( rc > 1 )); then
+    "$sudo_cmd" cp -p "$backup" "$file" 2>/dev/null || true
+    "$sudo_cmd" rm -f "$backup" 2>/dev/null || true
+    nvidia__versionlock_backup=""
+    nvidia__versionlock_path=""
+    nvidia__versionlock_sudo=""
+    nvidia__fail closure "could not filter the versionlock file $file; restored the backup (nothing was uninstalled)"
+    return 1
+  fi
+  if ! printf '%s\n' "$filtered" | "$sudo_cmd" tee "$file" >/dev/null 2>&1; then
+    "$sudo_cmd" cp -p "$backup" "$file" 2>/dev/null || true
+    "$sudo_cmd" rm -f "$backup" 2>/dev/null || true
+    nvidia__versionlock_backup=""
+    nvidia__versionlock_path=""
+    nvidia__versionlock_sudo=""
+    nvidia__fail closure "could not write the filtered versionlock file $file; restored the backup (nothing was uninstalled)"
+    return 1
+  fi
   trap 'nvidia__versionlock_restore' EXIT
+  return 0
+}
+
+# --- staging directory access ----------------------------------------------
+# One diagnostic helper, used by every fail-closed stage guard. It names the
+# failing component, its mode/owner when stat succeeds, the invoking user, and
+# states explicitly that no driver action was taken.
+nvidia__stage_access_error() {
+  local dir="$1" mode_owner
+  printf 'nvidia: staging path %s is not readable/traversable by %s (access denied/inaccessible)\n' \
+    "$dir" "$(id -un)" >&2
+  if mode_owner="$(stat -c '%a %U:%G' "$dir" 2>/dev/null)"; then
+    printf 'nvidia: %s mode/owner: %s\n' "$dir" "$mode_owner" >&2
+  fi
+  if command -v namei >/dev/null 2>&1; then
+    printf 'nvidia: path components for %s (namei -l):\n' "$dir" >&2
+    namei -l "$dir" 2>/dev/null >&2 || true
+  fi
+  printf 'nvidia: no driver action was taken; make the stage and every parent component readable and traversable\n' >&2
+}
+
+# nvidia__assert_stage_readable <dir> [state=closure]
+# Fail closed unless the directory and EVERY parent component are readable and
+# traversable by the INVOKING user (never tested with sudo), and at least one
+# staged RPM is visible. A non-expanded glob is never treated as success.
+nvidia__assert_stage_readable() {
+  local dir="$1" state="${2:-closure}"
+  local comp
+  local -a components=()
+  local -a rpms=()
+  local had_nullglob=0
+
+  if [[ ! -e "$dir" ]]; then
+    nvidia__fail "$state" "staging directory $dir does not exist for $(id -un); no driver action was taken"
+    nvidia__stage_access_error "$dir"
+    return 1
+  fi
+  if [[ ! -d "$dir" ]]; then
+    nvidia__fail "$state" "staging path $dir is not a directory for $(id -un); no driver action was taken"
+    nvidia__stage_access_error "$dir"
+    return 1
+  fi
+
+  # Walk the leaf and every ancestor. Absolute paths terminate at "/"; guard
+  # against a relative path or a bare "." so the loop cannot run forever.
+  comp="$dir"
+  while [[ -n "$comp" && "$comp" != "/" && "$comp" != "." ]]; do
+    components+=("$comp")
+    comp="$(dirname "$comp")"
+  done
+  [[ "$dir" == /* ]] && components+=(/)
+
+  local c
+  for c in "${components[@]}"; do
+    if [[ ! -r "$c" || ! -x "$c" ]]; then
+      nvidia__fail "$state" "staging path component $c is not readable/traversable by $(id -un); no driver action was taken"
+      nvidia__stage_access_error "$c"
+      return 1
+    fi
+  done
+
+  shopt -q nullglob || had_nullglob=1
+  shopt -s nullglob
+  rpms=("$dir"/*.rpm)
+  (( had_nullglob == 1 )) && shopt -u nullglob
+  if (( ${#rpms[@]} == 0 )); then
+    nvidia__fail "$state" "staging directory $dir is empty or inaccessible for $(id -un); no driver action was taken"
+    nvidia__stage_access_error "$dir"
+    return 1
+  fi
+  return 0
+}
+
+# Create a missing stage parent 0755, but NEVER chmod an existing mount root.
+# An existing parent must already be traversable by the invoking user.
+nvidia__stage_prepare_parent() {
+  local sudo_cmd="$1" parent="$2"
+
+  if [[ -d "$parent" ]]; then
+    if [[ ! -x "$parent" ]]; then
+      nvidia__fail closure "staging parent $parent is not traversable by $(id -un); refusing to chmod an existing mount root"
+      nvidia__stage_access_error "$parent"
+      return 1
+    fi
+    return 0
+  fi
+  if ! "$sudo_cmd" install -d -m 0755 "$parent"; then
+    nvidia__fail closure "could not create staging parent $parent with mode 0755"
+    return 1
+  fi
+  return 0
+}
+
+# nvidia__stage_make_readable <sudo_cmd> <dir>
+# Normalize the leaf and its parent so the deploying user can read and traverse
+# the staged closure. Staged RPMs are public package artifacts.
+nvidia__stage_make_readable() {
+  local sudo_cmd="$1" dir="$2"
+
+  if ! nvidia__stage_prepare_parent "$sudo_cmd" "$(dirname "$dir")"; then
+    return 1
+  fi
+  if ! "$sudo_cmd" chmod -R a+rX "$dir"; then
+    nvidia__fail closure "could not make staging directory readable: $dir"
+    return 1
+  fi
   return 0
 }
 
@@ -742,6 +968,7 @@ nvidia__versionlock_clear() {
 nvidia__stage_closure() {
   local sudo_cmd="$1" machine="${2:-$(uname -m)}"
   local expected_nevra tmp parent backup variant extra optional_output err_file
+  local dnf_err detail stage_base
   local -a extras=()
   NVIDIA_OPTIONAL_PACKAGES_RESOLVED=""
   NVIDIA_OPTIONAL_PACKAGES_OMITTED=""
@@ -772,48 +999,86 @@ nvidia__stage_closure() {
   fi
 
   parent="$(dirname "$NVIDIA_STAGE_DIR")"
-  if ! "$sudo_cmd" mkdir -p "$parent"; then
-    nvidia__fail closure "could not create staging parent $parent"
+  if ! nvidia__stage_prepare_parent "$sudo_cmd" "$parent"; then
     return 1
   fi
   if ! tmp="$("$sudo_cmd" mktemp -d "${NVIDIA_STAGE_DIR}.tmp.XXXXXX")"; then
     nvidia__fail closure "could not create a staging temp dir under $parent"
     return 1
   fi
+  # A root-owned mktemp -d is 0700; the deploying user must be able to read and
+  # traverse the stage before any validator runs.
+  if ! nvidia__stage_make_readable "$sudo_cmd" "$tmp"; then
+    "$sudo_cmd" rm -rf "$tmp"
+    return 1
+  fi
 
-  nvidia__versionlock_clear "$sudo_cmd"
+  nvidia__versionlock_clear "$sudo_cmd" || {
+    "$sudo_cmd" rm -rf "$tmp"
+    return 1
+  }
 
+  dnf_err="$(mktemp 2>/dev/null || true)"
   # Stage the REQUIRED nvidia-open NEVRA in its own transaction first. An
   # unavailable optional package can never abort this stage.
   if ! "$sudo_cmd" dnf install -y --downloadonly --disableexcludes=all \
-      --destdir "$tmp" "$expected_nevra"; then
+      --setopt=metadata_expire=0 --destdir "$tmp" "$expected_nevra" \
+      2>"${dnf_err:-/dev/stderr}"; then
+    detail=""
+    [[ -n "$dnf_err" && -s "$dnf_err" ]] && detail="$(cat "$dnf_err" 2>/dev/null || true)"
+    [[ -n "$dnf_err" ]] && rm -f "$dnf_err"
     "$sudo_cmd" rm -rf "$tmp"
-    nvidia__fail closure "could not stage the required 620 closure for $expected_nevra (resolved optional:${NVIDIA_OPTIONAL_PACKAGES_RESOLVED:- none}; omitted optional:${NVIDIA_OPTIONAL_PACKAGES_OMITTED:- none}; nothing was uninstalled)"
+    if [[ -n "$detail" ]]; then
+      printf 'nvidia: captured DNF stderr while staging the required closure:\n%s\n' "$detail" >&2
+    fi
+    if grep -qiE 'lock|metadata|repomd|synchroniz' <<<"$detail"; then
+      nvidia__fail closure "could not stage the required 620 closure for $expected_nevra: DNF reported a lock or stale metadata (see captured stderr). Recovery: 'sudo dnf clean metadata' or release /var/cache/dnf/*.lock, then re-run (nothing was uninstalled)"
+    else
+      nvidia__fail closure "could not stage the required 620 closure for $expected_nevra (resolved optional:${NVIDIA_OPTIONAL_PACKAGES_RESOLVED:- none}; omitted optional:${NVIDIA_OPTIONAL_PACKAGES_OMITTED:- none}; nothing was uninstalled)"
+    fi
+    return 1
+  fi
+  if ! nvidia__stage_make_readable "$sudo_cmd" "$tmp"; then
+    "$sudo_cmd" rm -rf "$tmp"
     return 1
   fi
   if ! nvidia__validate_closure "$tmp" "$machine"; then
+    [[ -n "$dnf_err" ]] && rm -f "$dnf_err"
     "$sudo_cmd" rm -rf "$tmp"
     return 1
   fi
   if ! nvidia__validate_signatures "$sudo_cmd" "$tmp"; then
+    [[ -n "$dnf_err" ]] && rm -f "$dnf_err"
     "$sudo_cmd" rm -rf "$tmp"
     return 1
   fi
   if ! nvidia__assert_staged_versions "$sudo_cmd" "$tmp"; then
+    [[ -n "$dnf_err" ]] && rm -f "$dnf_err"
     "$sudo_cmd" rm -rf "$tmp"
     return 1
   fi
 
   # Stage each optional package into the same directory in its own best-effort
-  # transaction. A failure warns and keeps the required closure.
+  # transaction. A DOWNLOAD failure warns and keeps the required closure; a
+  # chmod failure always aborts because an unreadable stage is unusable.
   for extra in ${extras[@]+"${extras[@]}"}; do
     if ! "$sudo_cmd" dnf install -y --downloadonly --disableexcludes=all \
-        --destdir "$tmp" "$extra"; then
-      printf 'nvidia: WARNING: could not stage optional package %s; keeping the required 620 closure\n' "$extra" >&2
+        --setopt=metadata_expire=0 --destdir "$tmp" "$extra"; then
+      printf 'nvidia: WARNING: could not stage optional package %s; omitting it and keeping the required 620 closure\n' "$extra" >&2
       NVIDIA_OPTIONAL_PACKAGES_RESOLVED="${NVIDIA_OPTIONAL_PACKAGES_RESOLVED// $extra/}"
       NVIDIA_OPTIONAL_PACKAGES_OMITTED+=" $extra"
+      # Remove any partial artifacts from the failed optional transaction
+      # before re-validation.
+      stage_base="${extra%%-[0-9]*}"
+      "$sudo_cmd" rm -f "$tmp/$stage_base"-*.rpm >/dev/null 2>&1 || true
+    fi
+    if ! nvidia__stage_make_readable "$sudo_cmd" "$tmp"; then
+      [[ -n "$dnf_err" ]] && rm -f "$dnf_err"
+      "$sudo_cmd" rm -rf "$tmp"
+      return 1
     fi
   done
+  [[ -n "$dnf_err" ]] && rm -f "$dnf_err"
 
   # Re-validate the combined closure after optional staging.
   if ! nvidia__validate_closure "$tmp" "$machine"; then
@@ -875,7 +1140,25 @@ nvidia__stage_closure() {
   fi
   "$sudo_cmd" rm -rf "$backup"
 
-  printf 'nvidia: staged 620 closure (%s) in %s\n' "$variant" "$NVIDIA_STAGE_DIR"
+  # The temp dir was normalized before the rename; re-assert both the leaf mode
+  # and the parent traversal after the swap so a mode change cannot slip in.
+  if ! nvidia__stage_make_readable "$sudo_cmd" "$NVIDIA_STAGE_DIR"; then
+    return 1
+  fi
+
+  local -a staged_rpms=()
+  local had_nullglob=0
+  shopt -q nullglob || had_nullglob=1
+  shopt -s nullglob
+  staged_rpms=("$NVIDIA_STAGE_DIR"/*.rpm)
+  (( had_nullglob == 1 )) && shopt -u nullglob
+  # Restore the versionlock file now that staging is complete; no
+  # .nvidia-upgrade.* backup may survive a successful stage.
+  nvidia__versionlock_restore
+  # The diagnostic must never change the exit status: `|| true` guards the
+  # printf, and the count comes from a nullglob array, never a pipeline.
+  printf 'nvidia: staged %d RPMs (%s) in %s\n' \
+    "${#staged_rpms[@]}" "$variant" "$NVIDIA_STAGE_DIR" || true
   return 0
 }
 
@@ -1048,24 +1331,36 @@ nvidia__restore() {
 }
 
 # --- resume marker ----------------------------------------------------------
-# Persist the pre-drain unit state in a parseable form. A marker that cannot be
-# written must abort the upgrade BEFORE the destructive phase.
+# Persist the pre-drain unit state in a parseable form. The marker is written to
+# a temp file and atomically renamed, so a crash never leaves a half-written
+# marker. A marker that cannot be written must abort the upgrade BEFORE the
+# destructive phase.
 nvidia__write_marker() {
   local sudo_cmd="$1" reason="$2"
   local fabricmanager_was_active="${3:-0}"
   local fabricmanager_pkg_staged="${4:-0}"
   local persistenced_was_active="${5:-0}"
-  local dir
+  local dir tmp
   dir="$(dirname "$NVIDIA_RESUME_MARKER")"
 
   if ! "$sudo_cmd" mkdir -p "$dir"; then
     nvidia__fail resume "could not create the resume-marker directory $dir; refusing to start the destructive phase"
     return 1
   fi
+  if ! tmp="$("$sudo_cmd" mktemp "${NVIDIA_RESUME_MARKER}.tmp.XXXXXX" 2>/dev/null)"; then
+    nvidia__fail resume "could not create a resume-marker temp file in $dir; refusing to start the destructive phase"
+    return 1
+  fi
   if ! printf 'driver upgrade in progress: %s\nfabricmanager_was_active=%s\nfabricmanager_pkg_staged=%s\npersistenced_was_active=%s\n' \
       "$reason" "$fabricmanager_was_active" "$fabricmanager_pkg_staged" "$persistenced_was_active" \
-      | "$sudo_cmd" tee "$NVIDIA_RESUME_MARKER" >/dev/null; then
+      | "$sudo_cmd" tee "$tmp" >/dev/null; then
+    "$sudo_cmd" rm -f "$tmp" 2>/dev/null || true
     nvidia__fail resume "could not write the resume marker $NVIDIA_RESUME_MARKER; refusing to start the destructive phase"
+    return 1
+  fi
+  if ! "$sudo_cmd" mv -f "$tmp" "$NVIDIA_RESUME_MARKER"; then
+    "$sudo_cmd" rm -f "$tmp" 2>/dev/null || true
+    nvidia__fail resume "could not atomically install the resume marker $NVIDIA_RESUME_MARKER; refusing to start the destructive phase"
     return 1
   fi
   return 0
@@ -1102,9 +1397,18 @@ nvidia__resume_hint() {
 # --- the entrypoint ---------------------------------------------------------
 nvidia_ensure_driver_floor() {
   local sudo_cmd="${SUDO:-sudo}"
-  local installed="" variant marker_active=0 resume_at_floor=0
+  local installed="" variant marker_active=0 marker_valid=0 resume_at_floor=0
   local fabricmanager_was_active=0 fabricmanager_pkg_staged=0 persistenced_was_active=0
-  local saved_fm_active="" saved_fm_staged="" saved_persist=""
+  local saved_fm_active="" saved_fm_staged="" saved_persist="" on_disk=""
+
+  # Stage-only inspection mode: repository + stage + every validator, then exit
+  # 0 before the resume marker, drain, uninstall, or install.
+  if [[ "${NVIDIA_STAGE_ONLY:-0}" == "1" ]]; then
+    nvidia__ensure_repo "$sudo_cmd" || return 1
+    nvidia__stage_closure "$sudo_cmd" || return 1
+    printf 'nvidia: stage-only mode: closure staged and validated; no driver action taken\n'
+    return 0
+  fi
 
   if [[ -e "$NVIDIA_RESUME_MARKER" ]]; then
     marker_active=1
@@ -1112,6 +1416,18 @@ nvidia_ensure_driver_floor() {
     saved_fm_active="$(nvidia__read_marker_bool "$NVIDIA_RESUME_MARKER" fabricmanager_was_active || true)"
     saved_fm_staged="$(nvidia__read_marker_bool "$NVIDIA_RESUME_MARKER" fabricmanager_pkg_staged || true)"
     saved_persist="$(nvidia__read_marker_bool "$NVIDIA_RESUME_MARKER" persistenced_was_active || true)"
+    if [[ -n "$saved_fm_active" && -n "$saved_fm_staged" && -n "$saved_persist" ]]; then
+      marker_valid=1
+    else
+      # A truncated/missing-field marker must never recapture post-drain state
+      # as inactive. Restore persistenced conservatively; fabricmanager stays
+      # optional and is not guessed active.
+      printf 'nvidia: WARNING: resume marker %s is truncated or missing fields; restoring persistenced conservatively\n' \
+        "$NVIDIA_RESUME_MARKER" >&2
+      saved_fm_active=0
+      saved_fm_staged=0
+      saved_persist=1
+    fi
   else
     installed="$(nvidia__detect_installed_version || true)"
     if [[ -n "$installed" ]] && nvidia_driver_ge "$installed" "$NVIDIA_DRIVER_FLOOR"; then
@@ -1143,12 +1459,28 @@ nvidia_ensure_driver_floor() {
       "${installed:-unknown}" "$NVIDIA_DRIVER_FLOOR"
   fi
 
+  # Resume with 620 on disk but below-floor /proc: try to reload the installed
+  # payload (depmod + modprobe) and re-verify BEFORE staging or reinstalling. A
+  # successful reload must never trigger a second offline install.
+  if [[ "$marker_active" == "1" ]] && ! nvidia__proc_at_floor; then
+    on_disk="$(nvidia__on_disk_version || true)"
+    if [[ -n "$on_disk" ]] && nvidia_driver_ge "$on_disk" "$NVIDIA_DRIVER_FLOOR"; then
+      printf 'nvidia: resume: driver %s is on disk but not loaded; reloading before any re-stage\n' "$on_disk"
+      if "$sudo_cmd" depmod -a && "$sudo_cmd" modprobe nvidia \
+          && { nvidia__proc_at_floor || nvidia__smi_at_floor; }; then
+        printf 'nvidia: resume: reloaded driver %s without re-staging\n' "$on_disk"
+      else
+        printf 'nvidia: resume: on-disk %s did not load; falling back to stage/install\n' "$on_disk" >&2
+      fi
+    fi
+  fi
+
   # Resume short-circuit: the loaded driver is already at the floor, so the
   # stage/uninstall/install steps are unnecessary. Only restore + verify remain.
   if [[ "$marker_active" == "1" ]] && nvidia__proc_at_floor; then
     resume_at_floor=1
     printf 'nvidia: loaded driver is already at the %s floor; skipping stage/install and resuming at verification\n' "$NVIDIA_DRIVER_FLOOR"
-    if [[ -n "$saved_persist" ]]; then
+    if [[ "$marker_valid" == "1" ]]; then
       fabricmanager_was_active="${saved_fm_active:-0}"
       fabricmanager_pkg_staged="${saved_fm_staged:-0}"
       persistenced_was_active="$saved_persist"
@@ -1156,9 +1488,7 @@ nvidia_ensure_driver_floor() {
       if nvidia__unit_active "$sudo_cmd" nvidia-fabricmanager.service; then
         fabricmanager_was_active=1
       fi
-      if nvidia__unit_active "$sudo_cmd" nvidia-persistenced.service; then
-        persistenced_was_active=1
-      fi
+      persistenced_was_active="${saved_persist:-1}"
     fi
   fi
 

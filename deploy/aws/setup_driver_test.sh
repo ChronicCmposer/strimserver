@@ -61,7 +61,7 @@ end_case() {
   command rm -rf "$case_tmp"
   unset NVIDIA_STAGE_DIR NVIDIA_FIRMWARE_ROOT NVIDIA_RESUME_MARKER \
     NVIDIA_PROC_VERSION_FILE NVIDIA_DEVICE_NODE NVIDIA_DKMS_SRC_ROOT SUDO \
-    NVIDIA_DRAIN_TIMEOUT \
+    NVIDIA_DRAIN_TIMEOUT NVIDIA_VERSIONLOCK_FILE NVIDIA_STAGE_ONLY \
     FAKE_REPORTED_DRIVER FAKE_PROC_VERSION FAKE_PROC_VERSION_STUCK FAKE_RPM_INSTALLED \
     FAKE_RUN_MANAGED FAKE_UNINSTALL_RC FAKE_RMMOD_BUSY FAKE_DNF_RC \
     FAKE_DNF_DOWNLOADONLY_RC FAKE_DNF_CLOSURE_INCOMPLETE FAKE_DNF_KEY_MISSING \
@@ -81,7 +81,10 @@ end_case() {
     FAKE_DKMS_RPM FAKE_DKMS_PAYLOAD FAKE_DKMS_CONF_MISSING FAKE_DKMS_TOOL_MISSING \
     FAKE_DKMS_BUILD_RC FAKE_STAGE_INCLUDE_DKMS FAKE_STAGE_INCLUDE_BUILD_PREREQS \
     FAKE_KERNEL_HEADERS_MISSING FAKE_KERNEL_DEVEL_MISSING \
-    FAKE_PAYLOAD_MISSING_MODULE FAKE_MODINFO_MISSING
+    FAKE_PAYLOAD_MISSING_MODULE FAKE_MODINFO_MISSING \
+    FAKE_DNF_EMPTY FAKE_OPTIONAL_DOWNLOAD_RC FAKE_DNF_DOWNLOADONLY_CHMOD \
+    FAKE_CHMOD_RC FAKE_RPM_UNREADABLE \
+    FAKE_VERSIONLOCK_CP_RC FAKE_VERSIONLOCK_TEE_RC FAKE_DNF_STAGE_STDERR
 }
 
 # First recorded line matching the ERE, or empty.
@@ -120,6 +123,67 @@ unit_started() {
   grep -Eq "systemctl start .*${1%%.service}(\\.service)?\$" "$FAKE_GPU_CALLS"
 }
 unit_not_started() { ! unit_started "$1"; }
+
+# --- stage-directory access helpers (Phase 2 staging-permissions contract) ---
+fn_exists() { declare -F "$1" >/dev/null 2>&1; }
+# Mode (no leading zero-pad surprises) of the final stage leaf.
+stage_dir_mode() { stat -c '%a' "$NVIDIA_STAGE_DIR" 2>/dev/null; }
+# Mode of the stage leaf's parent (the component a root-owned mktemp under
+# umask 077 can leave root-only).
+stage_parent_mode() { stat -c '%a' "$(dirname "$NVIDIA_STAGE_DIR")" 2>/dev/null; }
+# True when the invoking user can read AND traverse the directory.
+stage_dir_accessible() {
+  local dir="${1:-$NVIDIA_STAGE_DIR}"
+  [[ -d "$dir" && -r "$dir" && -x "$dir" ]]
+}
+# True when a required nvidia-open RPM is visible through the glob.
+stage_has_visible_rpm() {
+  local dir="${1:-$NVIDIA_STAGE_DIR}"
+  compgen -G "$dir/nvidia-open-*.rpm" >/dev/null
+}
+# Print every ${NVIDIA_STAGE_DIR}.tmp.* leftover, one per line (empty when none).
+stage_temp_dirs() {
+  local -a dirs=()
+  local had_nullglob=0
+  shopt -q nullglob || had_nullglob=1
+  shopt -s nullglob
+  dirs=("${NVIDIA_STAGE_DIR}.tmp."*)
+  (( had_nullglob == 1 )) && shopt -u nullglob
+  (( ${#dirs[@]} > 0 )) && printf '%s\n' "${dirs[@]}"
+  return 0
+}
+# Count staged RPMs with a nullglob array (never a pipeline under pipefail).
+stage_rpm_count() {
+  local -a files=()
+  local had_nullglob=0
+  shopt -q nullglob || had_nullglob=1
+  shopt -s nullglob
+  files=("$NVIDIA_STAGE_DIR"/*.rpm)
+  (( had_nullglob == 1 )) && shopt -u nullglob
+  printf '%s\n' "${#files[@]}"
+}
+# Run a probe as an unprivileged user: directly when non-root, else via setpriv
+# or runuser. Returns 77 (and says so) when root has neither tool.
+as_unprivileged() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    if command -v setpriv >/dev/null 2>&1; then
+      setpriv --reuid=nobody --regid=nogroup --clear-groups "$@"
+    elif command -v runuser >/dev/null 2>&1; then
+      runuser -u nobody -- "$@"
+    else
+      printf 'SKIP (root, no setpriv)\n' >&2
+      return 77
+    fi
+  else
+    "$@"
+  fi
+}
+# A chmod 000/0000 directory is not useful coverage under root when no facility
+# exists to drop privileges; skip only in that case.
+unreadable_probe_supported() {
+  [[ "$(id -u)" -ne 0 ]] || command -v setpriv >/dev/null 2>&1 \
+    || command -v runuser >/dev/null 2>&1
+}
 
 # --- 1. upgrade path (RPM installed, below floor) ----------------------------
 case_upgrade() {
@@ -1342,6 +1406,709 @@ case_dkms_post_install_module_missing() {
   end_case
 }
 
+# ===========================================================================
+# Phase 2 (staging-dir permissions) -- RED: stage access contract
+# ===========================================================================
+case_stage_dir_mode() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  fake_gpu_install
+  local rc parent out
+  # Mirror deploy.sh's umask 077 so a mkdir -p parent is root-only too.
+  out="$(umask 077; nvidia_ensure_driver_floor 2>&1)"; rc=$?
+  parent="$(dirname "$NVIDIA_STAGE_DIR")"
+
+  check "stage dir mode: upgrade exits 0" test "$rc" -eq 0
+  check "stage dir mode: leaf is 755" test "$(stage_dir_mode)" = "755"
+  check "stage dir mode: parent is traversable" bash -c '[[ -x "$1" ]]' _ "$parent"
+  check "stage dir mode: leaf is accessible to the invoking user" stage_dir_accessible
+  if [[ "$(id -u)" -ne 0 ]]; then
+    check "stage dir mode: required RPM is visible (non-root variant)" stage_has_visible_rpm
+  else
+    printf 'skip: stage visibility is non-discriminating under the same-uid fake when root\n'
+  fi
+  end_case
+}
+
+case_stage_make_readable_helper() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  local dir="$case_tmp/leaf" rc=0
+  command mkdir -p "$dir"
+  command chmod 700 "$dir"
+  fake_gpu_install
+  nvidia__stage_make_readable "$SUDO" "$dir" >/dev/null 2>&1 || rc=$?
+
+  check "make-readable: helper exists" fn_exists nvidia__stage_make_readable
+  check "make-readable: exits 0" test "$rc" -eq 0
+  check "make-readable: leaf becomes 755" test "$(stat -c '%a' "$dir")" = "755"
+  check "make-readable: forwards the sudo command" has_call '^sudo chmod -R a\+rX'
+  end_case
+}
+
+case_optional_stage_keeps_dir_readable() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_UNIT_OWNER_PERSISTENCED=""
+  export FAKE_REPOQUERY_PERSISTENCED=620.70.06-1.el9 FAKE_FABRICMANAGER_UNIT=0
+  # Model a downloadonly transaction that leaves the leaf root-only again.
+  export FAKE_DNF_DOWNLOADONLY_CHMOD=700
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "optional readability: exits 0" test "$rc" -eq 0
+  check "optional readability: optional token staged" \
+    stage_has_package 'nvidia-persistenced-620.70.06-1.el9'
+  check "optional readability: leaf is 755 after the optional transaction" \
+    test "$(stage_dir_mode)" = "755"
+  check "optional readability: stage is accessible" stage_dir_accessible
+  end_case
+}
+
+case_atomic_swap_preserves_mode() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  command mkdir -p "$NVIDIA_STAGE_DIR"
+  : >"$NVIDIA_STAGE_DIR/sentinel"
+  command chmod 700 "$NVIDIA_STAGE_DIR"
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "atomic swap: exits 0" test "$rc" -eq 0
+  check "atomic swap: new leaf is 755" test "$(stage_dir_mode)" = "755"
+  check "atomic swap: sentinel is gone" bash -c '[[ ! -e "$1/sentinel" ]]' _ "$NVIDIA_STAGE_DIR"
+  check "atomic swap: .bak is removed" bash -c '[[ ! -e "$1.bak" ]]' _ "$NVIDIA_STAGE_DIR"
+  check "atomic swap: no .tmp.* remains" bash -c '[[ -z "$1" ]]' _ "$(stage_temp_dirs)"
+  end_case
+}
+
+case_dnf_success_no_rpms() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_DNF_EMPTY=1
+  fake_gpu_install
+  local err rc
+  err="$case_tmp/err"
+  nvidia_ensure_driver_floor >/dev/null 2>"$err"; rc=$?
+
+  check "dnf empty: fails" test "$rc" -ne 0
+  check "dnf empty: names [closure]" bash -c 'grep -q "\[closure\]" "$1"' _ "$err"
+  check "dnf empty: names the stage path" bash -c 'grep -Fq "$1" "$2"' _ "$NVIDIA_STAGE_DIR" "$err"
+  check "dnf empty: names the invoking user" bash -c 'grep -Fq "$(id -un)" "$1"' _ "$err"
+  check "dnf empty: says empty or inaccessible" bash -c 'grep -Eqi "empty|inaccessible" "$1"' _ "$err"
+  check "dnf empty: no rpm -K" no_call '^rpm -K'
+  check "dnf empty: no nvidia-uninstall" no_call 'nvidia-uninstall'
+  check "dnf empty: no offline install" no_call '^dnf install .*--allowerasing'
+  check "dnf empty: no resume marker" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+case_chmod_failure_removes_temp() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_CHMOD_RC=1
+  fake_gpu_install
+  local err rc
+  err="$case_tmp/err"
+  nvidia_ensure_driver_floor >/dev/null 2>"$err"; rc=$?
+
+  check "chmod failure: fails" test "$rc" -ne 0
+  check "chmod failure: names [closure]" bash -c 'grep -q "\[closure\]" "$1"' _ "$err"
+  check "chmod failure: temp dir removed" bash -c '[[ -z "$1" ]]' _ "$(stage_temp_dirs)"
+  check "chmod failure: no offline install" no_call '^dnf install .*--allowerasing'
+  check "chmod failure: no resume marker" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+case_optional_download_failure_warns() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_UNIT_OWNER_PERSISTENCED=""
+  export FAKE_REPOQUERY_PERSISTENCED=620.70.06-1.el9 FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_OPTIONAL_DOWNLOAD_RC=1
+  fake_gpu_install
+  local err rc
+  err="$case_tmp/err"
+  nvidia_ensure_driver_floor >/dev/null 2>"$err"; rc=$?
+
+  check "optional download failure: exits 0" test "$rc" -eq 0
+  check "optional download failure: warns and names persistenced" \
+    bash -c 'grep -Eqi "warn|omit|skip" "$1" && grep -qi persistenced "$1"' _ "$err"
+  check "optional download failure: required closure present" \
+    stage_has_package 'nvidia-open-3:620.70.06-1.el9'
+  check "optional download failure: stage remains readable" test "$(stage_dir_mode)" = "755"
+  check "optional download failure: no chmod abort" \
+    bash -c '! grep -qi "could not make staging directory readable" "$1"' _ "$err"
+  end_case
+}
+
+case_cross_uid_access() {
+  begin_case
+  if ! unreadable_probe_supported; then
+    printf 'skip: cross-uid access needs setpriv/runuser under root\n'
+    end_case
+    return 0
+  fi
+  fake_gpu_install
+  local dir="$case_tmp/x" out rc
+  command mkdir -p "$dir"
+  command chmod 000 "$dir"
+  out="$(nvidia__assert_stage_readable "$dir" 2>&1)"; rc=$?
+  check "cross-uid: assert helper exists" fn_exists nvidia__assert_stage_readable
+  check "cross-uid: refuses an untraversable directory" test "$rc" -ne 0
+  check "cross-uid: names readability/permissions" \
+    bash -c 'grep -Eqi "not readable|not travers|permission|inaccessible|access denied" <<<"$1"' _ "$out"
+  check "cross-uid: names the invoking user" bash -c 'grep -Fq "$(id -un)" <<<"$1"' _ "$out"
+  rc=0
+  as_unprivileged bash -c '[[ -r "$1" && -x "$1" ]]' _ "$dir" || rc=$?
+  check "cross-uid: probe as an unprivileged user is denied" test "$rc" -ne 0
+  command chmod 700 "$dir"
+  end_case
+}
+
+# ===========================================================================
+# Phase 3 (staging-dir permissions) -- RED: fail-closed stage consumers
+# ===========================================================================
+case_validate_closure_unreadable() {
+  begin_case
+  if ! unreadable_probe_supported; then
+    printf 'skip: unreadable-dir coverage needs setpriv/runuser under root\n'
+    end_case
+    return 0
+  fi
+  fake_gpu_install
+  local dir="$case_tmp/closure" out rc
+  command mkdir -p "$dir"
+  : >"$dir/nvidia-open-3:620.70.06-1.el9.x86_64.rpm"
+  command chmod 000 "$dir"
+  out="$(nvidia__validate_closure "$dir" 2>&1)"; rc=$?
+  check "closure unreadable: fails" test "$rc" -ne 0
+  check "closure unreadable: names readability/permissions" \
+    bash -c 'grep -Eqi "not readable|not travers|permission|inaccessible|access denied" <<<"$1"' _ "$out"
+  check "closure unreadable: names the path" bash -c 'grep -Fq "$1" <<<"$2"' _ "$dir" "$out"
+  check "closure unreadable: names the invoking user" \
+    bash -c 'grep -Fq "$(id -un)" <<<"$1"' _ "$out"
+  command chmod 700 "$dir"
+  end_case
+}
+
+case_validate_closure_empty() {
+  begin_case
+  fake_gpu_install
+  local dir="$case_tmp/closure" out rc
+  command mkdir -p "$dir"
+  out="$(nvidia__validate_closure "$dir" 2>&1)"; rc=$?
+  check "closure empty: fails" test "$rc" -ne 0
+  check "closure empty: names [closure]" bash -c 'grep -q "\[closure\]" <<<"$1"' _ "$out"
+  check "closure empty: names the path" bash -c 'grep -Fq "$1" <<<"$2"' _ "$dir" "$out"
+  check "closure empty: names the invoking user" \
+    bash -c 'grep -Fq "$(id -un)" <<<"$1"' _ "$out"
+  check "closure empty: says empty or inaccessible" \
+    bash -c 'grep -Eqi "empty|inaccessible" <<<"$1"' _ "$out"
+  check "closure empty: no rpm -K" no_call '^rpm -K'
+  end_case
+}
+
+case_validate_signatures_empty() {
+  begin_case
+  fake_gpu_install
+  local dir="$case_tmp/sig" out rc
+  command mkdir -p "$dir"
+  out="$(nvidia__validate_signatures "$SUDO" "$dir" 2>&1)"; rc=$?
+  check "signatures empty: fails closed" test "$rc" -ne 0
+  check "signatures empty: names [closure]" bash -c 'grep -q "\[closure\]" <<<"$1"' _ "$out"
+  check "signatures empty: no rpm -K" no_call '^rpm -K'
+  end_case
+}
+
+case_assert_staged_versions_empty() {
+  begin_case
+  fake_gpu_install
+  local dir="$case_tmp/ver" out rc
+  command mkdir -p "$dir"
+  out="$(nvidia__assert_staged_versions "$SUDO" "$dir" 2>&1)"; rc=$?
+  check "staged versions empty: fails closed" test "$rc" -ne 0
+  check "staged versions empty: no rpm -qp" no_call '^rpm -qp'
+  end_case
+}
+
+case_payload_has_running_module_empty() {
+  begin_case
+  fake_gpu_install
+  local dir="$case_tmp/mod" out rc
+  command mkdir -p "$dir"
+  out="$(nvidia__staged_payload_has_running_module "$SUDO" "$dir" 2>&1)"; rc=$?
+  check "running module empty: fails closed" test "$rc" -ne 0
+  check "running module empty: names [kernel-module]" \
+    bash -c 'grep -q "\[kernel-module\]" <<<"$1"' _ "$out"
+  end_case
+}
+
+case_payload_has_gsp_unreadable() {
+  begin_case
+  if ! unreadable_probe_supported; then
+    printf 'skip: unreadable-dir coverage needs setpriv/runuser under root\n'
+    end_case
+    return 0
+  fi
+  command rm -f "$NVIDIA_FIRMWARE_ROOT/nvidia/620.70.06/gsp_tu10x.bin"
+  fake_gpu_install
+  local dir="$case_tmp/gsp" out rc
+  command mkdir -p "$dir"
+  : >"$dir/nvidia-open-3:620.70.06-1.el9.x86_64.rpm"
+  command chmod 000 "$dir"
+  out="$(nvidia__staged_payload_has_gsp "$SUDO" "$dir" 2>&1)"; rc=$?
+  check "gsp unreadable: fails closed" test "$rc" -ne 0
+  check "gsp unreadable: names [kernel-module] and access" \
+    bash -c 'grep -q "\[kernel-module\]" <<<"$1" && grep -Eqi "not readable|not travers|permission|inaccessible|access denied" <<<"$1"' _ "$out"
+  check "gsp unreadable: no rpm -qlp" no_call '^rpm -qlp'
+  command chmod 700 "$dir"
+  end_case
+}
+
+case_payload_has_gsp_host_firmware_short_circuit() {
+  begin_case
+  fake_gpu_install
+  local dir="$case_tmp/gsp" out rc
+  command mkdir -p "$dir"
+  : >"$dir/nvidia-open-3:620.70.06-1.el9.x86_64.rpm"
+  command chmod 000 "$dir"
+  # begin_case seeded the host firmware; success must not read the stage.
+  out="$(nvidia__staged_payload_has_gsp "$SUDO" "$dir" 2>&1)"; rc=$?
+  check "gsp short-circuit: succeeds from host firmware" test "$rc" -eq 0
+  check "gsp short-circuit: never queries the stage" no_call '^rpm -qlp'
+  command chmod 700 "$dir"
+  end_case
+}
+
+case_dkms_prereqs_unreadable() {
+  begin_case
+  if ! unreadable_probe_supported; then
+    printf 'skip: unreadable-dir coverage needs setpriv/runuser under root\n'
+    end_case
+    return 0
+  fi
+  export FAKE_DKMS_TOOL_MISSING=1 FAKE_KERNEL_DEVEL_MISSING=1 FAKE_KERNEL_HEADERS_MISSING=1
+  fake_gpu_install
+  local dir="$case_tmp/dkms" out rc
+  command mkdir -p "$dir"
+  : >"$dir/nvidia-open-3:620.70.06-1.el9.x86_64.rpm"
+  command chmod 000 "$dir"
+  out="$(nvidia__ensure_dkms_prereqs "$SUDO" "$dir" 2>&1)"; rc=$?
+  check "dkms prereqs unreadable: fails closed" test "$rc" -ne 0
+  check "dkms prereqs unreadable: names [kernel-module] and access" \
+    bash -c 'grep -q "\[kernel-module\]" <<<"$1" && grep -Eqi "not readable|not travers|permission|inaccessible|access denied" <<<"$1"' _ "$out"
+  check "dkms prereqs unreadable: no package install" no_call '^dnf install'
+  command chmod 700 "$dir"
+  end_case
+}
+
+case_register_dkms_source_unreadable() {
+  begin_case
+  if ! unreadable_probe_supported; then
+    printf 'skip: unreadable-dir coverage needs setpriv/runuser under root\n'
+    end_case
+    return 0
+  fi
+  fake_gpu_install
+  local dir="$case_tmp/dkmssrc" out rc
+  command mkdir -p "$dir"
+  : >"$dir/nvidia-open-3:620.70.06-1.el9.x86_64.rpm"
+  command rm -f "$NVIDIA_DKMS_SRC_ROOT/nvidia-open-620.70.06/dkms.conf"
+  command chmod 000 "$dir"
+  out="$(nvidia__register_dkms_source "$SUDO" "$dir" 2>&1)"; rc=$?
+  check "register dkms source unreadable: fails closed" test "$rc" -ne 0
+  check "register dkms source unreadable: names readability/access" \
+    bash -c 'grep -Eqi "not readable|not travers|permission|inaccessible|access denied" <<<"$1"' _ "$out"
+  check "register dkms source unreadable: no rpm2cpio/cpio" \
+    bash -c '! grep -Eq "^(rpm2cpio|cpio) " "$1"' _ "$FAKE_GPU_CALLS"
+  command chmod 700 "$dir"
+  end_case
+}
+
+case_stage_consumer_matrix() {
+  begin_case
+  fake_gpu_install
+  local state dir out rc fn tag spec
+  for state in missing empty mode0400 unreadable; do
+    dir="$case_tmp/state-$state/stage"
+    command rm -rf "$case_tmp/state-$state"
+    command mkdir -p "$case_tmp/state-$state"
+    case "$state" in
+      missing) ;;
+      empty) command mkdir -p "$dir" ;;
+      mode0400|unreadable)
+        if ! unreadable_probe_supported; then
+          printf 'skip: matrix %s needs setpriv/runuser under root\n' "$state"
+          continue
+        fi
+        command mkdir -p "$dir"
+        : >"$dir/nvidia-open-3:620.70.06-1.el9.x86_64.rpm"
+        if [[ "$state" == "mode0400" ]]; then command chmod 0400 "$dir"; else command chmod 000 "$dir"; fi
+        ;;
+    esac
+    for spec in \
+      'nvidia__validate_closure:closure' \
+      'nvidia__validate_signatures:closure' \
+      'nvidia__assert_staged_versions:closure' \
+      'nvidia__staged_payload_has_running_module:kernel-module'; do
+      fn="${spec%%:*}"
+      tag="${spec##*:}"
+      case "$fn" in
+        nvidia__validate_closure) out="$("$fn" "$dir" 2>&1)"; rc=$? ;;
+        *) out="$("$fn" "$SUDO" "$dir" 2>&1)"; rc=$? ;;
+      esac
+      check "matrix($state): $fn fails closed" test "$rc" -ne 0
+      check "matrix($state): $fn names [$tag]" \
+        bash -c 'grep -Fq "$1" <<<"$2"' _ "[$tag]" "$out"
+    done
+    out="$(nvidia__assert_stage_readable "$dir" 2>&1)"; rc=$?
+    check "matrix($state): assert-stage-readable refuses" test "$rc" -ne 0
+    check "matrix($state): assert-stage-readable names access" \
+      bash -c 'grep -Eqi "not readable|not travers|permission|inaccessible|access denied" <<<"$1"' _ "$out"
+    command chmod 755 "$dir" 2>/dev/null || true
+  done
+
+  # Shared staging helpers must not report "no match" as usable on an
+  # unreadable stage; live callers must be behind the guard above.
+  dir="$case_tmp/generic"
+  command mkdir -p "$dir"
+  : >"$dir/nvidia-open-3:620.70.06-1.el9.x86_64.rpm"
+  command chmod 000 "$dir"
+  rc=0; nvidia__staged_dkms_has_conf "$SUDO" "$dir" >/dev/null 2>&1 || rc=$?
+  check "matrix(unreadable): staged_dkms_has_conf does not succeed" test "$rc" -ne 0
+  rc=0; nvidia__staged_rpm "$dir" '*.rpm' >/dev/null 2>&1 || rc=$?
+  check "matrix(unreadable): staged_rpm does not succeed" test "$rc" -ne 0
+  rc=0; nvidia__staged_dkms_rpm "$dir" >/dev/null 2>&1 || rc=$?
+  check "matrix(unreadable): staged_dkms_rpm does not succeed" test "$rc" -ne 0
+  rc=0; nvidia__staged_has_glob "$dir" '*.rpm' || rc=$?
+  check "matrix(unreadable): staged_has_glob does not succeed" test "$rc" -ne 0
+  command chmod 755 "$dir" 2>/dev/null || true
+  end_case
+}
+
+case_failed_validation_no_destructive_actions() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_DNF_EMPTY=1
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "no destructive on empty stage: fails" test "$rc" -ne 0
+  check "no destructive on empty stage: no nvidia-uninstall" no_call 'nvidia-uninstall'
+  check "no destructive on empty stage: no offline install" no_call '^dnf install .*--allowerasing'
+  check "no destructive on empty stage: no resume marker" \
+    bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+case_parent_ancestor_unreadable() {
+  begin_case
+  if ! unreadable_probe_supported; then
+    printf 'skip: unreadable-parent coverage needs setpriv/runuser under root\n'
+    end_case
+    return 0
+  fi
+  fake_gpu_install
+  local parent="$case_tmp/root-only" dir="$case_tmp/root-only/stage" out rc
+  command mkdir -p "$dir"
+  command chmod 755 "$dir"
+  command chmod 0000 "$parent"
+  out="$(nvidia__assert_stage_readable "$dir" 2>&1)"; rc=$?
+  check "parent unreadable: fails closed" test "$rc" -ne 0
+  check "parent unreadable: names the non-traversable component" \
+    bash -c 'grep -Fq "$1" <<<"$2"' _ "$parent" "$out"
+  check "parent unreadable: names readability/access" \
+    bash -c 'grep -Eqi "not readable|not travers|permission|inaccessible|access denied" <<<"$1"' _ "$out"
+  command chmod 755 "$parent"
+  end_case
+}
+
+# ===========================================================================
+# Phase 6 -- exact staging contract, errexit safety, resume, versionlock, DNF
+# ===========================================================================
+# The required NEVRA token must be requested exactly once (no duplicate token
+# and no accidental second transaction for the required package).
+case_stage_required_token_once() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  fake_gpu_install
+  nvidia_ensure_driver_floor >/dev/null 2>&1; local rc=$?
+  local line token='nvidia-open-3:620.70.06-1.el9'
+  line="$(grep -E '^dnf install .*--downloadonly' "$FAKE_GPU_CALLS")"
+
+  check "stage contract: exits 0" test "$rc" -eq 0
+  check "stage contract: requires --downloadonly" bash -c 'grep -q -- "--downloadonly" <<<"$1"' _ "$line"
+  check "stage contract: requires --destdir" bash -c 'grep -q -- "--destdir" <<<"$1"' _ "$line"
+  check "stage contract: required NEVRA token appears exactly once" \
+    bash -c '[[ "$(grep -oF "$1" <<<"$2" | wc -l | tr -d " ")" == "1" ]]' _ "$token" "$line"
+  check "stage contract: never uses dnf download" no_call '^dnf download'
+  end_case
+}
+
+# A failed stage must remove its tmp dir and, when no previous stage existed,
+# leave no final stage directory behind.
+case_failed_stage_no_previous() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_DNF_EMPTY=1
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "failed stage (no previous): fails" test "$rc" -ne 0
+  check "failed stage (no previous): prints [closure]" bash -c 'grep -q "\[closure\]" "$1"' _ "$err"
+  check "failed stage (no previous): removes temp dirs" \
+    bash -c '[[ -z "$(compgen -G "$1.tmp.*")" ]]' _ "$NVIDIA_STAGE_DIR"
+  check "failed stage (no previous): leaves no stage dir" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_STAGE_DIR"
+  check "failed stage (no previous): no uninstall" no_call 'nvidia-uninstall'
+  check "failed stage (no previous): no offline install" no_call '^dnf install .*--allowerasing'
+  end_case
+}
+
+# A failed stage must preserve a pre-existing stage directory and its contents.
+case_failed_stage_preserves_previous() {
+  begin_case
+  command mkdir -p "$NVIDIA_STAGE_DIR"
+  : >"$NVIDIA_STAGE_DIR/previous-rpm.txt"
+  local evidence="$NVIDIA_STAGE_DIR/previous-rpm.txt"
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_DNF_EMPTY=1
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "failed stage (previous): fails" test "$rc" -ne 0
+  check "failed stage (previous): prints [closure]" bash -c 'grep -q "\[closure\]" "$1"' _ "$err"
+  check "failed stage (previous): preserves the pre-existing stage" test -f "$evidence"
+  check "failed stage (previous): removes temp dirs" \
+    bash -c '[[ -z "$(compgen -G "$1.tmp.*")" ]]' _ "$NVIDIA_STAGE_DIR"
+  check "failed stage (previous): leaves no .bak" test ! -e "${NVIDIA_STAGE_DIR}.bak"
+  end_case
+}
+
+# The stage-failure path must be safe under `set -euo pipefail`: cleanup must not
+# abort before the intended [closure] diagnostic is printed.
+case_stage_failure_under_errexit() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_DNF_EMPTY=1
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  bash -euo pipefail -c '
+    source "$1"
+    nvidia__stage_closure "$SUDO"
+  ' _ "$script_dir/lib/nvidia.sh" >"$out" 2>"$err"; rc=$?
+
+  check "errexit: stage failure returns nonzero" test "$rc" -ne 0
+  check "errexit: intended [closure] diagnostic is emitted" \
+    bash -c 'grep -q "\[closure\]" "$1"' _ "$err"
+  check "errexit: diagnostic is not masked by cleanup" \
+    bash -c 'grep -Eqi "staged closure|empty or inaccessible|no staged" "$1"' _ "$err"
+  check "errexit: no temp dirs left" \
+    bash -c '[[ -z "$(compgen -G "$1.tmp.*")" ]]' _ "$NVIDIA_STAGE_DIR"
+  end_case
+}
+
+# The resume marker is written to a temp file and atomically renamed; it records
+# every field the resume path reads.
+case_resume_marker_atomic_write() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  # Fail after the marker is written so it survives for inspection.
+  export FAKE_DNF_RC=1
+  nvidia_ensure_driver_floor >/dev/null 2>&1; local rc=$?
+
+  check "marker atomic: post-drain failure keeps the marker" test "$rc" -ne 0
+  check "marker atomic: written to a temp file first" \
+    has_call 'mktemp .*driver-upgrade\.state\.tmp\.'
+  check "marker atomic: installed with an atomic rename" \
+    has_call '^sudo mv -f .*driver-upgrade\.state\.tmp\..* .*driver-upgrade\.state$'
+  check "marker atomic: all fields recorded" \
+    bash -c 'grep -q "^fabricmanager_was_active=" "$1" && grep -q "^fabricmanager_pkg_staged=" "$1" && grep -q "^persistenced_was_active=" "$1"' \
+    _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+# A truncated/missing-field marker must not recapture post-drain state as
+# inactive: it restores persistenced conservatively and warns.
+case_resume_truncated_marker_restores_persistenced() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=0
+  printf 'driver upgrade in progress: partial\nfabricmanager_was_active=0\n' >"$NVIDIA_RESUME_MARKER"
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "truncated marker: upgrade completes" test "$rc" -eq 0
+  check "truncated marker: warns about missing fields" \
+    bash -c 'grep -Eqi "truncated|missing fields" "$1"' _ "$err"
+  check "truncated marker: conservatively starts persistenced" \
+    unit_started nvidia-persistenced.service
+  check "truncated marker: marker removed after success" \
+    bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+# Marker present, 620 on disk but below-floor /proc: reload and re-verify
+# instead of a second stage/install.
+case_resume_on_disk_620_reloads() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=620.70.06 FAKE_RPM_INSTALLED=1 FAKE_PROC_VERSION=595.112.07
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=0
+  printf 'driver upgrade in progress: test\nfabricmanager_was_active=0\nfabricmanager_pkg_staged=0\npersistenced_was_active=0\n' >"$NVIDIA_RESUME_MARKER"
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "resume on-disk 620: exits 0" test "$rc" -eq 0
+  check "resume on-disk 620: runs depmod -a" has_call 'depmod -a'
+  check "resume on-disk 620: loads the module" has_call 'modprobe nvidia$'
+  check "resume on-disk 620: re-verifies the loaded version" procs_620
+  check "resume on-disk 620: no re-stage" no_call '^dnf install .*--downloadonly'
+  check "resume on-disk 620: no second offline install" no_call '^dnf install .*--allowerasing'
+  check "resume on-disk 620: no uninstall" no_call 'nvidia-uninstall'
+  check "resume on-disk 620: marker removed" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+# Versionlock backup failure is a hard [closure] error and leaves nothing behind.
+case_versionlock_backup_failure_aborts() {
+  begin_case
+  fake_gpu_install
+  local vl="$case_tmp/versionlock.list" out="$case_tmp/out" err="$case_tmp/err" rc
+  printf 'nvidia-fabricmanager-595.112.07-1.el9.x86_64\nkeep-this-package\n' >"$vl"
+  export NVIDIA_VERSIONLOCK_FILE="$vl" FAKE_VERSIONLOCK_CP_RC=1
+  nvidia__versionlock_clear "$SUDO" >"$out" 2>"$err"; rc=$?
+
+  check "versionlock backup failure: aborts" test "$rc" -ne 0
+  check "versionlock backup failure: prints [closure]" bash -c 'grep -q "\[closure\]" "$1"' _ "$err"
+  check "versionlock backup failure: names the backup" \
+    bash -c 'grep -Eqi "back up|backup" "$1"' _ "$err"
+  check "versionlock backup failure: no .nvidia-upgrade.* survives" \
+    bash -c '[[ -z "$(compgen -G "$1.nvidia-upgrade.*")" ]]' _ "$vl"
+  end_case
+}
+
+# A failed filtered write restores the backup and aborts with [closure].
+case_versionlock_write_failure_aborts() {
+  begin_case
+  fake_gpu_install
+  local vl="$case_tmp/versionlock.list" out="$case_tmp/out" err="$case_tmp/err" rc
+  printf 'nvidia-fabricmanager-595.112.07-1.el9.x86_64\nkeep-this-package\n' >"$vl"
+  export NVIDIA_VERSIONLOCK_FILE="$vl" FAKE_VERSIONLOCK_TEE_RC=1
+  nvidia__versionlock_clear "$SUDO" >"$out" 2>"$err"; rc=$?
+
+  check "versionlock write failure: aborts" test "$rc" -ne 0
+  check "versionlock write failure: prints [closure]" bash -c 'grep -q "\[closure\]" "$1"' _ "$err"
+  check "versionlock write failure: names the filtered write" \
+    bash -c 'grep -Eqi "filter|write" "$1"' _ "$err"
+  check "versionlock write failure: original file restored" \
+    bash -c 'grep -q "nvidia-fabricmanager-595" "$1"' _ "$vl"
+  check "versionlock write failure: no .nvidia-upgrade.* survives" \
+    bash -c '[[ -z "$(compgen -G "$1.nvidia-upgrade.*")" ]]' _ "$vl"
+  end_case
+}
+
+# Restore uses the passed sudo_cmd, restores an earlier backup before taking a
+# new one, and leaves no backup after the final restore.
+case_versionlock_restore_semantics() {
+  begin_case
+  fake_gpu_install
+  local vl="$case_tmp/versionlock.list" first_count second_count rc1 rc2 rc3
+  printf 'nvidia-fabricmanager-595.112.07-1.el9.x86_64\nkeep-this-package\n' >"$vl"
+  export NVIDIA_VERSIONLOCK_FILE="$vl"
+
+  nvidia__versionlock_clear "$SUDO" >/dev/null 2>&1; rc1=$?
+  first_count="$(compgen -G "$vl.nvidia-upgrade.*" | wc -l | tr -d ' ')"
+  nvidia__versionlock_clear "$SUDO" >/dev/null 2>&1; rc2=$?
+  second_count="$(compgen -G "$vl.nvidia-upgrade.*" | wc -l | tr -d ' ')"
+  nvidia__versionlock_restore; rc3=$?
+
+  check "versionlock restore: first clear succeeds" test "$rc1" -eq 0
+  check "versionlock restore: first clear leaves one backup" test "$first_count" -eq 1
+  check "versionlock restore: second clear succeeds" test "$rc2" -eq 0
+  check "versionlock restore: earlier backup replaced, not stacked" test "$second_count" -eq 1
+  check "versionlock restore: restore succeeds" test "$rc3" -eq 0
+  check "versionlock restore: no backup survives restore" \
+    bash -c '[[ -z "$(compgen -G "$1.nvidia-upgrade.*")" ]]' _ "$vl"
+  check "versionlock restore: uses the passed sudo_cmd" \
+    has_call '^sudo cp -p .*\.nvidia-upgrade\.'
+  check "versionlock restore: original lock line restored" \
+    bash -c 'grep -q "nvidia-fabricmanager-595" "$1"' _ "$vl"
+  end_case
+}
+
+# A successful upgrade restores the versionlock file and leaves no backup.
+case_versionlock_no_backup_left_on_success() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=1
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=620.70.06-1.el9
+  export FAKE_PERSISTENCED_UNIT=0
+  local vl="$case_tmp/versionlock.list"
+  printf 'nvidia-fabricmanager-595.112.07-1.el9.x86_64\nkeep-this-package\n' >"$vl"
+  export NVIDIA_VERSIONLOCK_FILE="$vl"
+  fake_gpu_install
+  nvidia_ensure_driver_floor >/dev/null 2>&1; local rc=$?
+
+  check "versionlock success: upgrade exits 0" test "$rc" -eq 0
+  check "versionlock success: no .nvidia-upgrade.* survives" \
+    bash -c '[[ -z "$(compgen -G "$1.nvidia-upgrade.*")" ]]' _ "$vl"
+  check "versionlock success: original lock file restored" \
+    bash -c 'grep -q "nvidia-fabricmanager-595" "$1"' _ "$vl"
+  end_case
+}
+
+# A DNF lock/stale-metadata failure must surface the captured stderr plus
+# actionable recovery guidance.
+case_dnf_lock_metadata_diagnostic() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_DNF_DOWNLOADONLY_RC=1
+  export FAKE_DNF_STAGE_STDERR='Error: failed to synchronize cache for repo: /var/cache/dnf/x86_64.lock is held by another process'
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "dnf lock/metadata: fails" test "$rc" -ne 0
+  check "dnf lock/metadata: prints [closure]" bash -c 'grep -q "\[closure\]" "$1"' _ "$err"
+  check "dnf lock/metadata: includes captured DNF stderr" \
+    bash -c 'grep -q "failed to synchronize cache" "$1"' _ "$err"
+  check "dnf lock/metadata: gives lock/metadata guidance" \
+    bash -c 'grep -Eqi "lock|metadata" "$1" && grep -Eq "dnf clean metadata|/var/cache/dnf" "$1"' _ "$err"
+  check "dnf lock/metadata: forces a fresh metadata check" \
+    bash -c 'grep -E "^dnf install .*--downloadonly" "$1" | grep -q -- "--setopt=metadata_expire=0"' _ "$FAKE_GPU_CALLS"
+  check "dnf lock/metadata: no uninstall" no_call 'nvidia-uninstall'
+  check "dnf lock/metadata: no offline install" no_call '^dnf install .*--allowerasing'
+  check "dnf lock/metadata: no marker" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+# Stage-only inspection must stop after staging + validation: no resume marker,
+# no drain, no uninstall, and no offline install.
+case_stage_only_no_driver_action() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 NVIDIA_STAGE_ONLY=1
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "stage-only: exits 0" test "$rc" -eq 0
+  check "stage-only: announces stage-only mode" bash -c 'grep -q "stage-only" "$1"' _ "$out"
+  check "stage-only: stages the required closure" \
+    stage_has_package 'nvidia-open-3:620.70.06-1.el9'
+  check "stage-only: leaf is 755" test "$(stage_dir_mode)" = "755"
+  check "stage-only: stage is accessible" stage_dir_accessible
+  check "stage-only: no resume marker" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  check "stage-only: no systemctl stop" no_call 'systemctl stop'
+  check "stage-only: no nvidia-uninstall" no_call 'nvidia-uninstall'
+  check "stage-only: no offline install" no_call '^dnf install .*--allowerasing'
+  end_case
+}
+
 case_upgrade
 case_noop
 case_newer
@@ -1413,6 +2180,43 @@ case_kmod_host_no_dkms
 case_gsp_missing
 case_stale_dkms_removed_before_modinfo_gate
 case_dkms_post_install_module_missing
+
+# Phase 2 (staging-dir permissions) -- stage access contract
+case_stage_dir_mode
+case_stage_make_readable_helper
+case_optional_stage_keeps_dir_readable
+case_atomic_swap_preserves_mode
+case_dnf_success_no_rpms
+case_chmod_failure_removes_temp
+case_optional_download_failure_warns
+case_cross_uid_access
+
+# Phase 3 (staging-dir permissions) -- fail-closed stage consumers
+case_validate_closure_unreadable
+case_validate_closure_empty
+case_validate_signatures_empty
+case_assert_staged_versions_empty
+case_payload_has_running_module_empty
+case_payload_has_gsp_unreadable
+case_payload_has_gsp_host_firmware_short_circuit
+case_dkms_prereqs_unreadable
+case_register_dkms_source_unreadable
+case_stage_consumer_matrix
+case_failed_validation_no_destructive_actions
+case_parent_ancestor_unreadable
+case_stage_required_token_once
+case_failed_stage_no_previous
+case_failed_stage_preserves_previous
+case_stage_failure_under_errexit
+case_resume_marker_atomic_write
+case_resume_truncated_marker_restores_persistenced
+case_resume_on_disk_620_reloads
+case_versionlock_backup_failure_aborts
+case_versionlock_write_failure_aborts
+case_versionlock_restore_semantics
+case_versionlock_no_backup_left_on_success
+case_dnf_lock_metadata_diagnostic
+case_stage_only_no_driver_action
 
 if [[ "$failures" -ne 0 ]]; then
   printf '\n%d failure(s)\n' "$failures" >&2
