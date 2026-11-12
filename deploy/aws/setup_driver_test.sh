@@ -29,6 +29,19 @@ check() {
 case_tmp=""
 case_path=""
 begin_case() {
+  # A knob that survived the previous case would make it pass or fail for the
+  # wrong reason; the internal shim paths are the only allowed carry-overs.
+  local leaked="" v
+  for v in $(compgen -v FAKE_ 2>/dev/null); do
+    case "$v" in
+      FAKE_REAL_*|FAKE_GPU_*|FAKE_DNF_ARGV|FAKE_PROC_FILE) continue ;;
+    esac
+    leaked+=" $v"
+  done
+  if [[ -n "$leaked" ]]; then
+    printf 'FAIL: leaked FAKE_* knobs from a previous case:%s\n' "$leaked" >&2
+    failures=$((failures + 1))
+  fi
   case_tmp="$(mktemp -d)"
   case_path="$PATH"
   command mkdir -p "$case_tmp/fw/nvidia/620.70.06"
@@ -38,6 +51,7 @@ begin_case() {
   export NVIDIA_RESUME_MARKER="$case_tmp/driver-upgrade.state"
   export NVIDIA_PROC_VERSION_FILE="$case_tmp/proc-version"
   export NVIDIA_DEVICE_NODE="$case_tmp/nvidia0"
+  export NVIDIA_DKMS_SRC_ROOT="$case_tmp/usr-src"
   export SUDO=fake-sudo
 }
 
@@ -46,16 +60,28 @@ end_case() {
   PATH="$case_path"
   command rm -rf "$case_tmp"
   unset NVIDIA_STAGE_DIR NVIDIA_FIRMWARE_ROOT NVIDIA_RESUME_MARKER \
-    NVIDIA_PROC_VERSION_FILE NVIDIA_DEVICE_NODE SUDO NVIDIA_DRAIN_TIMEOUT \
+    NVIDIA_PROC_VERSION_FILE NVIDIA_DEVICE_NODE NVIDIA_DKMS_SRC_ROOT SUDO \
+    NVIDIA_DRAIN_TIMEOUT \
     FAKE_REPORTED_DRIVER FAKE_PROC_VERSION FAKE_PROC_VERSION_STUCK FAKE_RPM_INSTALLED \
     FAKE_RUN_MANAGED FAKE_UNINSTALL_RC FAKE_RMMOD_BUSY FAKE_DNF_RC \
     FAKE_DNF_DOWNLOADONLY_RC FAKE_DNF_CLOSURE_INCOMPLETE FAKE_DNF_KEY_MISSING \
-    FAKE_DNF_UPGRADES_DRIVER FAKE_PKG_AVAILABLE FAKE_SMI_RC FAKE_SMI_MISSING \
+    FAKE_DNF_UPGRADES_DRIVER FAKE_DNF_DKMS_INSTALL_REGISTERS \
+    FAKE_PKG_AVAILABLE FAKE_SMI_RC FAKE_SMI_MISSING \
     FAKE_MODPROBE_RC FAKE_MODULE_LOADED FAKE_MODULES FAKE_STRIMSERVER_ACTIVE \
-    FAKE_FABRICMANAGER_UNIT FAKE_DCGM_UNIT FAKE_DCGM_EXPORTER_UNIT FAKE_DCGM_ACTIVE \
+    FAKE_FABRICMANAGER_UNIT FAKE_FABRICMANAGER_ACTIVE FAKE_FABRICMANAGER_FRAGMENT \
+    FAKE_FABRICMANAGER_WAS_ACTIVE FAKE_FABRICMANAGER_START_RC \
+    FAKE_PERSISTENCED_UNIT FAKE_PERSISTENCED_ACTIVE FAKE_PERSISTENCED_FRAGMENT \
+    FAKE_PERSISTENCED_WAS_ACTIVE FAKE_PERSISTENCED_START_RC \
+    FAKE_UNIT_OWNER_FABRICMANAGER FAKE_UNIT_OWNER_PERSISTENCED \
+    FAKE_REPOQUERY_FABRICMANAGER FAKE_REPOQUERY_PERSISTENCED FAKE_REPOQUERY_RC \
+    FAKE_DCGM_UNIT FAKE_DCGM_EXPORTER_UNIT FAKE_DCGM_ACTIVE \
     FAKE_DCGM_EXPORTER_ACTIVE FAKE_DCGM_STUCK FAKE_DCGM_EXPORTER_STUCK \
     FAKE_ARCH FAKE_KERNEL_RELEASE FAKE_NEVRA FAKE_HOLDER FAKE_KERNEL_MODULE_VARIANT \
-    FAKE_DKMS_STATUS FAKE_DKMS_RC FAKE_PAYLOAD_MISSING_MODULE
+    FAKE_DKMS_STATUS FAKE_DKMS_RC FAKE_DKMS_STATUS_RC FAKE_DKMS_REMOVE_RC \
+    FAKE_DKMS_RPM FAKE_DKMS_PAYLOAD FAKE_DKMS_CONF_MISSING FAKE_DKMS_TOOL_MISSING \
+    FAKE_DKMS_BUILD_RC FAKE_STAGE_INCLUDE_DKMS FAKE_STAGE_INCLUDE_BUILD_PREREQS \
+    FAKE_KERNEL_HEADERS_MISSING FAKE_KERNEL_DEVEL_MISSING \
+    FAKE_PAYLOAD_MISSING_MODULE FAKE_MODINFO_MISSING
 }
 
 # First recorded line matching the ERE, or empty.
@@ -71,10 +97,35 @@ no_call() { ! grep -Eq "$1" "$FAKE_GPU_CALLS"; }
 marker_present() { [[ -e "$NVIDIA_RESUME_MARKER" ]]; }
 procs_620() { grep -q '620\.70\.06' "$NVIDIA_PROC_VERSION_FILE"; }
 
+# Helper set shared with the Phase 3-5 cases (owned by the next wave).
+count_calls() { grep -Ec "$1" "$FAKE_GPU_CALLS" 2>/dev/null || true; }
+after() {
+  local first second
+  first="$(call_index "$1")"
+  second="$(call_index "$2")"
+  [[ -n "$first" && -n "$second" && "$first" -gt "$second" ]]
+}
+# Stage helpers inspect the recorded `dnf install ... --downloadonly` call, not
+# the cumulative argv file (which mixes every dnf invocation).
+stage_has_package() {
+  grep -E '^dnf install .*--downloadonly' "$FAKE_GPU_CALLS" | grep -Fq -- "$1"
+}
+stage_omits_package() { ! stage_has_package "$1"; }
+# The first recorded `dnf install ... --downloadonly` call line.
+stage_line() { grep -E '^dnf install .*--downloadonly' "$FAKE_GPU_CALLS" | head -n1; }
+state_flag() { [[ "$(cat "$FAKE_GPU_STATE/$1" 2>/dev/null)" == "1" ]]; }
+stdout_has() { grep -Eq "$2" <<<"$1"; }
+stderr_has() { grep -Eq "$2" <<<"$1"; }
+unit_started() {
+  grep -Eq "systemctl start .*${1%%.service}(\\.service)?\$" "$FAKE_GPU_CALLS"
+}
+unit_not_started() { ! unit_started "$1"; }
+
 # --- 1. upgrade path (RPM installed, below floor) ----------------------------
 case_upgrade() {
   begin_case
   export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
   fake_gpu_install
   nvidia_ensure_driver_floor >/dev/null 2>&1; local rc=$?
 
@@ -215,6 +266,7 @@ case_run_managed_upgrade() {
   begin_case
   export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=0 FAKE_RUN_MANAGED=1
   export FAKE_NEVRA="nvidia-open-3:620.70.06-1.el9.x86_64"
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
   fake_gpu_install
   nvidia_ensure_driver_floor >/dev/null 2>&1; local rc=$?
 
@@ -250,6 +302,7 @@ case_dcgm_holder() {
   export FAKE_NEVRA="nvidia-open-3:620.70.06-1.el9.x86_64"
   export FAKE_DCGM_UNIT=1 FAKE_DCGM_EXPORTER_UNIT=1
   export FAKE_DCGM_ACTIVE=1 FAKE_DCGM_EXPORTER_ACTIVE=1
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
   fake_gpu_install
   nvidia_ensure_driver_floor >/dev/null 2>&1; local rc=$?
 
@@ -536,6 +589,759 @@ case_resume_marker() {
   end_case
 }
 
+# ===========================================================================
+# Phase 3 (closure fix) -- availability-gate optional unit packages
+# ===========================================================================
+case_fabricmanager_absent_does_not_block() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=0
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=""
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "fm absent: exits 0 despite the missing optional unit" test "$rc" -eq 0
+  check "fm absent: stages the required 620 NEVRA" \
+    stage_has_package 'nvidia-open-3:620.70.06-1.el9'
+  check "fm absent: omits nvidia-fabricmanager-620" stage_omits_package 'nvidia-fabricmanager-620'
+  check "fm absent: warns about fabricmanager on stderr" \
+    bash -c 'grep -Eqi "warn|omit|skip" "$1" && grep -qi fabricmanager "$1"' _ "$err"
+  check "fm absent: stage precedes the offline install" \
+    before '^dnf install .*--downloadonly' '^dnf install .*--allowerasing'
+  check "fm absent: no resume marker left behind" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+case_fabricmanager_available_is_included() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=0
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=620.70.06-1.el9
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "fm available: exits 0" test "$rc" -eq 0
+  check "fm available: stages the exact resolved token" \
+    stage_has_package 'nvidia-fabricmanager-620.70.06-1.el9'
+  check "fm available: prints no omission warning" \
+    bash -c '! grep -Eqi "omit|skip" "$1"' _ "$err"
+  end_case
+}
+
+case_persistenced_non_rpm_available() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  export FAKE_UNIT_OWNER_PERSISTENCED=""
+  export FAKE_REPOQUERY_PERSISTENCED=620.70.06-1.el9
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "persistenced non-rpm available: exits 0" test "$rc" -eq 0
+  check "persistenced non-rpm available: is staged" \
+    stage_has_package 'nvidia-persistenced-620.70.06-1.el9'
+  check "persistenced non-rpm available: is repoqueried" \
+    has_call 'repoquery .*nvidia-persistenced-620\.70\.06'
+  end_case
+}
+
+case_persistenced_non_rpm_absent() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  export FAKE_UNIT_OWNER_PERSISTENCED=""
+  export FAKE_REPOQUERY_PERSISTENCED=""
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "persistenced non-rpm absent: exits 0" test "$rc" -eq 0
+  check "persistenced non-rpm absent: warns about the omission" \
+    bash -c 'grep -Eqi "warn|omit|skip" "$1" && grep -qi persistenced "$1"' _ "$err"
+  check "persistenced non-rpm absent: does not fabricate the package" \
+    stage_omits_package 'nvidia-persistenced-620.70.06'
+  end_case
+}
+
+case_optional_repoquery_transient_failure() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=0
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=620.70.06-1.el9
+  export FAKE_REPOQUERY_RC=1
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "repoquery failure: required stage still succeeds" test "$rc" -eq 0
+  check "repoquery failure: required NEVRA is staged" \
+    stage_has_package 'nvidia-open-3:620.70.06-1.el9'
+  check "repoquery failure: optional package is omitted" stage_omits_package 'nvidia-fabricmanager-620'
+  check "repoquery failure: warns about the omitted optional" \
+    bash -c 'grep -Eqi "warn|omit|skip" "$1"' _ "$err"
+  end_case
+}
+
+case_required_stage_failure() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_PKG_AVAILABLE=0
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "required stage failure: fails" test "$rc" -ne 0
+  check "required stage failure: names [closure]" bash -c 'grep -q "\[closure\]" "$1"' _ "$err"
+  check "required stage failure: no uninstall attempted" no_call 'nvidia-uninstall'
+  check "required stage failure: no offline install attempted" no_call '^dnf install .*--allowerasing'
+  check "required stage failure: no marker left behind" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+case_no_optional_units() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "no optional units: exits 0" test "$rc" -eq 0
+  check "no optional units: never queries rpm -qf" no_call '^rpm -qf'
+  check "no optional units: never repoquery" no_call 'repoquery'
+  check "no optional units: no optional package in the stage" \
+    bash -c '! grep -E "^dnf install .*--downloadonly" "$1" | grep -Eq "fabricmanager|persistenced"' _ "$FAKE_GPU_CALLS"
+  end_case
+}
+
+case_fabricmanager_unit_absent() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  # Set the other knobs anyway: an absent unit must short-circuit before them.
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=620.70.06-1.el9
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "fm unit absent: exits 0" test "$rc" -eq 0
+  check "fm unit absent: never shows the fragment" no_call 'systemctl show .*fabricmanager'
+  check "fm unit absent: never queries rpm -qf" no_call '^rpm -qf'
+  check "fm unit absent: never repoquery" no_call 'repoquery'
+  check "fm unit absent: no fabricmanager package staged" stage_omits_package 'nvidia-fabricmanager'
+  end_case
+}
+
+case_failed_host_reproduction() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
+  export FAKE_RPM_INSTALLED=0 FAKE_RUN_MANAGED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=0
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=""
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $kernel, x86_64: installed
+nvidia-open/620.70.06, $kernel, x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "failed host: exits 0" test "$rc" -eq 0
+  check "failed host: stages the required 620 NEVRA" \
+    stage_has_package 'nvidia-open-3:620.70.06-1.el9'
+  check "failed host: omits nvidia-fabricmanager-620" stage_omits_package 'nvidia-fabricmanager-620'
+  check "failed host: warns about the omitted fabricmanager" \
+    bash -c 'grep -Eqi "warn|omit|skip" "$1" && grep -qi fabricmanager "$1"' _ "$err"
+  check "failed host: stage precedes nvidia-uninstall" \
+    before '^dnf install .*--downloadonly' 'nvidia-uninstall'
+  check "failed host: stage precedes the offline install" \
+    before '^dnf install .*--downloadonly' '^dnf install .*--allowerasing'
+  end_case
+}
+
+case_repoquery_multiple_or_below_floor() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=0
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  # Two rows (one below the floor): ambiguous, so the package must be omitted.
+  export FAKE_REPOQUERY_FABRICMANAGER="595.112.07-1.el9
+620.70.06-1.el9"
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "repoquery ambiguous: required stage still succeeds" test "$rc" -eq 0
+  check "repoquery ambiguous: optional package is omitted" stage_omits_package 'nvidia-fabricmanager-620'
+  check "repoquery ambiguous: warns about the omission" \
+    bash -c 'grep -Eqi "warn|omit|skip" "$1"' _ "$err"
+  end_case
+}
+
+case_stage_no_empty_extra_arg() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local rc stage
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+  stage="$(stage_line)"
+
+  check "no empty extra arg: exits 0" test "$rc" -eq 0
+  check "no empty extra arg: stage line has no empty token" \
+    bash -c '[[ -n "$1" && "$1" != *"  "* && "$1" != *" " ]]' _ "$stage"
+  check "no empty extra arg: the required NEVRA appears exactly once" \
+    bash -c '[[ "$(grep -o "nvidia-open-3:620.70.06-1.el9" <<<"$1" | wc -l)" -eq 1 ]]' _ "$stage"
+  check "no empty extra arg: no optional package in the stage" \
+    bash -c '! grep -Eq "fabricmanager|persistenced" <<<"$1"' _ "$stage"
+  end_case
+}
+
+case_stdout_stderr_separation() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=0
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=""
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local sout="$case_tmp/stdout" serr="$case_tmp/stderr"
+  nvidia__optional_unit_packages fake-sudo >"$sout" 2>"$serr"
+
+  check "separate streams: stdout carries no warnings" \
+    bash -c '! grep -Eqi "warn|omit|skip|nvidia:" "$1"' _ "$sout"
+  check "separate streams: stdout is empty when no package is available" \
+    bash -c '[[ ! -s "$1" ]]' _ "$sout"
+  check "separate streams: stderr carries the omission warning" \
+    bash -c 'grep -Eqi "warn|omit|skip" "$1"' _ "$serr"
+  end_case
+}
+
+case_repoquery_flag_shape() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=0
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=620.70.06-1.el9
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  nvidia__optional_unit_packages fake-sudo >/dev/null 2>&1
+
+  local expected='dnf -q --disableexcludes=all repoquery --available --qf %{name} %{version}-%{release} %{arch}\n nvidia-fabricmanager-620.70.06'
+  check "repoquery flag shape: uses the exact availability query" \
+    grep -Fq -- "$expected" "$FAKE_GPU_CALLS"
+  end_case
+}
+
+# ===========================================================================
+# Phase 4 (closure fix) -- restore only active units, preserve resume state
+# ===========================================================================
+case_fabricmanager_inactive_not_restarted() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=0
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=620.70.06-1.el9
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "fm inactive: exits 0" test "$rc" -eq 0
+  check "fm inactive: never restarts fabricmanager" unit_not_started nvidia-fabricmanager.service
+  end_case
+}
+
+case_fabricmanager_active_restored() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=1
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=620.70.06-1.el9
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "fm active: exits 0" test "$rc" -eq 0
+  check "fm active: restarts fabricmanager exactly once" \
+    bash -c '[[ "$(grep -Ec "^systemctl start nvidia-fabricmanager\.service" "$1")" -eq 1 ]]' _ "$FAKE_GPU_CALLS"
+  end_case
+}
+
+case_fabricmanager_start_failure_nonfatal() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=1
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=620.70.06-1.el9
+  export FAKE_FABRICMANAGER_START_RC=1
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "fm start rc!=0: upgrade still succeeds" test "$rc" -eq 0
+  check "fm start rc!=0: warns loudly about fabricmanager" \
+    bash -c 'grep -Eqi "warn" "$1" && grep -qi fabricmanager "$1"' _ "$err"
+  check "fm start rc!=0: prints the success line" \
+    bash -c 'grep -qi "at or above the .* floor" "$1"' _ "$out"
+  end_case
+}
+
+case_fabricmanager_active_but_pkg_not_staged() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=1
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=""
+  export FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "fm active but not staged: exits 0" test "$rc" -eq 0
+  check "fm active but not staged: leaves fabricmanager stopped" \
+    unit_not_started nvidia-fabricmanager.service
+  check "fm active but not staged: warns about the omitted unit" \
+    bash -c 'grep -Eqi "warn|omit|skip" "$1" && grep -qi fabricmanager "$1"' _ "$err"
+  check "fm active but not staged: records the 595 package version" \
+    bash -c 'grep -q "595" "$1"' _ "$err"
+  end_case
+}
+
+case_persistenced_active_restored() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "persistenced active: exits 0" test "$rc" -eq 0
+  check "persistenced active: restarts exactly once" \
+    bash -c '[[ "$(grep -Ec "^systemctl start nvidia-persistenced\.service" "$1")" -eq 1 ]]' _ "$FAKE_GPU_CALLS"
+  end_case
+}
+
+case_persistenced_inactive_not_restarted() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=0
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "persistenced inactive: exits 0" test "$rc" -eq 0
+  check "persistenced inactive: never restarts it" unit_not_started nvidia-persistenced.service
+  end_case
+}
+
+case_persistenced_start_failure_fatal() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  export FAKE_PERSISTENCED_START_RC=1
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "persistenced start rc!=0: upgrade fails" test "$rc" -ne 0
+  check "persistenced start rc!=0: prints [verify]" bash -c 'grep -q "\[verify\]" "$1"' _ "$err"
+  check "persistenced start rc!=0: never prints a success line" \
+    bash -c '! grep -qi "at or above the .* floor" "$1"' _ "$out"
+  end_case
+}
+
+case_resume_preserves_active_state() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=1 FAKE_FABRICMANAGER_ACTIVE=1
+  export FAKE_FABRICMANAGER_FRAGMENT=/usr/lib/systemd/system/nvidia-fabricmanager.service
+  export FAKE_UNIT_OWNER_FABRICMANAGER=nvidia-fabricmanager-595.112.07-1.el9.x86_64
+  export FAKE_REPOQUERY_FABRICMANAGER=620.70.06-1.el9
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=0
+  fake_gpu_install
+  local rc1 rc2
+
+  export FAKE_DNF_RC=1
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc1=$?
+  check "resume: first run fails after the drain" test "$rc1" -ne 0
+  check "resume: marker records the fabricmanager state" \
+    bash -c 'grep -qi fabricmanager "$1"' _ "$NVIDIA_RESUME_MARKER"
+  check "resume: marker records the persistenced state" \
+    bash -c 'grep -qi persistenced "$1"' _ "$NVIDIA_RESUME_MARKER"
+
+  export FAKE_DNF_RC=0
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc2=$?
+  check "resume: second run succeeds" test "$rc2" -eq 0
+  check "resume: restores fabricmanager (active before the drain)" \
+    unit_started nvidia-fabricmanager.service
+  check "resume: never restarts persistenced (inactive before the drain)" \
+    unit_not_started nvidia-persistenced.service
+  end_case
+}
+
+case_marker_write_failure() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  # A regular file where the marker directory should be makes both mkdir and tee
+  # fail, so the pre-drain marker cannot be written.
+  : >"$case_tmp/blocked"
+  export NVIDIA_RESUME_MARKER="$case_tmp/blocked/state"
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "marker write failure: upgrade fails" test "$rc" -ne 0
+  check "marker write failure: no unit is stopped" no_call '^systemctl stop'
+  check "marker write failure: no uninstall attempted" no_call 'nvidia-uninstall'
+  check "marker write failure: no offline install attempted" no_call '^dnf install .*--allowerasing'
+  end_case
+}
+
+case_resume_at_floor_short_circuit() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=620.70.06 FAKE_PROC_VERSION=620.70.06 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  : >"$NVIDIA_RESUME_MARKER"
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "resume at floor: exits 0" test "$rc" -eq 0
+  check "resume at floor: performs no stage" no_call '^dnf install .*--downloadonly'
+  check "resume at floor: performs no offline install" no_call '^dnf install .*--allowerasing'
+  check "resume at floor: performs no uninstall" no_call 'nvidia-uninstall'
+  check "resume at floor: restores persistenced" unit_started nvidia-persistenced.service
+  check "resume at floor: removes the marker" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+# ===========================================================================
+# Phase 5 (closure fix) -- DKMS-only 620 payload + safe ordering
+# ===========================================================================
+case_dkms_only_closure_succeeds() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  export FAKE_DKMS_STATUS="nvidia-open/620.70.06, $(uname -r), x86_64: installed"
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "dkms-only: exits 0" test "$rc" -eq 0
+  check "dkms-only: stages the DKMS closure" has_call '^dnf install .*--downloadonly'
+  check "dkms-only: runs the offline install" has_call '^dnf install .*--allowerasing'
+  check "dkms-only: runs depmod -a" has_call 'depmod -a'
+  check "dkms-only: loads the nvidia module" has_call 'modprobe nvidia$'
+  check "dkms-only: proc reports 620" procs_620
+  end_case
+}
+
+case_dkms_payload_missing_dkms_conf() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1 FAKE_DKMS_CONF_MISSING=1
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "missing dkms.conf: fails" test "$rc" -ne 0
+  check "missing dkms.conf: names [kernel-module] and dkms.conf" \
+    bash -c 'grep -q "\[kernel-module\]" "$1" && grep -q "dkms.conf" "$1"' _ "$err"
+  check "missing dkms.conf: no uninstall attempted" no_call 'nvidia-uninstall'
+  check "missing dkms.conf: no offline install attempted" no_call '^dnf install .*--allowerasing'
+  check "missing dkms.conf: no marker left behind" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+case_dkms_tool_missing() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1 FAKE_DKMS_TOOL_MISSING=1
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "dkms tool missing: fails" test "$rc" -ne 0
+  check "dkms tool missing: names [kernel-module] and the dkms tool" \
+    bash -c 'grep -q "\[kernel-module\]" "$1" && grep -qi "dkms" "$1"' _ "$err"
+  check "dkms tool missing: no uninstall attempted" no_call 'nvidia-uninstall'
+  check "dkms tool missing: no offline install attempted" no_call '^dnf install .*--allowerasing'
+  end_case
+}
+
+case_dkms_tool_staged() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1 FAKE_STAGE_INCLUDE_DKMS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  export FAKE_DKMS_STATUS="nvidia-open/620.70.06, $(uname -r), x86_64: installed"
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "dkms tool staged: exits 0" test "$rc" -eq 0
+  check "dkms tool staged: the stage is accepted" has_call '^dnf install .*--downloadonly'
+  check "dkms tool staged: the dkms RPM is in the closure" \
+    bash -c 'compgen -G "$1/dkms-*.rpm" >/dev/null' _ "$NVIDIA_STAGE_DIR"
+  check "dkms tool staged: the offline install runs" has_call '^dnf install .*--allowerasing'
+  check "dkms tool staged: post-install verification runs dkms status" \
+    before '^dnf install .*--allowerasing' 'dkms status'
+  end_case
+}
+
+case_dkms_kernel_headers_missing() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1 FAKE_KERNEL_HEADERS_MISSING=1
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "kernel headers missing: fails" test "$rc" -ne 0
+  check "kernel headers missing: names [kernel-module] and kernel-headers/devel" \
+    bash -c 'grep -q "\[kernel-module\]" "$1" && grep -Eq "kernel-(headers|devel)" "$1"' _ "$err"
+  check "kernel headers missing: no uninstall attempted" no_call 'nvidia-uninstall'
+  check "kernel headers missing: no offline install attempted" no_call '^dnf install .*--allowerasing'
+  end_case
+}
+
+case_dkms_build_proof_fails() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1 FAKE_DKMS_BUILD_RC=1
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "dkms build proof fails: upgrade fails" test "$rc" -ne 0
+  check "dkms build proof fails: a build was attempted" has_call '^dkms (build|install)'
+  check "dkms build proof fails: names [kernel-module]" bash -c 'grep -q "\[kernel-module\]" "$1"' _ "$err"
+  check "dkms build proof fails: no uninstall attempted" no_call 'nvidia-uninstall'
+  check "dkms build proof fails: no offline install attempted" no_call '^dnf install .*--allowerasing'
+  end_case
+}
+
+# --- DKMS pre-install proof: staged prerequisites + a registered source ------
+# The fake `dkms build` refuses to run until the staged DKMS source has been
+# extracted into NVIDIA_DKMS_SRC_ROOT and registered with `dkms add`, so this
+# case fails if the library builds before source registration or skips the
+# staged dkms/kernel-devel/kernel-headers installs.
+case_dkms_source_registration_before_build() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_TOOL_MISSING=1 FAKE_STAGE_INCLUDE_BUILD_PREREQS=1
+  export FAKE_KERNEL_DEVEL_MISSING=1 FAKE_KERNEL_HEADERS_MISSING=1
+  export FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  local src_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-open-$NVIDIA_DRIVER_FLOOR"
+  local rc pre_rc post_rc
+  "$(command -v dkms)" build "nvidia-open/$NVIDIA_DRIVER_FLOOR" -k "$kernel" \
+    >/dev/null 2>&1
+  pre_rc=$?
+  # Drop the deliberate pre-check from the ordering evidence.
+  : >"$FAKE_GPU_CALLS"
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $kernel, x86_64: installed"
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+  "$(command -v dkms)" build "nvidia-open/$NVIDIA_DRIVER_FLOOR" -k "$kernel" \
+    >/dev/null 2>&1
+  post_rc=$?
+
+  check "dkms source: an unregistered source cannot be built" test "$pre_rc" -ne 0
+  check "dkms source: upgrade exits 0" test "$rc" -eq 0
+  check "dkms source: installs the staged dkms tool" state_flag dkms_tool
+  check "dkms source: installs staged kernel-devel" state_flag kernel_devel
+  check "dkms source: installs staged kernel-headers" state_flag kernel_headers
+  check "dkms source: dkms tool install precedes the build" \
+    before '^dnf install .*dkms-' '^dkms build '
+  check "dkms source: kernel-devel install precedes the build" \
+    before '^dnf install .*kernel-devel-' '^dkms build '
+  check "dkms source: kernel-headers install precedes the build" \
+    before '^dnf install .*kernel-headers-' '^dkms build '
+  check "dkms source: prerequisites install precedes the extraction" \
+    before '^dnf install .*kernel-devel-' '^rpm2cpio '
+  check "dkms source: source is extracted with rpm2cpio/cpio" \
+    bash -c 'grep -q "^rpm2cpio " "$1" && grep -q "^cpio " "$1"' _ "$FAKE_GPU_CALLS"
+  check "dkms source: dkms add registers nvidia-open/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms add nvidia-open/$NVIDIA_DRIVER_FLOOR\$"
+  check "dkms source: the build runs after dkms add" \
+    before "^dkms add nvidia-open/$NVIDIA_DRIVER_FLOOR\$" '^dkms build nvidia-open/620\.70\.06'
+  check "dkms source: the proof build precedes the offline driver install" \
+    before '^dkms build ' '^dnf install .*--allowerasing'
+  check "dkms source: the extracted source tree exists" \
+    bash -c '[[ -f "$1/dkms.conf" ]]' _ "$src_dir"
+  check "dkms source: a registered source builds" test "$post_rc" -eq 0
+  end_case
+}
+
+case_run_managed_dkms_detected() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
+  export FAKE_RPM_INSTALLED=0 FAKE_RUN_MANAGED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $kernel, x86_64: installed
+nvidia-open/620.70.06, $kernel, x86_64: installed"
+  local variant rc
+  variant="$(nvidia__kernel_module_variant fake-sudo 2>/dev/null)"
+  check "run-managed dkms: variant detection reports dkms" test "$variant" = "dkms"
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "run-managed dkms: exits 0" test "$rc" -eq 0
+  check "run-managed dkms: consults dkms status" has_call 'dkms status'
+  check "run-managed dkms: removes the stale 595 build before depmod" \
+    before 'dkms remove nvidia-open/595' 'depmod -a'
+  end_case
+}
+
+case_run_managed_dkms_remove_failure() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
+  export FAKE_RPM_INSTALLED=0 FAKE_RUN_MANAGED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_REMOVE_RC=1 FAKE_DKMS_STATUS_RC=0
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $kernel, x86_64: installed
+nvidia-open/620.70.06, $kernel, x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "dkms remove fails: upgrade fails" test "$rc" -ne 0
+  check "dkms remove fails: names [dkms]" bash -c 'grep -q "\[dkms\]" "$1"' _ "$err"
+  check "dkms remove fails: never runs depmod" no_call 'depmod -a'
+  check "dkms remove fails: never unloads the module" no_call 'modprobe -r'
+  check "dkms remove fails: never prints a success line" \
+    bash -c '! grep -qi "at or above the .* floor" "$1"' _ "$out"
+  end_case
+}
+
+case_kmod_host_no_dkms() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=kmod
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "kmod host: exits 0" test "$rc" -eq 0
+  check "kmod host: never mutates dkms builds" no_call '^dkms (add|remove|build|install)'
+  end_case
+}
+
+case_gsp_missing() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  command rm -f "$NVIDIA_FIRMWARE_ROOT/nvidia/620.70.06/gsp_tu10x.bin"
+  fake_gpu_install
+  export FAKE_DKMS_STATUS="nvidia-open/620.70.06, $(uname -r), x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "gsp missing: fails" test "$rc" -ne 0
+  check "gsp missing: names [kernel-module]" bash -c 'grep -q "\[kernel-module\]" "$1"' _ "$err"
+  check "gsp missing: checked before nvidia-uninstall" no_call 'nvidia-uninstall'
+  end_case
+}
+
+case_stale_dkms_removed_before_modinfo_gate() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
+  export FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $kernel, x86_64: installed
+nvidia-open/620.70.06, $kernel, x86_64: installed"
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "stale dkms ordering: exits 0" test "$rc" -eq 0
+  check "stale dkms ordering: consults dkms status" has_call 'dkms status'
+  check "stale dkms ordering: removes 595 before the modinfo gate" \
+    before 'dkms remove nvidia-open/595' 'modinfo -k'
+  check "stale dkms ordering: depmod before the modinfo gate" \
+    before 'depmod -a' 'modinfo -k'
+  end_case
+}
+
+case_dkms_post_install_module_missing() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
+  export FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $kernel, x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "post-install 620 missing: upgrade fails" test "$rc" -ne 0
+  check "post-install 620 missing: names [kernel-module]" bash -c 'grep -q "\[kernel-module\]" "$1"' _ "$err"
+  check "post-install 620 missing: marker remains" marker_present
+  check "post-install 620 missing: keeps the 595 DKMS build" no_call 'dkms remove nvidia-open/595'
+  end_case
+}
+
 case_upgrade
 case_noop
 case_newer
@@ -565,6 +1371,48 @@ case_kmod_vs_dkms
 case_modprobe_uvm
 case_gpu_init
 case_resume_marker
+
+# Phase 3 (closure fix) -- optional unit availability
+case_fabricmanager_absent_does_not_block
+case_fabricmanager_available_is_included
+case_persistenced_non_rpm_available
+case_persistenced_non_rpm_absent
+case_optional_repoquery_transient_failure
+case_required_stage_failure
+case_no_optional_units
+case_fabricmanager_unit_absent
+case_failed_host_reproduction
+case_repoquery_multiple_or_below_floor
+case_stage_no_empty_extra_arg
+case_stdout_stderr_separation
+case_repoquery_flag_shape
+
+# Phase 4 (closure fix) -- restore only active units, resume state
+case_fabricmanager_inactive_not_restarted
+case_fabricmanager_active_restored
+case_fabricmanager_start_failure_nonfatal
+case_fabricmanager_active_but_pkg_not_staged
+case_persistenced_active_restored
+case_persistenced_inactive_not_restarted
+case_persistenced_start_failure_fatal
+case_resume_preserves_active_state
+case_marker_write_failure
+case_resume_at_floor_short_circuit
+
+# Phase 5 (closure fix) -- DKMS-only payload
+case_dkms_only_closure_succeeds
+case_dkms_payload_missing_dkms_conf
+case_dkms_tool_missing
+case_dkms_tool_staged
+case_dkms_kernel_headers_missing
+case_dkms_build_proof_fails
+case_dkms_source_registration_before_build
+case_run_managed_dkms_detected
+case_run_managed_dkms_remove_failure
+case_kmod_host_no_dkms
+case_gsp_missing
+case_stale_dkms_removed_before_modinfo_gate
+case_dkms_post_install_module_missing
 
 if [[ "$failures" -ne 0 ]]; then
   printf '\n%d failure(s)\n' "$failures" >&2

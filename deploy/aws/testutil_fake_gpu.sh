@@ -50,6 +50,17 @@
 #   FAKE_MODULES              explicit space-separated initial module set
 #   FAKE_STRIMSERVER_ACTIVE   1 -> `systemctl is-active strimserver.service`
 #   FAKE_FABRICMANAGER_UNIT   1 -> `systemctl cat nvidia-fabricmanager.service`
+#                                 (default 0: absent on a T4/g4dn host)
+#   FAKE_FABRICMANAGER_ACTIVE 1 -> nvidia-fabricmanager active initially (default 0)
+#   FAKE_PERSISTENCED_UNIT    1 -> `systemctl cat nvidia-persistenced.service`
+#                                 (default 1: present on the real ML AMIs)
+#   FAKE_PERSISTENCED_ACTIVE  1 -> nvidia-persistenced active initially (default 1)
+#   FAKE_*_WAS_ACTIVE         seed alias for the resumed-run state files
+#   FAKE_FABRICMANAGER_FRAGMENT / FAKE_PERSISTENCED_FRAGMENT
+#                             FragmentPath returned by `systemctl show`
+#   FAKE_UNIT_OWNER_FABRICMANAGER / FAKE_UNIT_OWNER_PERSISTENCED
+#                             full NEVRA printed by `rpm -qf <fragment>`
+#                             (empty, the default, means "not RPM-owned")
 #   FAKE_DCGM_UNIT            1 -> `nvidia-dcgm.service` exists
 #   FAKE_DCGM_EXPORTER_UNIT   1 -> `nvidia-dcgm-exporter.service` exists
 #   FAKE_DCGM_ACTIVE          1 -> nvidia-dcgm active initially
@@ -62,6 +73,39 @@
 #   FAKE_KERNEL_MODULE_VARIANT  "kmod" (default) or "dkms"
 #   FAKE_DKMS_STATUS          `dkms status` output
 #   FAKE_DKMS_RC              rc for `dkms` (default 0)
+#   FAKE_DKMS_STATUS_RC       rc for `dkms status` only (default FAKE_DKMS_RC)
+#   FAKE_DKMS_REMOVE_RC       rc for `dkms remove` only (default FAKE_DKMS_RC)
+#   FAKE_DKMS_RPM             1 -> `rpm -q nvidia-open-dkms` succeeds
+#   FAKE_DKMS_PAYLOAD         1 -> a staged DKMS RPM carries `dkms.conf` and no
+#                                 prebuilt `.ko` (default: legacy `.ko` payload)
+#   FAKE_DKMS_CONF_MISSING    1 -> the staged DKMS payload omits `dkms.conf`
+#   FAKE_DKMS_TOOL_MISSING    1 -> remove the `dkms` shim from PATH
+#   FAKE_DKMS_BUILD_RC        rc for `dkms build`/`dkms install` only (default
+#                             FAKE_DKMS_RC); models a source build that fails
+#   NVIDIA_DKMS_SRC_ROOT      root the fake `dkms` reads for a registered source
+#                             tree (tests redirect it into the case temp dir)
+#   The fake `dkms build` refuses to run unless the module source exists under
+#   $NVIDIA_DKMS_SRC_ROOT and was registered by `dkms add` (or is already in
+#   `dkms status`); `rpm2cpio`/`cpio` only populate that tree for a staged DKMS
+#   source RPM.
+#   FAKE_STAGE_INCLUDE_DKMS   1 -> the staged closure also contains a `dkms` RPM
+#   FAKE_STAGE_INCLUDE_BUILD_PREREQS 1 -> the staged closure also contains the
+#                             `dkms`, `kernel-devel-<kernel>` and
+#                             `kernel-headers-<kernel>` RPMs
+#   FAKE_DNF_DKMS_INSTALL_REGISTERS 1 -> the offline driver install of a DKMS
+#                             payload makes `dkms status` report
+#                             nvidia-open/620.70.06 for the running kernel
+#                             (real `%post` behaviour), after the pre-build proof
+#   FAKE_KERNEL_HEADERS_MISSING 1 -> `rpm -q kernel-headers-$(uname -r)` fails
+#                             until a staged kernel-headers RPM is installed
+#   FAKE_KERNEL_DEVEL_MISSING   1 -> `rpm -q kernel-devel-$(uname -r)` fails
+#                             until a staged kernel-devel RPM is installed
+#   FAKE_REPOQUERY_FABRICMANAGER / FAKE_REPOQUERY_PERSISTENCED
+#                             newline-separated `<version>-<release>` rows for
+#                             `dnf repoquery` (empty means "not available")
+#   FAKE_REPOQUERY_RC         rc for `dnf repoquery` (default 0)
+#   FAKE_FABRICMANAGER_START_RC / FAKE_PERSISTENCED_START_RC
+#                             rc for `systemctl start <unit>` (default 0)
 #   FAKE_PAYLOAD_MISSING_MODULE 1 -> `rpm -qlp` omits the running-kernel .ko
 #
 # Not intended to be executed directly.
@@ -103,10 +147,32 @@ fake_gpu_install() {
   printf '%s' "${FAKE_REPORTED_DRIVER-620.70.06}" >"$FAKE_GPU_STATE/driver_version"
   printf '%s' "${FAKE_RPM_INSTALLED:-0}" >"$FAKE_GPU_STATE/rpm_installed"
   printf '%s' "${FAKE_KERNEL_MODULE_VARIANT:-kmod}" >"$FAKE_GPU_STATE/kmod_variant"
+  # Kernel build prerequisites are installed unless a case forces them missing.
+  # A fake `dnf install <staged RPM>` flips these back on, so the library must
+  # really install the staged RPMs before it can build.
+  if [[ "${FAKE_KERNEL_DEVEL_MISSING:-0}" == "1" ]]; then
+    printf '0' >"$FAKE_GPU_STATE/kernel_devel"
+  else
+    printf '1' >"$FAKE_GPU_STATE/kernel_devel"
+  fi
+  if [[ "${FAKE_KERNEL_HEADERS_MISSING:-0}" == "1" ]]; then
+    printf '0' >"$FAKE_GPU_STATE/kernel_headers"
+  else
+    printf '1' >"$FAKE_GPU_STATE/kernel_headers"
+  fi
+  "$FAKE_REAL_MKDIR" -p "$FAKE_GPU_STATE/dkms"
   printf '0' >"$FAKE_GPU_STATE/dcgm_active"
   printf '0' >"$FAKE_GPU_STATE/dcgm_exporter_active"
   [[ "${FAKE_DCGM_ACTIVE:-0}" == "1" ]] && printf '1' >"$FAKE_GPU_STATE/dcgm_active"
   [[ "${FAKE_DCGM_EXPORTER_ACTIVE:-0}" == "1" ]] && printf '1' >"$FAKE_GPU_STATE/dcgm_exporter_active"
+  # Optional NVIDIA units keep their own per-unit state files so a fake
+  # `systemctl start|stop` is observable by a later `is-active`. Preserve the
+  # real-host defaults: persistenced exists and is active; fabricmanager is
+  # absent/inactive on a T4/g4dn host. FAKE_*_WAS_ACTIVE seeds a resumed run.
+  printf '%s' "${FAKE_FABRICMANAGER_WAS_ACTIVE:-${FAKE_FABRICMANAGER_ACTIVE:-0}}" \
+    >"$FAKE_GPU_STATE/fabricmanager_active"
+  printf '%s' "${FAKE_PERSISTENCED_WAS_ACTIVE:-${FAKE_PERSISTENCED_ACTIVE:-1}}" \
+    >"$FAKE_GPU_STATE/persistenced_active"
   : >"$FAKE_GPU_STATE/modules"
   if [[ -n "${FAKE_MODULES:-}" ]]; then
     for m in $FAKE_MODULES; do printf '%s\n' "$m" >>"$FAKE_GPU_STATE/modules"; done
@@ -162,14 +228,51 @@ for a in "$@"; do printf '%s\n' "$a" >>"${FAKE_DNF_ARGV:-/dev/null}"; done
 
 stage_dest=""
 has_downloadonly=0
-subcmd=""
-prev=""
-for a in "$@"; do
+has_allowerasing=0
+repoquery_arch=""
+qf_fmt=""
+declare -a pos=()
+args=("$@")
+i=0
+while (( i < ${#args[@]} )); do
+  a="${args[$i]}"
+  case "$a" in
+    --destdir|--arch|--qf|--queryformat)
+      val="${args[$((i + 1))]:-}"
+      case "$a" in
+        --destdir) stage_dest="$val" ;;
+        --arch) repoquery_arch="$val" ;;
+        --qf|--queryformat) qf_fmt="$val" ;;
+      esac
+      i=$((i + 2))
+      continue
+      ;;
+  esac
   [[ "$a" == "--downloadonly" ]] && has_downloadonly=1
-  [[ "$prev" == "--destdir" ]] && stage_dest="$a"
-  [[ -z "$subcmd" && "$a" != -* ]] && subcmd="$a"
-  prev="$a"
+  [[ "$a" == "--allowerasing" ]] && has_allowerasing=1
+  case "$a" in
+    -*) ;;
+    *) pos+=("$a") ;;
+  esac
+  i=$((i + 1))
 done
+subcmd="${pos[0]:-}"
+positionals=("${pos[@]:1}")
+
+# An explicitly requested token is available only when its base name is in the
+# configured set. The required nvidia-open meta is gated by FAKE_PKG_AVAILABLE;
+# each optional package has its own repoquery result so a missing optional
+# package can never make the required stage look unavailable.
+token_available() {
+  case "$1" in
+    nvidia-open-*|nvidia-open) [[ "${FAKE_PKG_AVAILABLE:-1}" == "1" ]] ;;
+    nvidia-fabricmanager-*|nvidia-fabricmanager)
+      [[ -n "${FAKE_REPOQUERY_FABRICMANAGER:-}" ]] ;;
+    nvidia-persistenced-*|nvidia-persistenced)
+      [[ -n "${FAKE_REPOQUERY_PERSISTENCED:-}" ]] ;;
+    *) return 0 ;;
+  esac
+}
 
 closure_dest() {
   local dest="$1" arch="$2" incomplete="$3" variant="$4"
@@ -191,25 +294,109 @@ closure_dest() {
     else
       : >"$dest/kmod-nvidia-open-620.70.06-1.el9.x86_64.rpm"
     fi
+    # A host without a pre-installed dkms tool may receive it from the staged
+    # closure; the stage then carries the tool RPM alongside the DKMS source.
+    if [[ "${FAKE_STAGE_INCLUDE_DKMS:-0}" == "1" \
+        || "${FAKE_STAGE_INCLUDE_BUILD_PREREQS:-0}" == "1" ]]; then
+      : >"$dest/dkms-3.0.0-1.el9.noarch.rpm"
+    fi
+    if [[ "${FAKE_STAGE_INCLUDE_BUILD_PREREQS:-0}" == "1" ]]; then
+      kernel="${FAKE_KERNEL_RELEASE:-5.10.240-217.935.amzn2.x86_64}"
+      : >"$dest/kernel-devel-$kernel.x86_64.rpm"
+      : >"$dest/kernel-headers-$kernel.x86_64.rpm"
+    fi
   fi
 }
 
 case "$subcmd" in
   install)
     if [[ "$has_downloadonly" == "1" ]]; then
-      [[ "${FAKE_PKG_AVAILABLE:-1}" == "1" ]] || exit 1
       [[ -n "$stage_dest" ]] || exit 1
+      for tok in "${positionals[@]}"; do
+        if ! token_available "$tok"; then
+          printf 'No match for argument: %s\n' "$tok" >&2
+          exit 1
+        fi
+      done
       closure_dest "$stage_dest" "${FAKE_ARCH:-x86_64}" \
         "${FAKE_DNF_CLOSURE_INCOMPLETE:-0}" \
         "$(cat "$FAKE_GPU_STATE/kmod_variant" 2>/dev/null || echo kmod)"
       exit "${FAKE_DNF_DOWNLOADONLY_RC:-0}"
     fi
     rc="${FAKE_DNF_RC:-0}"
-    if [[ "$rc" == "0" && "${FAKE_DNF_UPGRADES_DRIVER:-1}" != "0" ]]; then
+    # Installing a local prerequisite RPM makes that prerequisite available on
+    # the fake host. The `dkms` tool comes back as the shim it was before the
+    # tool-missing case removed it.
+    for tok in "${positionals[@]}"; do
+      case "${tok##*/}" in
+        dkms-*.rpm)
+          if [[ -f "$FAKE_GPU_STATE/dkms.shim" ]]; then
+            "$FAKE_REAL_CP" "$FAKE_GPU_STATE/dkms.shim" "$FAKE_GPU_BINDIR/dkms"
+            chmod +x "$FAKE_GPU_BINDIR/dkms"
+          fi
+          printf '1' >"$FAKE_GPU_STATE/dkms_tool"
+          ;;
+        kernel-devel-*.rpm) printf '1' >"$FAKE_GPU_STATE/kernel_devel" ;;
+        kernel-headers-*.rpm) printf '1' >"$FAKE_GPU_STATE/kernel_headers" ;;
+      esac
+    done
+    # Only the driver-closure install (explicit nvidia RPMs or --allowerasing)
+    # swaps the reported driver; a prerequisite install must not.
+    driver_install=0
+    [[ "$has_allowerasing" == "1" ]] && driver_install=1
+    for tok in "${positionals[@]}"; do
+      case "${tok##*/}" in
+        kmod-nvidia-open-*.rpm|nvidia-open-*.rpm) driver_install=1 ;;
+      esac
+    done
+    if [[ "$rc" == "0" && "$driver_install" == "1" \
+        && "${FAKE_DNF_UPGRADES_DRIVER:-1}" != "0" ]]; then
+      variant="${FAKE_KERNEL_MODULE_VARIANT:-}"
+      if [[ -z "$variant" ]]; then
+        variant="kmod"
+        for f in "${NVIDIA_STAGE_DIR:-}"/*.rpm; do
+          [[ -e "$f" ]] || continue
+          [[ "$f" == *kmod-nvidia-open-dkms-* ]] && variant="dkms"
+        done
+      fi
+      printf '%s' "$variant" >"$FAKE_GPU_STATE/kmod_variant"
       printf '620.70.06' >"$FAKE_GPU_STATE/driver_version"
       printf '1' >"$FAKE_GPU_STATE/rpm_installed"
+      if [[ "${FAKE_DNF_DKMS_INSTALL_REGISTERS:-0}" == "1" && "$variant" == "dkms" ]]; then
+        printf 'nvidia-open/620.70.06\n' >"$FAKE_GPU_STATE/dkms_install_registered"
+      fi
     fi
     exit "$rc"
+    ;;
+  repoquery)
+    rc="${FAKE_REPOQUERY_RC:-0}"
+    [[ "$rc" == "0" ]] || exit "$rc"
+    for tok in "${positionals[@]}"; do
+      case "$tok" in
+        *fabricmanager*) name="nvidia-fabricmanager"; rows="${FAKE_REPOQUERY_FABRICMANAGER:-}" ;;
+        *persistenced*) name="nvidia-persistenced"; rows="${FAKE_REPOQUERY_PERSISTENCED:-}" ;;
+        *) continue ;;
+      esac
+      arch="${repoquery_arch:-${FAKE_ARCH:-x86_64}}"
+      while IFS= read -r verrel; do
+        [[ -n "$verrel" ]] || continue
+        ver="${verrel%%-*}"
+        rel="${verrel#*-}"
+        [[ "$rel" == "$verrel" ]] && rel=""
+        if [[ -n "$qf_fmt" ]]; then
+          out="$qf_fmt"
+          out="${out//\%\{name\}/$name}"
+          out="${out//\%\{version\}-%\{release\}/$verrel}"
+          out="${out//\%\{version\}/$ver}"
+          out="${out//\%\{release\}/$rel}"
+          out="${out//\%\{arch\}/$arch}"
+          printf '%b' "$out"
+        else
+          printf '%s %s %s\n' "$name" "$verrel" "$arch"
+        fi
+      done <<<"$rows"
+    done
+    exit 0
     ;;
   config-manager)
     exit 0
@@ -235,22 +422,106 @@ printf 'rpm %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
 installed="$(cat "$FAKE_GPU_STATE/rpm_installed" 2>/dev/null)"
 version="$(cat "$FAKE_GPU_STATE/driver_version" 2>/dev/null)"
 variant="$(cat "$FAKE_GPU_STATE/kmod_variant" 2>/dev/null)"
+kernel="${FAKE_KERNEL_RELEASE:-5.10.240-217.935.amzn2.x86_64}"
 args="$*"
+
+# Token-aware option scan. `-qf <file>` is a FILE query and must never be
+# shadowed by the generic `-q` branch (or by `rpm -q --qf`).
+has_q=0; has_f=0; file_query=0; want_name=0
+declare -a pkgs=()
+skip_next=0
+for a in "$@"; do
+  if [[ "$skip_next" == "1" ]]; then
+    skip_next=0
+    case "$a" in
+      *'%{NAME}'*|*'%{name}'*) want_name=1 ;;
+    esac
+    continue
+  fi
+  case "$a" in
+    --import) : ;;
+    --qf|--queryformat) skip_next=1; continue ;;
+    -qf) file_query=1 ;;
+    -q|--query) has_q=1 ;;
+    -f|--file) has_f=1 ;;
+    *'%{NAME}'*|*'%{name}'*) want_name=1 ;;
+  esac
+  case "$a" in
+    -*) ;;
+    *) pkgs+=("$a") ;;
+  esac
+done
+
+if [[ "$file_query" == "1" || ( "$has_q" == "1" && "$has_f" == "1" ) ]]; then
+  file="${pkgs[${#pkgs[@]}-1]:-}"
+  case "$file" in
+    "${FAKE_FABRICMANAGER_FRAGMENT:-/usr/lib/systemd/system/nvidia-fabricmanager.service}")
+      owner="${FAKE_UNIT_OWNER_FABRICMANAGER:-}" ;;
+    "${FAKE_PERSISTENCED_FRAGMENT:-/usr/lib/systemd/system/nvidia-persistenced.service}")
+      owner="${FAKE_UNIT_OWNER_PERSISTENCED:-}" ;;
+    *fabricmanager*) owner="${FAKE_UNIT_OWNER_FABRICMANAGER:-}" ;;
+    *persistenced*)  owner="${FAKE_UNIT_OWNER_PERSISTENCED:-}" ;;
+    *)               owner="" ;;
+  esac
+  if [[ -z "$owner" ]]; then
+    printf 'error: file %s is not owned by any package\n' "$file" >&2
+    exit 1
+  fi
+  if [[ "$want_name" == "1" ]]; then
+    printf '%s\n' "${owner%%-[0-9]*}"
+  else
+    printf '%s\n' "$owner"
+  fi
+  exit 0
+fi
+
 case "$args" in
   *'--import'*)
     [[ "${FAKE_DNF_KEY_MISSING:-0}" == "1" ]] && exit 1
     exit 0
     ;;
   *'-qlp'*|*'-q'*'-p'*'-l'*)
-    [[ "${FAKE_PAYLOAD_MISSING_MODULE:-0}" == "1" ]] && exit 0
-    printf '/lib/modules/%s/kernel/drivers/video/nvidia.ko\n' "${FAKE_KERNEL_RELEASE:-5.10.240-217.935.amzn2.x86_64}"
+    rpmfile="${pkgs[${#pkgs[@]}-1]:-}"
+    base="${rpmfile##*/}"
+    case "$base" in
+      kmod-nvidia-open-dkms-*|nvidia-open-dkms-*)
+        if [[ "${FAKE_DKMS_PAYLOAD:-0}" == "1" ]]; then
+          [[ "${FAKE_DKMS_CONF_MISSING:-0}" == "1" ]] && exit 0
+          printf '/usr/src/nvidia-open-620.70.06/dkms.conf\n'
+        else
+          # Legacy harness default: a .ko payload (keeps the pre-DKMS caller
+          # green; set FAKE_DKMS_PAYLOAD=1 to model a real DKMS source RPM).
+          printf '/lib/modules/%s/kernel/drivers/video/nvidia.ko\n' "$kernel"
+        fi
+        ;;
+      nvidia-open-*)
+        # Meta RPM: never carries a kernel module.
+        printf '/usr/lib/udev/rules.d/60-nvidia.rules\n'
+        ;;
+      kmod-nvidia-open-*)
+        [[ "${FAKE_PAYLOAD_MISSING_MODULE:-0}" == "1" ]] && exit 0
+        printf '/lib/modules/%s/kernel/drivers/video/nvidia.ko\n' "$kernel"
+        ;;
+      *)
+        [[ "${FAKE_PAYLOAD_MISSING_MODULE:-0}" == "1" ]] && exit 0
+        printf '/lib/modules/%s/kernel/drivers/video/nvidia.ko\n' "$kernel"
+        ;;
+    esac
     exit 0
     ;;
   *'-qp'*|*'-q'*'--package'*)
+    # A file query reads the staged RPM's own header, not host state. Derive the
+    # version from the staged filename so a mismatched staged RPM is visible.
+    rpmfile="${pkgs[${#pkgs[@]}-1]:-}"
+    base="${rpmfile##*/}"
+    staged_version="$version"
+    if [[ "$base" =~ [-:]([0-9]+\.[0-9]+\.[0-9]+)- ]]; then
+      staged_version="${BASH_REMATCH[1]}"
+    fi
     case "$args" in
       *'%{NEVRA}'*) printf '%s\n' "${FAKE_NEVRA:-nvidia-open-3:620.70.06-1.el9.x86_64}" ;;
-      *'%{VERSION}'*) printf '%s\n' "$version" ;;
-      *) printf 'nvidia-open-%s\n' "$version" ;;
+      *'%{VERSION}'*) printf '%s\n' "$staged_version" ;;
+      *) printf 'nvidia-open-%s\n' "$staged_version" ;;
     esac
     exit 0
     ;;
@@ -261,16 +532,38 @@ case "$args" in
   *'kmod-nvidia-open-dkms'*)
     [[ "$variant" == "dkms" && "$installed" == "1" ]] && exit 0 || exit 1
     ;;
+  *'nvidia-open-dkms'*)
+    [[ "${FAKE_DKMS_RPM:-0}" == "1" ]] && exit 0 || exit 1
+    ;;
   *'kmod-nvidia-open'*)
     [[ "$variant" == "kmod" && "$installed" == "1" ]] && exit 0 || exit 1
     ;;
+  *'kernel-devel-'*)
+    [[ "$(cat "$FAKE_GPU_STATE/kernel_devel" 2>/dev/null)" == "1" ]] && exit 0 || exit 1
+    ;;
+  *'kernel-headers-'*)
+    [[ "$(cat "$FAKE_GPU_STATE/kernel_headers" 2>/dev/null)" == "1" ]] && exit 0 || exit 1
+    ;;
   *'-q'*)
-    [[ "$installed" == "1" ]] || { printf 'package nvidia-open is not installed\n'; exit 1; }
-    case "$args" in
-      *'%{VERSION}'*) printf '%s\n' "$version" ;;
-      *) printf 'nvidia-open-3:%s-1.el9\n' "$version" ;;
+    pkg="${pkgs[0]:-}"
+    case "$pkg" in
+      nvidia-open|nvidia-open.x86_64|nvidia-open.*)
+        [[ "$installed" == "1" ]] || { printf 'package %s is not installed\n' "$pkg"; exit 1; }
+        case "$args" in
+          *'%{VERSION}'*) printf '%s\n' "$version" ;;
+          *) printf 'nvidia-open-3:%s-1.el9\n' "$version" ;;
+        esac
+        exit 0
+        ;;
+      '')
+        printf 'rpm: no package arguments\n' >&2
+        exit 1
+        ;;
+      *)
+        printf 'package %s is not installed\n' "$pkg" >&2
+        exit 1
+        ;;
     esac
-    exit 0
     ;;
   *) exit 0 ;;
 esac
@@ -375,45 +668,185 @@ exit 1
 SHIM
 
   # --- dkms -----------------------------------------------------------------
+  # `dkms build|install` refuses to run unless the module source exists under
+  # $NVIDIA_DKMS_SRC_ROOT and has been registered with `dkms add` (or is already
+  # reported by `dkms status`). This models the real pre-install proof: a staged
+  # DKMS RPM that was only downloaded cannot be built.
   cat >"$FAKE_GPU_BINDIR/dkms" <<'SHIM'
 #!/usr/bin/env bash
 printf 'dkms %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
-case "$*" in
-  status*) [[ -n "${FAKE_DKMS_STATUS:-}" ]] && printf '%s\n' "$FAKE_DKMS_STATUS" ;;
-  *)       ;;
+dkms_token() {
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -*) ;;
+      */*) printf '%s\n' "$a"; return 0 ;;
+    esac
+  done
+  return 1
+}
+case "$1" in
+  status)
+    [[ -n "${FAKE_DKMS_STATUS:-}" ]] && printf '%s\n' "$FAKE_DKMS_STATUS"
+    if [[ -f "$FAKE_GPU_STATE/dkms_install_registered" ]]; then
+      token="$(cat "$FAKE_GPU_STATE/dkms_install_registered")"
+      if ! grep -qF "$token" <<<"${FAKE_DKMS_STATUS:-}"; then
+        printf '%s, %s, x86_64: installed\n' "$token" \
+          "${FAKE_KERNEL_RELEASE:-5.10.240-217.935.amzn2.x86_64}"
+      fi
+    fi
+    exit "${FAKE_DKMS_STATUS_RC:-${FAKE_DKMS_RC:-0}}"
+    ;;
+  remove)
+    exit "${FAKE_DKMS_REMOVE_RC:-${FAKE_DKMS_RC:-0}}"
+    ;;
+  add)
+    token="$(dkms_token "$@")" || exit 1
+    mod="${token%%/*}"
+    ver="${token#*/}"
+    src="${NVIDIA_DKMS_SRC_ROOT:-/usr/src}/$mod-$ver/dkms.conf"
+    [[ -f "$src" ]] || exit 1
+    mkdir -p "$FAKE_GPU_STATE/dkms"
+    : >"$FAKE_GPU_STATE/dkms/$mod-$ver"
+    exit 0
+    ;;
+  build|install)
+    token="$(dkms_token "$@")" || exit 1
+    mod="${token%%/*}"
+    ver="${token#*/}"
+    src="${NVIDIA_DKMS_SRC_ROOT:-/usr/src}/$mod-$ver/dkms.conf"
+    registered=0
+    [[ -f "$FAKE_GPU_STATE/dkms/$mod-$ver" ]] && registered=1
+    [[ -n "${FAKE_DKMS_STATUS:-}" ]] && grep -qF "$token" <<<"$FAKE_DKMS_STATUS" \
+      && registered=1
+    if [[ ! -f "$src" || "$registered" != "1" ]]; then
+      printf 'Error! Could not find module source directory for %s\n' "$token" >&2
+      exit 1
+    fi
+    exit "${FAKE_DKMS_BUILD_RC:-${FAKE_DKMS_RC:-0}}"
+    ;;
+  *)
+    exit "${FAKE_DKMS_RC:-0}"
+    ;;
 esac
-exit "${FAKE_DKMS_RC:-0}"
+SHIM
+
+  # --- rpm2cpio / cpio ------------------------------------------------------
+  # A staged DKMS source RPM streams its source tree; the fake `cpio` material-
+  # ises it under the current directory exactly as a leading-slash-stripping
+  # real `cpio -idm` would. Only a DKMS RPM yields a payload.
+  cat >"$FAKE_GPU_BINDIR/rpm2cpio" <<'SHIM'
+#!/usr/bin/env bash
+printf 'rpm2cpio %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+rpmfile="${*: -1}"
+base="${rpmfile##*/}"
+case "$base" in
+  kmod-nvidia-open-dkms-*.rpm|nvidia-open-dkms-*.rpm) ;;
+  *) exit 1 ;;
+esac
+[[ -f "$rpmfile" ]] || exit 1
+ver="620.70.06"
+[[ "$base" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] && ver="${BASH_REMATCH[1]}"
+printf '/usr/src/nvidia-open-%s/dkms.conf\n' "$ver"
+printf '/usr/src/nvidia-open-%s/nvidia-open.mod.c\n' "$ver"
+SHIM
+
+  cat >"$FAKE_GPU_BINDIR/cpio" <<'SHIM'
+#!/usr/bin/env bash
+printf 'cpio %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+wrote=0
+while IFS= read -r path; do
+  [[ -n "$path" ]] || continue
+  rel="${path#/}"
+  "$FAKE_REAL_MKDIR" -p "$PWD/$(dirname "$rel")"
+  : >"$PWD/$rel"
+  wrote=1
+done
+[[ "$wrote" == "1" ]] || exit 1
+exit 0
 SHIM
 
   # --- systemctl ------------------------------------------------------------
   # is-active reads the per-unit state files so a stop flips them and a
   # subsequent is-active observes the transition (used by the drain wait).
+  # `cat` on an unknown unit fails; `show -p FragmentPath --value` prints a path
+  # only when the unit exists.
   cat >"$FAKE_GPU_BINDIR/systemctl" <<'SHIM'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
-active_file() {
+unit_state() {
   case "$1" in
+    nvidia-fabricmanager.service) printf '%s' "$FAKE_GPU_STATE/fabricmanager_active" ;;
+    nvidia-persistenced.service)  printf '%s' "$FAKE_GPU_STATE/persistenced_active" ;;
     nvidia-dcgm-exporter.service) printf '%s' "$FAKE_GPU_STATE/dcgm_exporter_active" ;;
     nvidia-dcgm.service)          printf '%s' "$FAKE_GPU_STATE/dcgm_active" ;;
     *) printf '' ;;
   esac
 }
+unit_exists() {
+  case "$1" in
+    nvidia-fabricmanager.service) [[ "${FAKE_FABRICMANAGER_UNIT:-0}" == "1" ]] ;;
+    nvidia-persistenced.service)  [[ "${FAKE_PERSISTENCED_UNIT:-1}" == "1" ]] ;;
+    nvidia-dcgm-exporter.service) [[ "${FAKE_DCGM_EXPORTER_UNIT:-0}" == "1" ]] ;;
+    nvidia-dcgm.service)          [[ "${FAKE_DCGM_UNIT:-0}" == "1" ]] ;;
+    containerd.service|strimserver.service) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+unit_is_active() {
+  local f
+  f="$(unit_state "$1")"
+  [[ -n "$f" && "$(cat "$f" 2>/dev/null)" == "1" ]]
+}
 case "$*" in
+  *'show'*'FragmentPath'*)
+    unit=""
+    for a in "$@"; do
+      case "$a" in -*) ;; *) unit="$a" ;; esac
+    done
+    case "$unit" in
+      nvidia-fabricmanager.service)
+        [[ "${FAKE_FABRICMANAGER_UNIT:-0}" == "1" ]] || exit 1
+        printf '%s\n' "${FAKE_FABRICMANAGER_FRAGMENT:-/usr/lib/systemd/system/nvidia-fabricmanager.service}" ;;
+      nvidia-persistenced.service)
+        [[ "${FAKE_PERSISTENCED_UNIT:-1}" == "1" ]] || exit 1
+        printf '%s\n' "${FAKE_PERSISTENCED_FRAGMENT:-/usr/lib/systemd/system/nvidia-persistenced.service}" ;;
+      *) exit 1 ;;
+    esac
+    exit 0 ;;
   *'is-active'*'strimserver.service'*)
     [[ "${FAKE_STRIMSERVER_ACTIVE:-1}" == "1" ]] && exit 0 || exit 3 ;;
   *'is-active'*'nvidia-fabricmanager.service'*)
-    [[ "${FAKE_FABRICMANAGER_UNIT:-0}" == "1" ]] && exit 0 || exit 3 ;;
+    unit_exists nvidia-fabricmanager.service && unit_is_active nvidia-fabricmanager.service && exit 0 || exit 3 ;;
+  *'is-active'*'nvidia-persistenced.service'*)
+    unit_exists nvidia-persistenced.service && unit_is_active nvidia-persistenced.service && exit 0 || exit 3 ;;
   *'is-active'*'nvidia-dcgm-exporter.service'*)
-    f="$(active_file nvidia-dcgm-exporter.service)"
-    [[ -n "$f" && "$(cat "$f" 2>/dev/null)" == "1" ]] && exit 0 || exit 3 ;;
+    unit_is_active nvidia-dcgm-exporter.service && exit 0 || exit 3 ;;
   *'is-active'*'nvidia-dcgm.service'*)
-    f="$(active_file nvidia-dcgm.service)"
-    [[ -n "$f" && "$(cat "$f" 2>/dev/null)" == "1" ]] && exit 0 || exit 3 ;;
+    unit_is_active nvidia-dcgm.service && exit 0 || exit 3 ;;
+  *'stop'*'nvidia-fabricmanager.service'*)
+    printf '0' >"$FAKE_GPU_STATE/fabricmanager_active"
+    exit 0 ;;
+  *'stop'*'nvidia-persistenced.service'*)
+    printf '0' >"$FAKE_GPU_STATE/persistenced_active"
+    exit 0 ;;
   *'stop'*'nvidia-dcgm-exporter.service'*)
     [[ "${FAKE_DCGM_EXPORTER_STUCK:-0}" == "1" ]] || printf '0' >"$FAKE_GPU_STATE/dcgm_exporter_active"
     exit 0 ;;
   *'stop'*'nvidia-dcgm.service'*)
     [[ "${FAKE_DCGM_STUCK:-0}" == "1" ]] || printf '0' >"$FAKE_GPU_STATE/dcgm_active"
+    exit 0 ;;
+  *'start'*'nvidia-fabricmanager.service'*)
+    unit_exists nvidia-fabricmanager.service || exit 1
+    rc="${FAKE_FABRICMANAGER_START_RC:-0}"
+    [[ "$rc" == "0" ]] || exit "$rc"
+    printf '1' >"$FAKE_GPU_STATE/fabricmanager_active"
+    exit 0 ;;
+  *'start'*'nvidia-persistenced.service'*)
+    unit_exists nvidia-persistenced.service || exit 1
+    rc="${FAKE_PERSISTENCED_START_RC:-0}"
+    [[ "$rc" == "0" ]] || exit "$rc"
+    printf '1' >"$FAKE_GPU_STATE/persistenced_active"
     exit 0 ;;
   *'cat'*'nvidia-dcgm-exporter.service'*|*'list-unit-files'*'nvidia-dcgm-exporter'*)
     [[ "${FAKE_DCGM_EXPORTER_UNIT:-0}" == "1" ]] && exit 0 || exit 1 ;;
@@ -421,8 +854,12 @@ case "$*" in
     [[ "${FAKE_DCGM_UNIT:-0}" == "1" ]] && exit 0 || exit 1 ;;
   *'cat'*'nvidia-fabricmanager.service'*|*'list-unit-files'*'nvidia-fabricmanager'*)
     [[ "${FAKE_FABRICMANAGER_UNIT:-0}" == "1" ]] && exit 0 || exit 1 ;;
-  *'cat'*)
+  *'cat'*'nvidia-persistenced.service'*|*'list-unit-files'*'nvidia-persistenced'*)
+    [[ "${FAKE_PERSISTENCED_UNIT:-1}" == "1" ]] && exit 0 || exit 1 ;;
+  *'cat'*'containerd.service'*|*'cat'*'strimserver.service'*)
     exit 0 ;;
+  *'cat'*)
+    exit 1 ;;
   *) exit 0 ;;
 esac
 SHIM
@@ -479,9 +916,27 @@ SHIM
   if [[ "${FAKE_SMI_MISSING:-0}" == "1" ]]; then
     "$FAKE_REAL_RM" -f "$FAKE_GPU_BINDIR/nvidia-smi"
   fi
+  if [[ "${FAKE_DKMS_TOOL_MISSING:-0}" == "1" ]]; then
+    # Keep the shim so a staged `dkms` RPM can install it back later.
+    "$FAKE_REAL_CP" "$FAKE_GPU_BINDIR/dkms" "$FAKE_GPU_STATE/dkms.shim"
+    "$FAKE_REAL_RM" -f "$FAKE_GPU_BINDIR/dkms"
+  fi
 
   chmod +x "$FAKE_GPU_BINDIR"/*
   PATH="$FAKE_GPU_BINDIR:$PATH"
+  # A real /usr/sbin/dkms may be installed on the test host; when the tool is
+  # meant to be missing, drop every PATH entry that still provides one so
+  # `command -v dkms` fails like it would on a host without the package.
+  if [[ "${FAKE_DKMS_TOOL_MISSING:-0}" == "1" ]]; then
+    local filtered="" d
+    local -a path_dirs=()
+    IFS=: read -r -a path_dirs <<<"$PATH"
+    for d in "${path_dirs[@]}"; do
+      [[ -e "$d/dkms" ]] && continue
+      filtered="${filtered:+$filtered:}$d"
+    done
+    PATH="$filtered"
+  fi
   export PATH
 }
 

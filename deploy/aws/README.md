@@ -58,33 +58,70 @@ the host without a usable driver:
    reinstalled.
 3. **Below the floor:** add the per-arch CUDA repo and import its signing key,
    then stage the full 620 dependency closure with `dnf install --downloadonly`
-   into `/mnt/nvme/nvidia-rpm` (plus any RPM-managed
-   fabricmanager/persistenced unit packages). The staged RPMs must include
-   `nvidia-open`, `nvidia-driver-cuda`, and a kmod/DKMS kernel module, must
-   pass `rpm -K`, and must contain an `nvidia.ko` for the running kernel before
-   the old driver is touched. The new stage is swapped in atomically
+   into `/mnt/nvme/nvidia-rpm`. The required `nvidia-open` NEVRA is staged first
+   in its own transaction; any RPM-managed fabricmanager/persistenced unit
+   package is **availability-gated** (matching arch, exactly one version
+   at/above `620.70.06`) and staged separately. An unavailable or failed
+   optional package is omitted with a warning and never aborts the required
+   closure. The staged RPMs must include `nvidia-open`, `nvidia-driver-cuda`,
+   and a kmod/DKMS kernel module, must pass `rpm -K`, and must satisfy the
+   payload gate before the old driver is touched:
+   - a staged prebuilt `kmod-nvidia-open` RPM must contain `nvidia.ko` for the
+     running kernel;
+   - a staged `kmod-nvidia-open-dkms` (or `nvidia-open-dkms`) RPM must contain
+     `dkms.conf`, and the `dkms` tool plus `kernel-devel`/`kernel-headers` for
+     the running kernel must already be present or supplied by the staged
+     closure; the DKMS source must also prove it can build for `uname -r`;
+   - the `nvidia-open` metapackage carries no kernel module and is exempt.
+
+   The staged closure must contain the 620 `gsp_tu10x.bin` (or the host must
+   already have it). The new stage is swapped in atomically
    (backup -> rename -> drop backup).
-4. **Resume marker:** the first destructive action writes
-   `/var/lib/strimserver/driver-upgrade.state`. On any later failure the marker
-   is left in place so re-running `setup-gpu.sh` resumes the same upgrade;
-   rollback is an explicit operator action (reinstall the previous `nvidia-open`
-   and `depmod`/`modprobe`). There is no reboot and no auto-rollback service.
-5. **Drain holders:** stop `strimserver`, fabricmanager, the DCGM *exporter*
+4. **Versionlock caveat:** `/etc/dnf/plugins/versionlock.list` commonly pins
+   `nvidia-fabricmanager`/`libnvidia-nscq` at the old branch. Before staging,
+   `lib/nvidia.sh` backs the file up, temporarily removes the
+   `nvidia-fabricmanager`/`nvidia-persistenced` locks, asserts every staged
+   `nvidia-*`/`libnvidia-*` RPM reports `620.70.06`, and restores the original
+   file from an EXIT trap. Do not hand-edit the lock file during an upgrade.
+5. **Resume marker:** the first destructive action writes
+   `/var/lib/strimserver/driver-upgrade.state`. The marker records whether
+   fabricmanager and persistenced were active before the drain (and whether the
+   fabricmanager 620 package was staged), so a resumed run never restores a
+   unit that was originally inactive. If the marker cannot be written the
+   upgrade aborts before the drain. On any later failure the marker is left in
+   place so re-running `setup-gpu.sh` resumes the same upgrade; a marker whose
+   loaded `/proc` driver is already at the floor short-circuits straight to
+   restore/verify. There is no reboot and no auto-rollback service.
+6. **Drain holders:** stop `strimserver`, fabricmanager, the DCGM *exporter*
    before `nvidia-dcgm`, then persistenced and containerd; wait (bounded) for
    the DCGM units to go inactive and fail if any `/dev/nvidia*` holder survives.
    DCGM/exporter stay stopped afterwards — strimserver never uses them.
-6. **Swap:** remove a `.run`-managed payload when present, install the validated
+7. **Swap:** remove a `.run`-managed payload when present, install the validated
    closure offline (`--allowerasing --disableexcludes=all --disablerepo='*'`),
-   confirm the module for the running kernel is 620, remove only a stale
-   below-floor DKMS build, `depmod -a`, unload the old module graph
-   dependency-first, then `modprobe nvidia` + `nvidia_uvm`.
-7. **Verify:** proc driver at/above the floor, `nvidia-smi` compute capability
-   `7.5`, `/dev/nvidia0`, and the GSP firmware file; then restore persistenced /
-   fabricmanager and remove the marker.
+   confirm the module for the running kernel is 620 (for DKMS, `dkms status`
+   must show `nvidia-open/620.70.06` for `uname -r`; a successful `dnf install`
+   alone is not success), remove only stale below-floor DKMS builds,
+   `depmod -a`, unload the old module graph dependency-first, then
+   `modprobe nvidia` + `nvidia_uvm`.
+8. **Verify:** proc driver at/above the floor, `nvidia-smi` compute capability
+   `7.5`, `/dev/nvidia0`, and the GSP firmware file; then restore **only the
+   units that were active before the drain**. Fabricmanager is optional on
+   T4/g4dn: it starts only when it was active *and* its 620 package was staged,
+   and a start failure is a loud warning, not a failure. Persistenced failure is
+   fatal. DCGM/exporter and containerd are never restarted here. Finally remove
+   the marker.
 
 The upgrade therefore needs outbound access to the NVIDIA CUDA repository at
 deploy time; the RPM payload itself is staged locally before removal so an
 interrupted install is recoverable from `/mnt/nvme/nvidia-rpm`.
+
+**Rollback artifact requirement:** because the 595 branch is not in the CUDA
+repository, an in-place rollback needs a **preserved pre-upgrade artifact** — the
+original 595 `.run` installer or the previous `nvidia-rpm` closure — archived
+off-host before the first destructive step. Without one, the only rollback is to
+replace the instance from the pinned AMI; `setup-gpu.sh` never downgrades and
+the deployment bundle contains no driver. Preserve the 595 artifact before
+upgrading, and treat its absence as a decision to replace rather than roll back.
 
 **arm64 caveat:** `nvidia-open-620.70.06-1.amzn2023.noarch` is published in
 `amzn2023/sbsa`, but AL2023 **generic Arm64 is outside the vendor's 620 support
@@ -566,9 +603,11 @@ instance with `deploy/aws/terminate -y` (matches the `Project` tag).
 `DEPLOYMENT_SRC` reverts the application, **not** the host driver — a host that
 already runs `620.70.06` keeps it. Because `setup-gpu.sh` never downgrades, there
 is no automated driver rollback: to go back below the floor, replace the instance
-from the pinned AMI (Tier B) rather than reinstalling in place. A manual
-`nvidia-uninstall` + `.run` reinstall is a last-resort operator action, not an
-automated rollback (the `.run` payload is not bundled).
+from the pinned AMI (Tier B) rather than reinstalling in place. An in-place
+rollback is possible only if a 595 `.run` installer or the previous `nvidia-rpm`
+closure was preserved off-host before the upgrade (see §1.1); those artifacts
+are not bundled, so a manual `nvidia-uninstall` + preserved-595 reinstall is a
+last-resort operator action, not an automated rollback.
 
 ## 7. Known blockers / TODOs — CRITICAL
 

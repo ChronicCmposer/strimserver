@@ -92,7 +92,14 @@ The image stays driver-version-agnostic, but the **host** driver is a pinned
 contract: CUDA 13.5 requires `nvidia-open 620.70.06` (T4/T4G `sm_75`, GSP
 firmware required). The AMI pin selects a deterministic DLAMI image; it does
 **not** pin the installed driver, which `deploy/aws/setup-gpu.sh` enforces and
-fails closed on (see `deploy/aws/README.md` §1.1).
+fails closed on (see `deploy/aws/README.md` §1.1). Optional
+fabricmanager/persistenced packages are availability-gated and may be omitted
+with a warning; a staged prebuilt kmod must carry `nvidia.ko` while a staged
+`kmod-nvidia-open-dkms` must carry `dkms.conf` with `dkms` and the matching
+kernel-devel/headers present. The upgrade restores only units that were active
+before the drain (fabricmanager start failure is non-fatal; persistenced failure
+is fatal), and an in-place rollback requires a pre-upgrade 595 artifact
+preserved off-host.
 
 ### Controller API and behavior
 
@@ -922,7 +929,14 @@ Expected target characteristics:
   below-floor host is upgraded from an offline-staged, signature-verified RPM
   closure, with GPU holders drained, the module reloaded and verified against
   `/proc/driver/nvidia/version` (no reboot); an interrupted swap leaves a resume
-  marker for the next `setup-gpu.sh` run.
+  marker for the next `setup-gpu.sh` run. Optional fabricmanager/persistenced
+  packages are availability-gated and may be omitted with a warning; a staged
+  prebuilt kmod must carry `nvidia.ko` while a staged `kmod-nvidia-open-dkms`
+  must carry `dkms.conf` with `dkms` and matching kernel-devel/headers present.
+  Restore touches only units that were active before the drain (a fabricmanager
+  start failure is non-fatal; persistenced failure is fatal). An in-place
+  rollback needs a preserved pre-upgrade 595 `.run`/RPM artifact, otherwise the
+  instance is replaced (see `deploy/aws/README.md` §1.1).
 - Storage: the NVMe instance-store device is selected by model
   (`Amazon EC2 NVMe Instance Storage`; numeric first match when
   several exist), safety-checked, then reused or formatted `ext4`
