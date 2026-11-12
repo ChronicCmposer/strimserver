@@ -1,3 +1,10 @@
 runs/*/inbox/
 runs/*/logs/
-runs/*/state/
+runs/*/RUN.lock
+runs/*/state/*
+!runs/*/state/waves/
+!runs/*/state/lanes/
+runs/*/state/waves/*
+!runs/*/state/waves/*.md
+runs/*/state/lanes/*
+!runs/*/state/lanes/*.md

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os
+import re
+import shlex
 import subprocess
 import sys
 from urllib.parse import urlparse
@@ -61,11 +63,12 @@ def run_ssh_commands(hostname, username, port, commands):
         ssh_run(hostname, username, port, cmd, capture=False)
 
 
-def ssh_capture(hostname, username, port, cmd):
-    """Run a remote probe and return its trimmed stdout ('' on any failure).
+def ssh_capture_rc(hostname, username, port, cmd):
+    """Run a remote probe and return (returncode, trimmed stdout).
 
     Unlike ssh_run this never raises on a non-zero exit and never prints the
-    raw output: it is for read-only questions such as "is /mnt/nvme mounted?".
+    raw output. The exit status is preserved so safety probes never mistake a
+    dropped connection (255) or a missing tool for a successful empty result.
     """
     ssh_cmd = os.environ.get("SSH_CMD", "ssh")
     full_cmd = (ssh_cmd.split() + ssh_identity_flags()
@@ -77,28 +80,411 @@ def ssh_capture(hostname, username, port, cmd):
     except FileNotFoundError:
         print("Error: ssh client not found. Make sure OpenSSH is installed.", file=sys.stderr)
         sys.exit(1)
-    return (result.stdout or "").strip()
+    return (result.returncode, (result.stdout or "").strip())
+
+
+def ssh_capture(hostname, username, port, cmd):
+    """Compatibility wrapper: trimmed stdout only ('' on any failure)."""
+    return ssh_capture_rc(hostname, username, port, cmd)[1]
+
+
+NVME_MOUNT = "/mnt/nvme"
+INSTANCE_STORE_MODEL = "Amazon EC2 NVMe Instance Storage"
+NO_INSTANCE_STORE_MESSAGE = (
+    "no Amazon EC2 NVMe Instance Storage device found; "
+    "set NVME_DEVICE=/dev/nvmeXn1 explicitly"
+)
+
+_DEVICE_PATH_RE = re.compile(r"^/dev/[A-Za-z0-9._+/-]+$")
+_NVME_WHOLE_DISK_RE = re.compile(r"^/dev/nvme[0-9]+n[0-9]+$")
+_NVME_PARTITION_RE = re.compile(r"^/dev/nvme[0-9]+n[0-9]+p[0-9]+$")
+_NVME_NAME_RE = re.compile(r"^nvme([0-9]+)n([0-9]+)$")
 
 
 def parse_nvme_mode(argv):
     """'auto' (reuse an existing filesystem, else format), 'reuse', or 'format'."""
-    mode = "auto"
+    saw_format = False
+    saw_reuse = False
     for arg in argv[1:]:
+        if arg in ("--select-only", "--dry-run"):
+            continue
         if arg == "--no-format":
-            mode = "reuse"
+            saw_reuse = True
         elif arg == "--format":
-            mode = "format"
+            saw_format = True
         else:
             sys.exit(f"unknown argument: {arg} (expected --format or --no-format)")
-    return mode
+    if saw_format and saw_reuse:
+        sys.exit("--format and --no-format are mutually exclusive")
+    if saw_format:
+        return "format"
+    if saw_reuse:
+        return "reuse"
+    return "auto"
 
 
-def resolve_nvme_device():
-    """Device used when no interactive format prompt runs (NVME_DEVICE override)."""
-    dev = os.environ.get("NVME_DEVICE", "/dev/nvme1n1").strip() or "/dev/nvme1n1"
-    if not dev.startswith("/dev/"):
-        dev = "/dev/" + dev
-    return dev
+def normalize_model(model):
+    """Collapse whitespace and casefold so padded/tabbed probes compare equal."""
+    if model is None:
+        return ""
+    return " ".join(str(model).split()).casefold()
+
+
+def is_instance_store(model):
+    return normalize_model(model) == normalize_model(INSTANCE_STORE_MODEL)
+
+
+def _numeric_disk_key(name):
+    match = _NVME_NAME_RE.match(name)
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)))
+
+
+def select_instance_store_device(disks):
+    """Pick the numerically lowest whole-disk instance store from (name, model)."""
+    matches = []
+    for name, model in disks:
+        key = _numeric_disk_key(name)
+        if key is not None and is_instance_store(model):
+            matches.append((key, name))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0])
+    selected = matches[0][1]
+    extras = [name for _, name in matches[1:]]
+    if extras:
+        print(
+            "warning: multiple Amazon EC2 NVMe Instance Storage devices found; "
+            f"using /dev/{selected}. Unmounted: "
+            + ", ".join(f"/dev/{name}" for name in extras)
+            + ". Set NVME_DEVICE to choose a different one.",
+            file=sys.stderr,
+        )
+    return f"/dev/{selected}"
+
+
+def _reject_partition(path):
+    if _NVME_PARTITION_RE.match(path):
+        sys.exit(f"refusing: {path} is a partition; pass the whole disk")
+
+
+def validate_device_path(path):
+    """Reject metacharacters, traversal and partitions before any remote use."""
+    if not path:
+        sys.exit("refusing: an empty device path was given")
+    if ".." in path.split("/"):
+        sys.exit(f"refusing: {path} contains a path traversal component")
+    if not _DEVICE_PATH_RE.match(path):
+        sys.exit(f"refusing: {path} is not a valid device path")
+    _reject_partition(path)
+    return path
+
+
+def _normalize_device_candidate(value):
+    value = value.strip()
+    if not value:
+        sys.exit("refusing: an empty device path was given")
+    candidate = value if value.startswith("/dev/") else "/dev/" + value
+    validate_device_path(candidate)
+    return candidate
+
+
+def _realpath_device(hostname, username, port, candidate, probe):
+    rc, resolved = probe(
+        hostname, username, port, f"realpath -e {shlex.quote(candidate)}")
+    if rc != 0 or not resolved.strip():
+        sys.exit(f"refusing: {candidate} is not an existing block device")
+    return resolved.strip()
+
+
+def _require_whole_nvme_disk(hostname, username, port, path, probe, display):
+    _reject_partition(path)
+    if not _NVME_WHOLE_DISK_RE.match(path):
+        sys.exit(f"refusing: {display} is not a whole nvme disk; pass the whole disk")
+    rc, _ = probe(hostname, username, port, f"test -b {shlex.quote(path)}")
+    if rc != 0:
+        sys.exit(f"refusing: {path} is not an existing block device")
+    return path
+
+
+def _resolve_override(hostname, username, port, value, probe):
+    candidate = _normalize_device_candidate(value)
+    resolved = _realpath_device(hostname, username, port, candidate, probe)
+    return _require_whole_nvme_disk(
+        hostname, username, port, resolved, probe, value)
+
+
+def _parse_nvme_id_ctrl_model(stdout):
+    for line in stdout.splitlines():
+        match = re.match(r"^\s*mn\s*:\s*(.*?)\s*$", line, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _device_model(hostname, username, port, name, probe):
+    """Model via the nvme CLI, falling back to sysfs on absence/failure/mismatch."""
+    rc, stdout = probe(
+        hostname, username, port, f"nvme id-ctrl {shlex.quote('/dev/' + name)}")
+    if rc == 0:
+        model = _parse_nvme_id_ctrl_model(stdout)
+        if is_instance_store(model):
+            return model
+    rc, stdout = probe(
+        hostname, username, port,
+        f"cat {shlex.quote('/sys/block/' + name + '/device/model')}")
+    if rc == 0:
+        return stdout.strip()
+    return ""
+
+
+def resolve_nvme_device(hostname, username, port, probe):
+    """NVME_DEVICE override, else the numeric first instance-store whole disk."""
+    override = os.environ.get("NVME_DEVICE", "").strip()
+    if override:
+        return _resolve_override(hostname, username, port, override, probe)
+
+    rc, stdout = probe(hostname, username, port, "lsblk -dnrno NAME,TYPE,MODEL")
+    if rc != 0:
+        sys.exit("refusing: could not verify candidate disks (lsblk failed)")
+    disks = []
+    for line in stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 2 or fields[1] != "disk":
+            continue
+        name = fields[0]
+        if _numeric_disk_key(name) is None:
+            continue
+        model = fields[2].strip() if len(fields) > 2 else ""
+        if not is_instance_store(model):
+            model = _device_model(hostname, username, port, name, probe)
+        disks.append((name, model))
+    return select_instance_store_device(disks)
+
+
+def _parse_key_value_rows(stdout):
+    return [dict(re.findall(r'(\w+)="([^"]*)"', line))
+            for line in stdout.splitlines()
+            if re.findall(r'(\w+)="([^"]*)"', line)]
+
+
+def _strip_btrfs_suffix(source):
+    return re.sub(r"\[[^\]]*\]$", "", source.strip())
+
+
+def _basename(device):
+    return os.path.basename(device.rstrip("/"))
+
+
+def _root_disk_names(hostname, username, port, probe, label):
+    """Every disk/partition name from / to its whole-disk ancestor."""
+    rc, root_source = probe(
+        hostname, username, port, "findmnt -n -o SOURCE --mountpoint /")
+    if rc != 0 or not root_source.strip():
+        sys.exit(f"refusing: could not verify {label} (findmnt root failed)")
+    root_source = _strip_btrfs_suffix(root_source)
+    if root_source.startswith("/dev/"):
+        rc, resolved = probe(
+            hostname, username, port, f"realpath -e {shlex.quote(root_source)}")
+        if rc == 0 and resolved.strip():
+            root_source = resolved.strip()
+    rc, chain = probe(
+        hostname, username, port,
+        f"lsblk -P -s -n -o NAME,PKNAME {shlex.quote(root_source)}")
+    if rc != 0:
+        sys.exit(f"refusing: could not verify {label} (lsblk root ancestors failed)")
+    names = {_basename(root_source)}
+    for row in _parse_key_value_rows(chain):
+        if row.get("NAME"):
+            names.add(row["NAME"])
+        if row.get("PKNAME"):
+            names.add(row["PKNAME"])
+    return names
+
+
+def assert_safe_nvme_target(hostname, username, port, dev, probe):
+    """Fail closed unless `dev` is an unmounted, unpartitioned non-root disk."""
+    rc, _ = probe(hostname, username, port, f"test -b {shlex.quote(dev)}")
+    if rc != 0:
+        sys.exit(f"refusing: {dev} is not an existing block device")
+
+    root_names = _root_disk_names(hostname, username, port, probe, dev)
+    if _basename(dev) in root_names:
+        sys.exit(f"refusing to format {dev}: it backs the root filesystem")
+
+    rc, target = probe(
+        hostname, username, port,
+        f"findmnt -n -o TARGET --source {shlex.quote(dev)}")
+    if rc == 0 and target.strip():
+        sys.exit(f"refusing to format {dev}: it is mounted at {target.strip()}")
+    if rc not in (0, 1):
+        sys.exit(f"refusing: could not verify {dev} (findmnt target failed)")
+
+    rc, rows_out = probe(
+        hostname, username, port,
+        f"lsblk -P -n -o MOUNTPOINT,NAME,TYPE,FSTYPE,PTTYPE {shlex.quote(dev)}")
+    if rc != 0:
+        sys.exit(f"refusing: could not verify {dev} (lsblk failed)")
+    children = []
+    for index, row in enumerate(_parse_key_value_rows(rows_out)):
+        name = row.get("NAME", "")
+        if row.get("MOUNTPOINT"):
+            sys.exit(
+                f"refusing to format {dev}: it is mounted at {row['MOUNTPOINT']}")
+        if index > 0 and name:
+            children.append(name)
+        elif row.get("PTTYPE") and name and name != _basename(dev):
+            children.append(name)
+        elif row.get("PTTYPE") and not children:
+            children.append(name or _basename(dev))
+    if children:
+        sys.exit(f"refusing to format {dev}: it has partitions "
+                 f"({', '.join(dict.fromkeys(children))})")
+
+    rc, swap_out = probe(
+        hostname, username, port, "swapon --show=NAME --noheadings")
+    if rc != 0:
+        sys.exit(f"refusing: could not verify {dev} (swapon failed)")
+    swapped = {_basename(line.strip())
+               for line in swap_out.splitlines() if line.strip()}
+    if _basename(dev) in swapped:
+        sys.exit(f"refusing to format {dev}: it is in use as swap")
+
+
+def _parse_findmnt_source_fstype(stdout):
+    parts = stdout.strip().split(None, 1)
+    source = parts[0] if parts else ""
+    fstype = parts[1].strip() if len(parts) > 1 else ""
+    return source, fstype
+
+
+def _prompt_for_format_device(hostname, username, port, selected, probe, input_fn):
+    if input_fn is input and not sys.stdin.isatty():
+        sys.exit("refusing: --format requires an interactive terminal")
+    try:
+        answer = input_fn(f"Enter the device to format [{selected}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        sys.exit("refusing: no device was entered for --format")
+    if not answer:
+        return selected
+    candidate = _normalize_device_candidate(answer)
+    resolved = _realpath_device(hostname, username, port, candidate, probe)
+    return _require_whole_nvme_disk(
+        hostname, username, port, resolved, probe, answer)
+
+
+def _confirm_destruction(dev, input_fn):
+    if input_fn is input and not sys.stdin.isatty():
+        sys.exit("refusing: --format requires an interactive confirmation")
+    try:
+        answer = input_fn(
+            f"Type 'yes' to destroy the filesystem on {dev}: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        sys.exit("refusing: --format was not confirmed")
+    if answer not in ("", "yes", "y"):
+        sys.exit("refusing: --format was not confirmed")
+
+
+def _mount_commands(dev, username):
+    return [
+        f"sudo mkdir -p {shlex.quote(NVME_MOUNT)}",
+        f"sudo mount {shlex.quote(dev)} {shlex.quote(NVME_MOUNT)}",
+        f"sudo chown {shlex.quote(username)}:{shlex.quote(username)} "
+        f"{shlex.quote(NVME_MOUNT)}",
+    ]
+
+
+def _format_commands(dev, username):
+    return [
+        f"sudo mkfs.ext4 -F {shlex.quote(dev)}",
+        *_mount_commands(dev, username),
+    ]
+
+
+def _run_remote(hostname, username, port, cmd):
+    """Default command runner for prepare_nvme: raises on a non-zero exit."""
+    ssh_run(hostname, username, port, cmd, capture=False)
+
+
+def prepare_nvme(hostname, username, port, mode,
+                 probe=None, run=None, input_fn=input):
+    """Prepare /mnt/nvme non-destructively, after a fail-closed safety check."""
+    probe = ssh_capture_rc if probe is None else probe
+    run = _run_remote if run is None else run
+    nvme_mount = NVME_MOUNT
+
+    rc, mounted = probe(
+        hostname, username, port,
+        f"findmnt -n -o SOURCE,FSTYPE --mountpoint {shlex.quote(nvme_mount)}")
+    if rc == 0 and mounted.strip():
+        source, fstype = _parse_findmnt_source_fstype(mounted)
+        if mode == "format":
+            sys.exit(f"refusing to format: {nvme_mount} is already mounted "
+                     f"from {source}")
+        if fstype != "ext4":
+            sys.exit(f"refusing: {nvme_mount} is mounted from {source} with "
+                     f"{fstype or 'an unknown filesystem'}; expected ext4")
+        root_names = _root_disk_names(hostname, username, port, probe, nvme_mount)
+        if _basename(source) in root_names:
+            sys.exit(f"refusing to keep {nvme_mount}: {source} backs the root "
+                     "filesystem")
+        model = _device_model(hostname, username, port, _basename(source), probe)
+        if not is_instance_store(model):
+            print(f"warning: {nvme_mount} is mounted from {source}, which is not "
+                  "an Amazon EC2 NVMe Instance Storage device.", file=sys.stderr)
+        print(f"\n{nvme_mount} is already mounted from {source} ({fstype}); "
+              "keeping it (NVME_DEVICE is ignored, no mkfs, no mount).\n")
+        return
+    if rc not in (0, 1):
+        sys.exit(f"refusing: could not verify {nvme_mount} (findmnt failed)")
+
+    rc, entries = probe(
+        hostname, username, port,
+        f"ls -A {shlex.quote(nvme_mount)} 2>/dev/null || true")
+    if rc == 0 and entries.strip():
+        sys.exit(f"refusing: {nvme_mount} is an unmounted non-empty directory; "
+                 "back up or move its contents before running setup")
+
+    dev = resolve_nvme_device(hostname, username, port, probe)
+    if dev is None:
+        sys.exit(NO_INSTANCE_STORE_MESSAGE)
+
+    if mode == "format":
+        dev = _prompt_for_format_device(
+            hostname, username, port, dev, probe, input_fn)
+
+    assert_safe_nvme_target(hostname, username, port, dev, probe)
+
+    rc, fs_value = probe(
+        hostname, username, port, f"blkid -o value -s TYPE {shlex.quote(dev)}")
+    if rc == 0:
+        fs_type = fs_value.strip()
+    elif rc == 2:
+        fs_type = ""
+    else:
+        sys.exit(f"refusing: could not verify {dev} (blkid failed)")
+
+    if mode == "reuse":
+        if not fs_type:
+            sys.exit(f"--no-format requested but {dev} has no filesystem to reuse")
+        commands = _mount_commands(dev, username)
+    elif mode == "format":
+        print(f"\n*** WIPING {dev}: an explicit --format was requested. ***\n")
+        _confirm_destruction(dev, input_fn)
+        rc, _ = probe(hostname, username, port, f"test -b {shlex.quote(dev)}")
+        if rc != 0:
+            sys.exit(f"refusing: {dev} disappeared before mkfs")
+        commands = _format_commands(dev, username)
+    elif fs_type:
+        print(f"\nReusing the existing {fs_type} filesystem on {dev}.\n")
+        commands = _mount_commands(dev, username)
+    else:
+        print(f"\nNo filesystem found on {dev}; formatting it.\n")
+        commands = _format_commands(dev, username)
+
+    for command in commands:
+        run(hostname, username, port, command)
 
 
 def scp_to_remote(local_path, hostname, username, port, remote_path):
@@ -358,15 +744,32 @@ def offer_exec_start(host, user):
         print(f"could not exec {start}: {e}")
 
 
-if __name__ == "__main__":
-    HOST = os.environ.get("SSH_HOST", "strimserver")
-    USER = os.environ.get("SSH_USER", "ec2-user")
-    PORT = int(os.environ.get("SSH_PORT", "22"))
-    SHA256 = os.environ.get("DEPLOYMENT_SHA256", "").strip()
+def select_only_nvme(hostname, username, port, probe):
+    """Resolve and safety-check the target, then stop before any mutation."""
+    probe = ssh_capture_rc if probe is None else probe
+    dev = resolve_nvme_device(hostname, username, port, probe)
+    if dev is None:
+        sys.exit(NO_INSTANCE_STORE_MESSAGE)
+    assert_safe_nvme_target(hostname, username, port, dev, probe)
+    model = _device_model(hostname, username, port, _basename(dev), probe)
+    rc, size = probe(hostname, username, port,
+                     f"lsblk -dnrno SIZE {shlex.quote(dev)}")
+    print(f"selected device: {dev}")
+    print(f"model: {model or 'unknown'}")
+    print(f"size: {size.strip() if rc == 0 else 'unknown'}")
+    print("safety: safe (not the root disk, unmounted, no partitions, not swap)")
 
-    SRC, DEPLOYMENT = resolve_source()
-    REMOTE_TAR = f"/mnt/nvme/{DEPLOYMENT}"
-    scheme = urlparse(SRC).scheme  # 's3', 'https', 'http', or '' for a local path
+
+def main(argv=None, env=None, probe=None, run=None, input_fn=input):
+    argv = sys.argv if argv is None else argv
+    env = os.environ if env is None else env
+    HOST = env.get("SSH_HOST", "strimserver")
+    USER = env.get("SSH_USER", "ec2-user")
+    PORT = int(env.get("SSH_PORT", "22"))
+    SHA256 = env.get("DEPLOYMENT_SHA256", "").strip()
+
+    select_only = any(arg in ("--select-only", "--dry-run") for arg in argv[1:])
+    nvme_mode = parse_nvme_mode(argv)
 
     # A relaunch can reuse the target's public IP or DNS name, leaving a stale
     # key in the dedicated store. Drop it (and, when the instance id is cheaply
@@ -380,49 +783,21 @@ if __name__ == "__main__":
               file=sys.stderr)
     bind_target_instance(HOST)
 
+    if select_only:
+        select_only_nvme(HOST, USER, PORT, probe)
+        return
+
+    SRC, DEPLOYMENT = resolve_source()
+    REMOTE_TAR = f"/mnt/nvme/{DEPLOYMENT}"
+    scheme = urlparse(SRC).scheme  # 's3', 'https', 'http', or '' for a local path
+
     # 1) prepare /mnt/nvme - non-destructive by default.
     #    * already mounted                -> keep it untouched
     #    * --format (explicit)            -> prompt, then mkfs + mount (wipe)
     #    * --no-format                    -> reuse only; error without a filesystem
     #    * auto (default)                 -> reuse an existing filesystem, else mkfs
-    nvme_mode = parse_nvme_mode(sys.argv)
-    nvme_mount = "/mnt/nvme"
-    if ssh_capture(HOST, USER, PORT, f"findmnt -n {nvme_mount}"):
-        print(f"\n{nvme_mount} is already mounted; keeping it (no mkfs, no mount).\n")
-    elif nvme_mode == "format":
-        r = ssh_run(HOST, USER, PORT, "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT", capture=True)
-        print("\nRemote disks:\n")
-        print(r.stdout)
-        dev = input("Enter the device to format [/dev/nvme1n1]: ").strip() or "/dev/nvme1n1"
-        if not dev.startswith("/dev/"):
-            dev = "/dev/" + dev
-        print(f"\n*** WIPING {dev}: an explicit --format was requested. ***\n")
-        run_ssh_commands(HOST, USER, PORT, [
-            f"sudo mkfs.ext4 -F {dev}",
-            f"sudo mkdir -p {nvme_mount}",
-            f"sudo mount {dev} {nvme_mount}",
-            f"sudo chown {USER}:{USER} {nvme_mount}",
-        ])
-    else:
-        dev = resolve_nvme_device()
-        fs_type = ssh_capture(HOST, USER, PORT, f"blkid -o value -s TYPE {dev} || true")
-        if nvme_mode == "reuse" and not fs_type:
-            sys.exit(f"--no-format requested but {dev} has no filesystem to reuse")
-        if fs_type:
-            print(f"\nReusing the existing {fs_type} filesystem on {dev}.\n")
-            run_ssh_commands(HOST, USER, PORT, [
-                f"sudo mkdir -p {nvme_mount}",
-                f"sudo mount {dev} {nvme_mount}",
-                f"sudo chown {USER}:{USER} {nvme_mount}",
-            ])
-        else:
-            print(f"\nNo filesystem found on {dev}; formatting it.\n")
-            run_ssh_commands(HOST, USER, PORT, [
-                f"sudo mkfs.ext4 -F {dev}",
-                f"sudo mkdir -p {nvme_mount}",
-                f"sudo mount {dev} {nvme_mount}",
-                f"sudo chown {USER}:{USER} {nvme_mount}",
-            ])
+    prepare_nvme(HOST, USER, PORT, nvme_mode,
+                 probe=probe, run=run, input_fn=input_fn)
 
     # 2) place the deployment tar at REMOTE_TAR, by source type
     if scheme == "s3":
@@ -482,3 +857,6 @@ if __name__ == "__main__":
     # 4) offer to start the service, replacing this process (execve)
     offer_exec_start(HOST, USER)
 
+
+if __name__ == "__main__":
+    main()

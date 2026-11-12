@@ -134,6 +134,20 @@ sh_test(
     ],
 )
 
+# setup_strimserver_test.py covers instance-store selection, safety checks,
+# NVME_DEVICE override validation and prepare_nvme ordering. It is pure stdlib
+# and injects probe/runner callables, so it needs no live SSH or AWS; the
+# sh_test wrapper is only the Bazel entrypoint.
+sh_test(
+    name = "setup_strimserver_test",
+    srcs = ["setup_strimserver_test.sh"],
+    data = [
+        "known_hosts.py",
+        "setup_strimserver",
+        "setup_strimserver_test.py",
+    ],
+)
+
 # aws_profile_test.sh asserts every AWS-invoking tooling script pins the
 # project-scoped [strimserver] profile AND never calls the AWS CLI directly:
 # every call must route through the shared aws_strim wrapper (a bare

@@ -306,10 +306,73 @@ default asset/sha when no source is provided. Explicit operator values in
 
 ### 4.4 On-box setup (`setup_strimserver` → `deploy.sh`)
 
-`setup_strimserver` lists the block devices and prompts for the NVMe device to
-format (default `/dev/nvme1n1`; destructive). It formats ext4, mounts
-`/mnt/nvme`, places the bundle from `DEPLOYMENT_SRC` (`s3://`, `https://`, or a
-local file), optionally verifies `DEPLOYMENT_SHA256`, transfers the Twitch key,
+`setup_strimserver` selects the NVMe instance-store device automatically and
+never assumes a device index. It reads `lsblk -dnrno NAME,TYPE,MODEL`, keeps
+whole disks (`TYPE=disk`) whose model normalizes (whitespace-collapsed,
+case-folded) to `Amazon EC2 NVMe Instance Storage`, and falls back to
+`nvme id-ctrl` / `/sys/block/<dev>/device/model` when the model is missing from
+`lsblk`. If more than one instance-store disk is present it sorts candidates
+numerically (`nvme2n1` before `nvme10n1`) and uses the lowest one, warning that
+the others remain unmounted and that `NVME_DEVICE` can pick one explicitly.
+`/dev/nvme1n1` is **not** a default; on the reference host it is the root EBS
+disk.
+
+`NVME_DEVICE` is an optional override:
+
+- An absolute path is preferred (`NVME_DEVICE=/dev/nvme0n1`).
+- A bare name is normalized to `/dev/<name>` (`NVME_DEVICE=nvme0n1`).
+- Empty or whitespace-only means "unset" and re-enables model selection.
+- The override wins over model selection but is still canonicalized
+  (`realpath -e`), required to be an existing whole NVMe disk, and passed
+  through the same safety check. Overrides are not model-verified.
+
+The default (auto) path is non-destructive: it reuses an existing ext4
+filesystem and mounts it, formatting ext4 only when the selected device has no
+filesystem. Only `--format` prompts and is destructive; `--no-format` reuses
+only and fails if the device has no filesystem. `--select-only` (alias
+`--dry-run`) resolves and safety-checks the device, prints `selected device:`,
+`model:`, `size:`, and a `safety:` verdict, then exits before any download,
+secret transfer, mount, or `mkfs`. It does not require `DEPLOYMENT_SRC`.
+
+Before any `blkid`, `mount`, or `mkfs`, `setup_strimserver` refuses to touch a
+target that:
+
+- backs the root filesystem (resolved through partitions/LVM/RAID/btrfs);
+- is already mounted, or has any mounted child;
+- has any partition or child device, or a non-empty partition table;
+- is in use as swap;
+- is not an existing block device.
+
+Safety probes are fail-closed: a probe transport/parse failure is a refusal,
+not a pass. Representative exact failure texts:
+
+| Condition | Message |
+|---|---|
+| No instance store found | `no Amazon EC2 NVMe Instance Storage device found; set NVME_DEVICE=/dev/nvmeXn1 explicitly` |
+| Root disk | `refusing to format <dev>: it backs the root filesystem` |
+| Mounted | `refusing to format <dev>: it is mounted at <mountpoint>` |
+| Partitioned | `refusing to format <dev>: it has partitions (<names>)` |
+| Swap | `refusing to format <dev>: it is in use as swap` |
+| Not a block device | `refusing: <dev> is not an existing block device` |
+| Partition passed | `refusing: <dev> is a partition; pass the whole disk` |
+| Probe failure | `refusing: could not verify <dev> (<probe> failed)` |
+| Malformed override | `refusing: <path> is not a valid device path` |
+
+`/mnt/nvme` handling:
+
+- Already mounted ext4 from a non-root source: kept untouched (`NVME_DEVICE` is
+  ignored, no `mkfs`, no `mount`), with a warning when the source is not the
+  instance store. A mounted EBS-backed `/mnt/nvme` is therefore kept; migration
+  is explicit (see §6).
+- Mounted non-ext4: refused, naming the occupying source.
+- Unmounted but non-empty directory: refused; back up or move the contents.
+
+`--format` refuses when `/mnt/nvme` is already mounted, requires an interactive
+terminal, prints the selected device and a `WIPING` banner, and requires an
+explicit confirmation before `mkfs.ext4`. `--format` and `--no-format` are
+mutually exclusive. It then places the bundle from `DEPLOYMENT_SRC` (`s3://`,
+`https://`, or a local file), optionally verifies `DEPLOYMENT_SHA256`, transfers
+the Twitch key,
 the Namecheap Dynamic DNS password (`DDNS_PASSWORD` / `DDNS_PASSWORD_FILE` in
 `.env`, mirroring the Twitch key flow), and the Dynamic DNS settings
 (`ENABLE_DDNS` / `DDNS_HOST` / `DDNS_DOMAIN` in `.env`) as `0600` files,
@@ -478,6 +541,19 @@ assembly controller; `image_smoke_test` exercises the assembled image layout.
 | Control plane | liveness + status | `curl -s localhost:4000/healthz`, `.../status`, `ws://.../subscribe` |
 | Host GPU | driver, temps, ffmpeg attach | `nvidia-smi`; `sudo systemctl status nvidia-persistenced` |
 | Containerd | containers / tasks in the namespace | `sudo ctr -n strimserver containers list`; `sudo ctr -n strimserver tasks list` |
+| NVMe scratch | mount source, free space | `findmnt -n -o SOURCE,FSTYPE /mnt/nvme`; `df -h /mnt/nvme` |
+
+**NVMe / instance store:** `/mnt/nvme` is instance-store scratch and the
+containerd root/state. Everything under it — containerd root/state,
+`video-files`, logs, the staged `nvidia-rpm` closure, the deployment bundle, and
+the SRT passphrase — is lost when the instance is stopped or terminated. A new
+host generates a new SRT passphrase, so the encoder must be reconfigured (see
+§4.4). The auto setup path is non-destructive and never migrates data; a mounted
+EBS-backed `/mnt/nvme` is kept unless the operator explicitly migrates it (stop
+services, back up `config/strimserver.env`, the SRT passphrase, logs, and any
+video files, unmount, then re-run with `--format`). `setup_strimserver` is an
+operator-side script obtained from the git tag, not a member of the deployment
+tar.
 
 **Rollback:** the deployment tar is fully self-contained — the three image tars
 plus config/scripts live inside it, with no external runtime dependencies. To

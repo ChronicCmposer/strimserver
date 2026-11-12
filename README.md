@@ -182,8 +182,13 @@ gracefully on shutdown.
   `strimserver-streamdeck-plugin.tar.gz` on S3. It is a separate
   artifact — `make package` never includes it inside
   `strimserver-deployment-go-amd64.tar`.
-- EC2 setup automation for formatting and mounting NVMe
-  ephemeral storage at `/mnt/nvme`, enforcing/upgrading the host
+- EC2 setup automation that selects the NVMe ephemeral device by
+  model (`Amazon EC2 NVMe Instance Storage`; numeric first match
+  when several exist), refuses root/mounted/partitioned/swap
+  targets before any mount or `mkfs`, and mounts it
+  non-destructively at `/mnt/nvme` (see `deploy/aws/README.md`
+  §4.4). `/dev/nvme1n1` is not a default; `NVME_DEVICE` is an
+  optional, safety-checked override. It enforces/upgrades the host
   GPU driver to the pinned `620.70.06` floor (fail-closed, no
   reboot; see `deploy/aws/lib/nvidia.sh`), installing the systemd
   unit, importing the OCI images into containerd, generating the
@@ -918,10 +923,18 @@ Expected target characteristics:
   closure, with GPU holders drained, the module reloaded and verified against
   `/proc/driver/nvidia/version` (no reboot); an interrupted swap leaves a resume
   marker for the next `setup-gpu.sh` run.
-- Storage: NVMe ephemeral device formatted as `ext4` and
-  mounted at `/mnt/nvme` by `deploy/aws/setup_strimserver`.
+- Storage: the NVMe instance-store device is selected by model
+  (`Amazon EC2 NVMe Instance Storage`; numeric first match when
+  several exist), safety-checked, then reused or formatted `ext4`
+  and mounted at `/mnt/nvme` by `deploy/aws/setup_strimserver`.
+  `/dev/nvme1n1` is not a default, and root/mounted/partitioned/
+  swap disks are refused (see `deploy/aws/README.md` §4.4).
 - Runtime: containerd with its root and state directories
-  moved under `/mnt/nvme`.
+  moved under `/mnt/nvme`. `/mnt/nvme` is instance-store scratch:
+  containerd state, `video-files`, logs, the staged `nvidia-rpm`
+  closure, the bundle, and the SRT passphrase are lost on
+  stop/terminate; a new host generates a new passphrase and the
+  encoder must be reconfigured.
 - Network access:
   - inbound SSH from the operator machine;
   - inbound SRT ingest, default UDP port `9000`, from the
@@ -1049,9 +1062,30 @@ script from the local machine:
 deploy/aws/setup_strimserver
 ```
 
-`setup_strimserver` will display the remote block devices
-and prompt for the NVMe device to format. The default is
-`/dev/nvme1n1`. This is destructive to the selected device.
+`setup_strimserver` selects the NVMe instance-store device by model
+(`Amazon EC2 NVMe Instance Storage`) and does not prompt. Multiple
+instance-store disks are resolved numerically to the lowest device and
+a warning names the others; `/dev/nvme1n1` is not a default. The
+default auto path is non-destructive — it reuses an existing ext4
+filesystem, formatting only when the selected blank device has none —
+and it refuses any target that backs the root filesystem, is mounted,
+has partitions, or is in use as swap. Use `NVME_DEVICE=/dev/nvmeXn1`
+(absolute preferred; bare names normalized; empty means unset) to
+override selection; the override is still safety-checked. Run
+`deploy/aws/setup_strimserver --select-only` to print the selected
+device, model, size, and safety verdict without touching the host.
+Only `--format` prompts and is destructive. See `deploy/aws/README.md`
+§4.4 for the full refusal list and exact failure texts.
+
+`/mnt/nvme` is instance-store scratch: containerd root/state,
+`video-files`, logs, the staged `nvidia-rpm` closure, the bundle, and
+the SRT passphrase are lost when the instance is stopped or
+terminated. A new host generates a new passphrase, so the encoder
+must be reconfigured. The auto path never migrates: a mounted
+EBS-backed `/mnt/nvme` is kept unless you explicitly migrate it.
+`setup_strimserver` is obtained from the git tag, not a deployment
+tar.
+
 It then places the deployment bundle on the box (HTTPS
 download, S3 pull, or scp upload, per `DEPLOYMENT_SRC`),
 unpacks it, and runs `deploy.sh`, which stages config/bin/video-file directories
