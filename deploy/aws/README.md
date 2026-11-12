@@ -17,7 +17,7 @@ the production cutover — read it before any arm64 launch.
 | CPU ISA | x86_64 | arm64, armv8.2-a (Neoverse N1) |
 | GPU / gencode | T4 `sm_75` (L4 `sm_89` on g6) | T4G `sm_75` — same gencode as T4 |
 | AMI | Pinned x86_64 AL2023 NVIDIA DLAMI 20261106 (`DEFAULT_AMI_ID`, us-east-2) — **pins the AMI, not the installed driver** (see §1.1) | arm64 AL2023 NVIDIA DLAMI via the SSM float `.../arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id` — also does not pin the installed driver |
-| Driver (installed) | `nvidia-open 620.70.06` floor, enforced by `setup-gpu.sh` | same `620.70.06` floor via `nvidia-open-620.70.06-1.amzn2023.noarch` (arm64 caveat in §1.1) |
+| Driver (installed) | `nvidia-open 620.70.06` floor, enforced by `setup-gpu.sh`; the staged-version validator covers `kmod-nvidia-open*` and exempts only the policy-only `nvidia-driver-selinux` (see §1.1) | same `620.70.06` floor via `nvidia-open-620.70.06-1.amzn2023.noarch` (arm64 caveat in §1.1) |
 | Controller in image | Go controller (the oracle), pure-Go static `linux/amd64` | Go controller (the oracle), pure-Go static `linux/arm64`; the alternate asm build (`//core/controller/alternate/asm:controller_asm`) is explicit/manual |
 
 ### 1.1 GPU driver floor contract
@@ -83,10 +83,13 @@ the host without a usable driver:
    (backup -> rename -> drop backup).
 4. **Versionlock caveat:** `/etc/dnf/plugins/versionlock.list` commonly pins
    `nvidia-fabricmanager`/`libnvidia-nscq` at the old branch. Before staging,
-   `lib/nvidia.sh` backs the file up, temporarily removes the
-   `nvidia-fabricmanager`/`nvidia-persistenced` locks, asserts every staged
-   `nvidia-*`/`libnvidia-*` RPM reports `620.70.06`, and restores the original
-   file from an EXIT trap. Do not hand-edit the lock file during an upgrade.
+   `lib/nvidia.sh` backs the file up and temporarily removes the
+   `nvidia-fabricmanager`/`nvidia-persistenced` locks. The staged-version
+   validator (below) then asserts every staged driver payload — `nvidia-*`,
+   `libnvidia-*`, and `kmod-nvidia-open*` — reports `%{VERSION}` `620.70.06`,
+   exempting only the policy-only `nvidia-driver-selinux`. The original file is
+   restored from an EXIT trap and explicitly on validator failure; do not
+   hand-edit the lock file during an upgrade.
 5. **Resume marker:** the first destructive action writes
    `/var/lib/strimserver/driver-upgrade.state`. The marker records whether
    fabricmanager and persistenced were active before the drain (and whether the
@@ -120,6 +123,37 @@ deploy time; the RPM payload itself is staged locally before removal so an
 interrupted install is recoverable from `/mnt/nvme/nvidia-rpm`. A stage that
 fails validation **before the swap** leaves the host on its existing driver
 (595 on the reference host); the old driver is never uninstalled first.
+
+#### Staged-version validation
+
+Before the swap, `nvidia__assert_staged_versions` reads each staged RPM's
+`%{NAME}`, `%{VERSION}`, and `%{ARCH}` from its own header and enforces the
+driver-version contract:
+
+- **Coverage.** The validator globs `nvidia-*.rpm`, `libnvidia-*.rpm`, and
+  `kmod-nvidia-*.rpm` (which includes `kmod-nvidia-open*`), so
+  `kmod-nvidia-open*` is version-checked and a non-620 kernel-module RPM cannot
+  slip through staging.
+- **Floor.** Every staged driver payload must report `%{VERSION}` exactly
+  `620.70.06`. Release and epoch are intentionally **not** asserted; a
+  same-version, different-release RPM passes.
+- **Single exemption.** `nvidia-driver-selinux` (the SELinux policy module) is
+  the only exact-name exemption. It must be `noarch`, policy-only, and its
+  `rpm -qlp` listing must
+  contain no `/lib/modules/**/*.ko` and no `/libnvidia*.so`. Near-miss names
+  (`nvidia-driver-selinux-devel`, `nvidia-driver-selinux-extra`,
+  `nvidia-driver-selinux.x86_64`) are **not** exempt and are asserted against
+  the floor.
+- **Zero-driver stage.** A stage with no asserted driver RPM fails, even when an
+  exempt policy package is present.
+- **Fail closed.** Unreadable or non-regular staged paths, nonzero `rpm` exits,
+  and empty/`(none)`/malformed header fields fail closed with an
+  `nvidia: ERROR [closure]` line naming the path and stating that no driver
+  action was taken.
+
+On any validator failure inside `nvidia__stage_closure`, the original
+`/etc/dnf/plugins/versionlock.list` is restored explicitly (the EXIT trap is
+defense in depth), and no `*.nvidia-upgrade.*` backup should remain.
 
 #### Staging directory access
 
@@ -163,6 +197,13 @@ the deploy user can traverse the stage. Then confirm the printed stage directory
 is `0755` and `namei -l` shows no permission denial. The failure text from a bad
 stage is the same one DNF-success misdiagnosis produced in the field; treat it
 as a permissions/path problem, not a DNF/`--destdir` problem.
+
+**Acceptance runs on the host, from an extracted bundle.** For release or
+cutover acceptance, upload and extract the candidate bundle on the host and run
+stage-only there. Do **not** export `NVIDIA_STAGE_ONLY=1` locally before
+`setup_strimserver`: `setup_strimserver` runs `deploy.sh`, which invokes
+`setup-gpu.sh` with no arguments, so the variable is not forwarded and the run
+would perform the full destructive upgrade instead of a stage-only probe.
 
 **Rollback artifact requirement:** because the 595 branch is not in the CUDA
 repository, an in-place rollback needs a **preserved pre-upgrade artifact** — the
@@ -556,11 +597,16 @@ and installs the matching generated unit.
 ```sh
 nvidia-smi --query-gpu=driver_version,compute_cap --format=csv,noheader
 rpm -q nvidia-open                    # amd64: nvidia-open-3:620.70.06-1.el9
+rpm -qa 'kmod-nvidia-open*' 'nvidia-driver-selinux'   # validator-covered / exempt
 cat /proc/driver/nvidia/version
 ls -l /usr/lib64/libnvidia-encode.so.1   # NVENC userspace
 sudo test -f /lib/firmware/nvidia/620.70.06/gsp_tu10x.bin   # GSP firmware present
 sudo systemctl status nvidia-persistenced
 ```
+
+`kmod-nvidia-open*` is covered by the staged-version validator and must report
+`620.70.06`; `nvidia-driver-selinux` is the one exemption, expected `noarch` and
+policy-only (see §1.1, *Staged-version validation*).
 
 **Controller:**
 
@@ -632,6 +678,7 @@ assembly controller; `image_smoke_test` exercises the assembled image layout.
 | Containerd | containers / tasks in the namespace | `sudo ctr -n strimserver containers list`; `sudo ctr -n strimserver tasks list` |
 | NVMe scratch | mount source, free space | `findmnt -n -o SOURCE,FSTYPE /mnt/nvme`; `df -h /mnt/nvme` |
 | Driver stage | leaf/parent readable and traversable | `sudo namei -l /mnt/nvme/nvidia-rpm`; `sudo stat -c '%a %U:%G' /mnt/nvme/nvidia-rpm` |
+| Driver version | staged validator contract (`%{VERSION}` = `620.70.06`; `kmod-nvidia-open*` covered; `nvidia-driver-selinux` exempt) | `rpm -q nvidia-open`; `rpm -qa 'kmod-nvidia-open*' 'nvidia-driver-selinux'` |
 
 **NVMe / instance store:** `/mnt/nvme` is instance-store scratch and the
 containerd root/state. Everything under it — containerd root/state,
@@ -650,12 +697,18 @@ host is never a durable rollback artifact.
 **Staging preflight:** before any drain/uninstall/install, run the read-only
 stage-only mode as the deploying user (`NVIDIA_STAGE_ONLY=1 ./setup-gpu.sh` or
 `./setup-gpu.sh --stage-only`, **not** under `sudo`) and confirm the stage leaf
-is `0755` and `namei -l /mnt/nvme/nvidia-rpm` shows no permission denial. A
-stage that fails validation **before the swap** leaves the host on its existing
-driver (595 on the reference host); do not manually uninstall or reboot to
-"retry". DNF exiting `0` alone does not prove staging succeeded — the
-fail-closed access guard is what proves it (see §1.1, *Staging directory
-access*).
+is `0755` and `namei -l /mnt/nvme/nvidia-rpm` shows no permission denial. For
+acceptance, run it **on the host** from an extracted candidate bundle — not by
+exporting `NVIDIA_STAGE_ONLY=1` locally before `setup_strimserver`, which does
+not forward the variable (see §1.1, *Staging directory access*). The validator
+covers `kmod-nvidia-open*`, exempts only the `noarch`, policy-only
+`nvidia-driver-selinux`, and fails closed on a zero-driver stage or any
+unreadable path or nonzero `rpm` exit; on failure it restores the original
+versionlock and leaves no `.nvidia-upgrade.*` backup. A stage that fails
+validation **before the swap** leaves the host on its existing driver (595 on
+the reference host); do not manually uninstall or reboot to "retry". DNF exiting
+`0` alone does not prove staging succeeded — the fail-closed access guard is
+what proves it (see §1.1, *Staging directory access*).
 
 **Rollback:** the deployment tar is fully self-contained — the three image tars
 plus config/scripts live inside it, with no external runtime dependencies. To
@@ -679,6 +732,11 @@ replace the instance from the pinned AMI (Tier B) rather than reinstalling in
 place. Those artifacts are not bundled, so a manual `nvidia-uninstall` +
 preserved-595 reinstall is a last-resort operator action only when the artifact
 has been verified (see §1.1).
+
+**Status:** this staged-version fix has not undergone live host acceptance and
+no release containing it has been published; the reference host remains on
+`595.112.07`. The 595 rollback-artifact requirement in §1.1 (*Rollback artifact
+requirement*) remains in force before any destructive swap.
 
 ## 7. Known blockers / TODOs — CRITICAL
 

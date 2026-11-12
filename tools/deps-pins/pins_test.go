@@ -135,6 +135,22 @@ var pins = []pin{
 		needles: []string{"620.70.06"},
 	},
 	{
+		// The staged-version validator contract is documented as an exact-name,
+		// noarch, policy-only exemption for nvidia-driver-selinux while
+		// kmod-nvidia-open* stays version-asserted at the 620.70.06 floor.
+		// This is wording, not a new version pin: there is no NVIDIA entry in
+		// the expected-pins fixtures.
+		name: "deploy-aws-readme-selinux-exemption",
+		file: "deploy/aws/README.md",
+		needles: []string{
+			"nvidia-driver-selinux",
+			"exact-name",
+			"policy-only",
+			"kmod-nvidia-open*",
+			"620.70.06",
+		},
+	},
+	{
 		name: "openssh-10.6p2",
 		file: "tools/openssh/build.sh",
 		needles: []string{

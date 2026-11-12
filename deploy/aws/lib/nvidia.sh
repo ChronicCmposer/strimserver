@@ -124,6 +124,15 @@ NVIDIA_CUDA_REPO_ARM64="https://developer.download.nvidia.com/compute/cuda/repos
 NVIDIA_CUDA_KEY="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/D42D0685.pub"
 NVIDIA_CUDA_KEY_ARM64="https://developer.download.nvidia.com/compute/cuda/repos/amzn2023/sbsa/D42D0685.pub"
 
+# Exact RPM header names intentionally versioned independently of the driver.
+# Such a staged package may skip the 620 version assertion only when ALL hold:
+#   - the %{NAME} header is exactly one of these names (never a prefix match);
+#   - %{ARCH} is noarch (policy/meta package only);
+#   - `rpm -qlp` lists no /lib/modules/**/*.ko and no /libnvidia*.so.
+# nvidia-driver-selinux is the SELinux policy module; it ships policy/license
+# files only and is pulled conditionally by nvidia-kmod-common.
+NVIDIA_STAGED_VERSION_EXEMPT_PACKAGES="nvidia-driver-selinux"
+
 # Overridable locations (tests redirect these into temp dirs).
 NVIDIA_STAGE_DIR="${NVIDIA_STAGE_DIR:-/mnt/nvme/nvidia-rpm}"
 # Where a staged DKMS source tree is extracted/registered before the pre-install
@@ -766,31 +775,135 @@ nvidia__staged_payload_has_gsp() {
   return 1
 }
 
-# Assert every staged nvidia-*/libnvidia-* RPM reports 620.70.06. `rpm -qp`
-# reads the staged file's own header, so any other version is a real mismatch:
-# accept the floor and nothing else.
+# nvidia__staged_version_exempt <header_name>
+#   0 only for an EXACT match against NVIDIA_STAGED_VERSION_EXEMPT_PACKAGES.
+#   Never a prefix match, so `nvidia-driver-selinux-devel` etc. stay asserted.
+nvidia__staged_version_exempt() {
+  local candidate="$1" exempt
+  local -a exempt_packages=()
+  read -r -a exempt_packages <<<"$NVIDIA_STAGED_VERSION_EXEMPT_PACKAGES"
+  for exempt in "${exempt_packages[@]}"; do
+    [[ "$candidate" == "$exempt" ]] && return 0
+  done
+  return 1
+}
+
+# Assert every staged driver payload reports the 620 version floor.
+#
+# Driver payloads are version-asserted: every staged nvidia-*.rpm,
+# libnvidia-*.rpm, and kmod-nvidia-open*.rpm is read with `rpm -qp` from its own
+# header and must report %{VERSION} == $NVIDIA_DRIVER_FLOOR.
+# `nvidia-driver-selinux` is the single policy-only exemption: its header name
+# must match exactly, it must be noarch, and `rpm -qlp` must list no
+# /lib/modules/**/*.ko and no /libnvidia*.so. Only then is the 620 version
+# assertion skipped. Release and epoch are intentionally NOT asserted; %{VERSION}
+# is the whole contract for the floor. kmod-nvidia-open* is included so a non-620
+# kernel-module RPM cannot slip through staging.
+#
+# Fails closed on: an unreadable/non-regular staged path, a nonzero `rpm` exit,
+# empty/whitespace/(none)/malformed %{NAME}, empty/malformed %{VERSION}, an arch
+# other than noarch/host/i686-on-x86_64, a non-620 driver version, an exempt
+# name whose payload or arch fails the exemption checks, or a stage that yields
+# zero asserted driver RPMs. Every diagnostic names the header and path and
+# states that no driver action was taken.
 nvidia__assert_staged_versions() {
-  local sudo_cmd="$1" dir="$2" rpmfile version
+  local sudo_cmd="$1" dir="$2" machine="${3:-$(uname -m)}"
+  local rpmfile name version arch payload rc arch_ok=0
+  local asserted_drivers=0
   local -a rpms=()
   local had_nullglob=0
 
   nvidia__assert_stage_readable "$dir" closure || return 1
+
   shopt -q nullglob || had_nullglob=1
   shopt -s nullglob
-  rpms=("$dir"/nvidia-*.rpm "$dir"/libnvidia-*.rpm)
+  rpms=("$dir"/nvidia-*.rpm "$dir"/libnvidia-*.rpm "$dir"/kmod-nvidia-*.rpm)
   (( had_nullglob == 1 )) && shopt -u nullglob
+
   if (( ${#rpms[@]} == 0 )); then
-    nvidia__fail closure "no staged nvidia-*/libnvidia-* RPMs in $dir for $(id -un) (empty or inaccessible); no driver action was taken"
+    nvidia__fail closure "no staged nvidia-*/libnvidia-*/kmod-nvidia-* RPMs in $dir for $(id -un) (empty or inaccessible); no driver action was taken"
     return 1
   fi
+
   for rpmfile in "${rpms[@]}"; do
-    [[ -e "$rpmfile" ]] || continue
-    version="$("$sudo_cmd" rpm -qp --qf '%{VERSION}' "$rpmfile" 2>/dev/null || true)"
-    nvidia__is_version "$version" || continue
-    [[ "$version" == "$NVIDIA_DRIVER_FLOOR" ]] && continue
-    nvidia__fail closure "staged $rpmfile reports version $version, expected $NVIDIA_DRIVER_FLOOR"
-    return 1
+    if [[ ! -f "$rpmfile" || ! -r "$rpmfile" ]]; then
+      nvidia__fail closure "staged path $rpmfile is not a regular readable file (name=<unknown> version=<unknown> rpm_rc=n/a); no driver action was taken"
+      return 1
+    fi
+
+    rc=0
+    name="$("$sudo_cmd" rpm -qp --qf '%{NAME}' "$rpmfile" 2>/dev/null)" || rc=$?
+    if (( rc != 0 )); then
+      nvidia__fail closure "staged $rpmfile (name=<${name:-}> rpm_rc=$rc) failed the %{NAME} query; no driver action was taken"
+      return 1
+    fi
+    if [[ -z "${name//[[:space:]]/}" || "$name" == "(none)" ]]; then
+      nvidia__fail closure "staged $rpmfile has an empty/whitespace/(none) %{NAME} (name=$(printf '%q' "$name") rpm_rc=$rc); no driver action was taken"
+      return 1
+    fi
+    if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+      nvidia__fail closure "staged $rpmfile has an invalid %{NAME} '$name' (rpm_rc=$rc); no driver action was taken"
+      return 1
+    fi
+
+    rc=0
+    version="$("$sudo_cmd" rpm -qp --qf '%{VERSION}' "$rpmfile" 2>/dev/null)" || rc=$?
+    if (( rc != 0 )); then
+      nvidia__fail closure "staged $rpmfile (name=$name version=<${version:-}> rpm_rc=$rc) failed the %{VERSION} query; no driver action was taken"
+      return 1
+    fi
+    if [[ -z "${version//[[:space:]]/}" ]]; then
+      nvidia__fail closure "staged $rpmfile (name=$name version=$(printf '%q' "$version") rpm_rc=$rc) has an empty/whitespace %{VERSION}; no driver action was taken"
+      return 1
+    fi
+    if ! nvidia__is_version "$version"; then
+      nvidia__fail closure "staged $rpmfile (name=$name version=$version rpm_rc=$rc) reports unrecognized version '$version'; no driver action was taken"
+      return 1
+    fi
+
+    rc=0
+    arch="$("$sudo_cmd" rpm -qp --qf '%{ARCH}' "$rpmfile" 2>/dev/null)" || rc=$?
+    if (( rc != 0 )); then
+      nvidia__fail closure "staged $rpmfile (name=$name version=$version arch=<${arch:-}> rpm_rc=$rc) failed the %{ARCH} query; no driver action was taken"
+      return 1
+    fi
+    arch_ok=0
+    [[ "$arch" == "noarch" || "$arch" == "$machine" ]] && arch_ok=1
+    [[ "$machine" == "x86_64" && "$arch" == "i686" ]] && arch_ok=1
+    if (( arch_ok == 0 )); then
+      nvidia__fail closure "staged $rpmfile (name=$name version=$version arch=$arch rpm_rc=$rc) is not host-compatible (expected noarch or $machine); no driver action was taken"
+      return 1
+    fi
+
+    if nvidia__staged_version_exempt "$name"; then
+      if [[ "$arch" != "noarch" ]]; then
+        nvidia__fail closure "staged $rpmfile (name=$name version=$version arch=$arch rpm_rc=$rc) is exempt by name but not noarch; no driver action was taken"
+        return 1
+      fi
+      rc=0
+      payload="$("$sudo_cmd" rpm -qlp "$rpmfile" 2>/dev/null)" || rc=$?
+      if (( rc != 0 )); then
+        nvidia__fail closure "staged $rpmfile (name=$name version=$version rpm_rc=$rc) failed the payload listing; no driver action was taken"
+        return 1
+      fi
+      if grep -Eq '/lib/modules/.*\.ko|/libnvidia.*\.so' <<<"$payload"; then
+        nvidia__fail closure "staged $rpmfile (name=$name version=$version rpm_rc=$rc) is exempt by name but ships a driver payload (.ko/libnvidia*.so); no driver action was taken"
+        return 1
+      fi
+      continue
+    fi
+
+    if [[ "$version" != "$NVIDIA_DRIVER_FLOOR" ]]; then
+      nvidia__fail closure "staged $rpmfile (name=$name version=$version arch=$arch rpm_rc=$rc) reports version $version, expected $NVIDIA_DRIVER_FLOOR; no driver action was taken"
+      return 1
+    fi
+    (( asserted_drivers += 1 ))
   done
+
+  if (( asserted_drivers == 0 )); then
+    nvidia__fail closure "no staged driver payload was version-asserted in $dir (only exempt policy packages were present); no driver action was taken"
+    return 1
+  fi
   return 0
 }
 
@@ -1052,7 +1165,8 @@ nvidia__stage_closure() {
     "$sudo_cmd" rm -rf "$tmp"
     return 1
   fi
-  if ! nvidia__assert_staged_versions "$sudo_cmd" "$tmp"; then
+  if ! nvidia__assert_staged_versions "$sudo_cmd" "$tmp" "$machine"; then
+    nvidia__versionlock_restore
     [[ -n "$dnf_err" ]] && rm -f "$dnf_err"
     "$sudo_cmd" rm -rf "$tmp"
     return 1
@@ -1089,7 +1203,8 @@ nvidia__stage_closure() {
     "$sudo_cmd" rm -rf "$tmp"
     return 1
   fi
-  if ! nvidia__assert_staged_versions "$sudo_cmd" "$tmp"; then
+  if ! nvidia__assert_staged_versions "$sudo_cmd" "$tmp" "$machine"; then
+    nvidia__versionlock_restore
     "$sudo_cmd" rm -rf "$tmp"
     return 1
   fi
@@ -1239,20 +1354,28 @@ nvidia__check_holders() {
 }
 
 # --- module unload / load ---------------------------------------------------
+# Both helpers capture `lsmod` output before matching instead of piping it into
+# `grep -q`. Under `set -o pipefail`, a grep that exits on the first match can
+# SIGPIPE the producer, making the pipeline report 141 even though the module
+# matched. The command-substitution form never closes a pipe early.
 nvidia__modules_loaded() {
-  local sudo_cmd="$1"
-  "$sudo_cmd" lsmod 2>/dev/null | grep -Eq '^(nvidia|gdrdrv|efa_nv_peermem)'
+  local sudo_cmd="$1" listing
+  listing="$("$sudo_cmd" lsmod 2>/dev/null || true)"
+  grep -Eq '^(nvidia|gdrdrv|efa_nv_peermem)' <<<"$listing"
 }
 
 # Unload the nvidia module graph dependency-first. Optional modules are removed
 # before nvidia_drm/nvidia_modeset, and nvidia is always last. `modprobe -r`
 # handles the dependency graph dynamically; `rmmod` is the fallback.
 nvidia__unload_modules() {
-  local sudo_cmd="$1" module
+  local sudo_cmd="$1" module listing
   local -a order=($NVIDIA_UNLOAD_ORDER)
 
   for module in "${order[@]}"; do
-    "$sudo_cmd" lsmod 2>/dev/null | grep -Eq "^${module}([[:space:]]|$)" || continue
+    # Re-read each iteration: an earlier unload may have removed a dependent
+    # module too. Capture, then match, to avoid SIGPIPE on a short listing.
+    listing="$("$sudo_cmd" lsmod 2>/dev/null || true)"
+    grep -Eq "^${module}([[:space:]]|$)" <<<"$listing" || continue
     if "$sudo_cmd" modprobe -r "$module" 2>/dev/null; then
       continue
     fi

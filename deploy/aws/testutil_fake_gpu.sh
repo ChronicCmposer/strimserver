@@ -126,6 +126,27 @@
 #   FAKE_FABRICMANAGER_START_RC / FAKE_PERSISTENCED_START_RC
 #                             rc for `systemctl start <unit>` (default 0)
 #   FAKE_PAYLOAD_MISSING_MODULE 1 -> `rpm -qlp` omits the running-kernel .ko
+#   FAKE_STAGE_INCLUDE_SELINUX 1 -> the staged el9 closure also contains
+#                             `nvidia-driver-selinux-0.1-3.el9.noarch.rpm`
+#                             (an independently-versioned policy package)
+#   FAKE_SELINUX_PAYLOAD_HAS_DRIVER 1 -> `rpm -qlp` lists a `.ko`/`libnvidia*.so`
+#                             path for the SELinux fixture (negative exemption
+#                             test); default is policy/license paths only
+#
+# The fake `rpm -qp` answers the header query forms `%{NAME}`/`%{name}`,
+# `%{VERSION}`/`%{version}`, `%{RELEASE}`/`%{release}`, `%{ARCH}`/`%{arch}`,
+# and `%{NEVRA}` (including multi-field query formats). Versions may have one,
+# two, or three components (`[-:]([0-9]+([.][0-9]+)*)-`). Name, version,
+# release, and arch default to values derived from the RPM filename.
+#
+# Per-file header overrides live at
+#   $FAKE_GPU_STATE/rpm_headers/<basename>
+# and are `key=value` lines using the keys `name`, `version`, `release`,
+# `arch`, and `rc`. Precedence is override > filename-derived > default. An
+# explicit empty value (e.g. `name=`) forces empty output. A nonzero `rc`
+# prints the resolved output and then exits with that status, so both
+# nonzero-with-output and empty-output failures can be modelled. Overrides are
+# keyed by basename, so one fixture never affects another in the same directory.
 #
 # Not intended to be executed directly.
 
@@ -307,6 +328,11 @@ closure_dest() {
   else
     : >"$dest/nvidia-open-3:620.70.06-1.el9.x86_64.rpm"
     [[ "$incomplete" == "1" ]] && return 0
+    # nvidia-driver-selinux is an independently-versioned policy package that
+    # the driver meta pulls when selinux-policy-targeted is installed.
+    if [[ "${FAKE_STAGE_INCLUDE_SELINUX:-0}" == "1" ]]; then
+      : >"$dest/nvidia-driver-selinux-0.1-3.el9.noarch.rpm"
+    fi
     : >"$dest/nvidia-driver-620.70.06-1.el9.x86_64.rpm"
     : >"$dest/nvidia-driver-cuda-620.70.06-1.el9.x86_64.rpm"
     : >"$dest/nvidia-kmod-common-620.70.06-1.el9.x86_64.rpm"
@@ -463,6 +489,11 @@ SHIM
   # --- rpm ------------------------------------------------------------------
   cat >"$FAKE_GPU_BINDIR/rpm" <<'SHIM'
 #!/usr/bin/env bash
+# The library consumes `rpm -qlp ... | grep -q <path>` under `set -o pipefail`;
+# a consumer that exits after the first match must not turn a successful listing
+# into a SIGPIPE failure (pipeline status 141). Real rpm writes a small buffered
+# listing, so model that by ignoring SIGPIPE.
+trap '' PIPE
 printf 'rpm %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
 installed="$(cat "$FAKE_GPU_STATE/rpm_installed" 2>/dev/null)"
 version="$(cat "$FAKE_GPU_STATE/driver_version" 2>/dev/null)"
@@ -472,12 +503,13 @@ args="$*"
 
 # Token-aware option scan. `-qf <file>` is a FILE query and must never be
 # shadowed by the generic `-q` branch (or by `rpm -q --qf`).
-has_q=0; has_f=0; file_query=0; want_name=0
+has_q=0; has_f=0; file_query=0; want_name=0; qf_fmt=""
 declare -a pkgs=()
 skip_next=0
 for a in "$@"; do
   if [[ "$skip_next" == "1" ]]; then
     skip_next=0
+    qf_fmt="$a"
     case "$a" in
       *'%{NAME}'*|*'%{name}'*) want_name=1 ;;
     esac
@@ -486,6 +518,7 @@ for a in "$@"; do
   case "$a" in
     --import) : ;;
     --qf|--queryformat) skip_next=1; continue ;;
+    --qf=*|--queryformat=*) qf_fmt="${a#*=}" ;;
     -qf) file_query=1 ;;
     -q|--query) has_q=1 ;;
     -f|--file) has_f=1 ;;
@@ -531,6 +564,32 @@ case "$args" in
     # invoking user; FAKE_RPM_UNREADABLE keeps that simulation root-safe.
     [[ "${FAKE_RPM_UNREADABLE:-0}" == "1" || ! -r "$rpmfile" ]] && exit 1
     base="${rpmfile##*/}"
+    # A per-file header override may rename the package, so the payload is
+    # dispatched on the effective header name when one is present.
+    ov_name=""
+    if [[ -f "$FAKE_GPU_STATE/rpm_headers/$base" ]]; then
+      while IFS='=' read -r key value; do
+        [[ "$key" == "name" ]] && ov_name="$value"
+      done <"$FAKE_GPU_STATE/rpm_headers/$base"
+    fi
+    selinux_policy=0
+    if [[ -n "$ov_name" ]]; then
+      [[ "$ov_name" == "nvidia-driver-selinux" ]] && selinux_policy=1
+    else
+      case "$base" in
+        nvidia-driver-selinux-[0-9]*) selinux_policy=1 ;;
+      esac
+    fi
+    if [[ "$selinux_policy" == "1" ]]; then
+      if [[ "${FAKE_SELINUX_PAYLOAD_HAS_DRIVER:-0}" == "1" ]]; then
+        printf '/lib/modules/%s/kernel/drivers/video/nvidia.ko\n' "$kernel"
+        printf '/usr/lib64/libnvidia-ml.so.620.70.06\n'
+      else
+        printf '/usr/share/selinux/packages/nvidia-driver.pp.bz2\n'
+        printf '/usr/share/licenses/nvidia-driver-selinux/LICENSE\n'
+      fi
+      exit 0
+    fi
     case "$base" in
       kmod-nvidia-open-dkms-*|nvidia-open-dkms-*)
         if [[ "${FAKE_DKMS_PAYLOAD:-0}" == "1" ]]; then
@@ -558,20 +617,63 @@ case "$args" in
     exit 0
     ;;
   *'-qp'*|*'-q'*'--package'*)
-    # A file query reads the staged RPM's own header, not host state. Derive the
-    # version from the staged filename so a mismatched staged RPM is visible.
+    # A package query reads the staged RPM's own header, not host state. Header
+    # values resolve with precedence override > filename-derived > default so a
+    # mismatched or independently-versioned staged RPM is visible.
     rpmfile="${pkgs[${#pkgs[@]}-1]:-}"
     [[ "${FAKE_RPM_UNREADABLE:-0}" == "1" || ! -r "$rpmfile" ]] && exit 1
     base="${rpmfile##*/}"
-    staged_version="$version"
-    if [[ "$base" =~ [-:]([0-9]+\.[0-9]+\.[0-9]+)- ]]; then
-      staged_version="${BASH_REMATCH[1]}"
+
+    # Derive name-version-release.arch from the RPM filename.
+    base_noext="${base%.rpm}"
+    derived_arch="${base_noext##*.}"
+    [[ "$derived_arch" == "$base_noext" ]] && derived_arch="${FAKE_ARCH:-x86_64}"
+    base_nover="${base_noext%.*}"
+    derived_release="${base_nover##*-}"
+    [[ "$derived_release" == "$base_nover" ]] && derived_release=""
+    name_version="${base_nover%-*}"
+    derived_name="${name_version%-*}"
+    [[ "$derived_name" == "$name_version" ]] && derived_name=""
+    derived_version="$version"
+    if [[ "$base" =~ [-:]([0-9]+([.][0-9]+)*)- ]]; then
+      derived_version="${BASH_REMATCH[1]}"
     fi
-    case "$args" in
-      *'%{NEVRA}'*) printf '%s\n' "${FAKE_NEVRA:-nvidia-open-3:620.70.06-1.el9.x86_64}" ;;
-      *'%{VERSION}'*) printf '%s\n' "$staged_version" ;;
-      *) printf 'nvidia-open-%s\n' "$staged_version" ;;
-    esac
+    [[ -n "$derived_name" ]] || derived_name="nvidia-open-$derived_version"
+
+    # Per-file overrides are keyed by basename, so fixtures sharing a stage
+    # directory never affect one another.
+    hdr_name="$derived_name"; hdr_version="$derived_version"
+    hdr_release="$derived_release"; hdr_arch="$derived_arch"; hdr_rc=0
+    override="$FAKE_GPU_STATE/rpm_headers/$base"
+    if [[ -f "$override" ]]; then
+      while IFS='=' read -r key value; do
+        case "$key" in
+          name)    hdr_name="$value" ;;
+          version) hdr_version="$value" ;;
+          release) hdr_release="$value" ;;
+          arch)    hdr_arch="$value" ;;
+          rc)      hdr_rc="$value" ;;
+        esac
+      done <"$override"
+    fi
+
+    if [[ -n "$qf_fmt" ]]; then
+      out="$qf_fmt"
+      out="${out//\%\{nevra\}/${FAKE_NEVRA:-nvidia-open-3:620.70.06-1.el9.x86_64}}"
+      out="${out//\%\{NEVRA\}/${FAKE_NEVRA:-nvidia-open-3:620.70.06-1.el9.x86_64}}"
+      out="${out//\%\{name\}/$hdr_name}"
+      out="${out//\%\{NAME\}/$hdr_name}"
+      out="${out//\%\{version\}/$hdr_version}"
+      out="${out//\%\{VERSION\}/$hdr_version}"
+      out="${out//\%\{release\}/$hdr_release}"
+      out="${out//\%\{RELEASE\}/$hdr_release}"
+      out="${out//\%\{arch\}/$hdr_arch}"
+      out="${out//\%\{ARCH\}/$hdr_arch}"
+      printf '%b' "$out"
+    else
+      printf 'nvidia-open-%s\n' "$derived_version"
+    fi
+    [[ -z "$hdr_rc" || "$hdr_rc" == "0" ]] || exit "$hdr_rc"
     exit 0
     ;;
   *'-K'*)
@@ -704,10 +806,20 @@ SHIM
 
   cat >"$FAKE_GPU_BINDIR/lsmod" <<'SHIM'
 #!/usr/bin/env bash
+# The library reads this through `lsmod | grep -q` under `set -o pipefail`.
+# A consumer that exits after the first match closes the pipe; ignoring SIGPIPE
+# keeps the listing successful (status 0) like a small buffered real `lsmod`,
+# instead of reporting a spurious pipeline status 141.
+trap '' PIPE
 printf 'lsmod %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+# Emit the whole listing with one write for the same reason.
+out=""
 while IFS= read -r m; do
-  [[ -n "$m" ]] && printf '%-20s 123  0\n' "$m"
+  [[ -n "$m" ]] || continue
+  printf -v line '%-20s 123  0\n' "$m"
+  out+="$line"
 done <"$FAKE_GPU_STATE/modules"
+printf '%s' "$out" 2>/dev/null || true
 exit 0
 SHIM
 

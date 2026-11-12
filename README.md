@@ -92,7 +92,14 @@ The image stays driver-version-agnostic, but the **host** driver is a pinned
 contract: CUDA 13.5 requires `nvidia-open 620.70.06` (T4/T4G `sm_75`, GSP
 firmware required). The AMI pin selects a deterministic DLAMI image; it does
 **not** pin the installed driver, which `deploy/aws/setup-gpu.sh` enforces and
-fails closed on (see `deploy/aws/README.md` §1.1). Optional
+fails closed on (see `deploy/aws/README.md` §1.1). The staged-version validator
+covers `nvidia-*`, `libnvidia-*`, and `kmod-nvidia-open*`, requiring
+`%{VERSION}` `620.70.06` for every driver payload; release and epoch are not
+asserted. `nvidia-driver-selinux` is the only exact-name exemption — it must be
+`noarch` and policy-only, with no `.ko` or `libnvidia*.so`; near-miss names are
+still asserted. A stage with no asserted driver RPM, an unreadable/non-regular
+path, or a nonzero `rpm` exit fails closed, and a validator failure restores the
+original versionlock with no `.nvidia-upgrade.*` backup left behind. Optional
 fabricmanager/persistenced packages are availability-gated and may be omitted
 with a warning; a staged prebuilt kmod must carry `nvidia.ko` while a staged
 `kmod-nvidia-open-dkms` must carry `dkms.conf` with `dkms` and the matching
@@ -103,9 +110,11 @@ preserved off-host. Staging itself is a permissions-sensitive step: the root-own
 `mktemp` stage and every parent component must be readable and traversable by the
 deploying user, and DNF exiting `0` does not by itself prove staging succeeded —
 an unreadable, empty, or non-traversable stage fails closed with `[closure]`
-diagnostics. Use the read-only stage-only mode (`NVIDIA_STAGE_ONLY=1` /
-`setup-gpu.sh --stage-only`) to verify the stage before any drain or install. See
-`deploy/aws/README.md` §1.1 (*Staging directory access*) and §6.
+diagnostics. Run the read-only stage-only mode (`NVIDIA_STAGE_ONLY=1` /
+`setup-gpu.sh --stage-only`) **on the host** from an extracted candidate bundle
+to verify the stage before any drain or install; exporting it locally before
+`setup_strimserver` is not forwarded. See `deploy/aws/README.md` §1.1
+(*Staged-version validation* and *Staging directory access*) and §6 (*Rollback*).
 
 ### Controller API and behavior
 
@@ -935,7 +944,12 @@ Expected target characteristics:
   below-floor host is upgraded from an offline-staged, signature-verified RPM
   closure, with GPU holders drained, the module reloaded and verified against
   `/proc/driver/nvidia/version` (no reboot); an interrupted swap leaves a resume
-  marker for the next `setup-gpu.sh` run. Optional fabricmanager/persistenced
+  marker for the next `setup-gpu.sh` run. The staged-version validator covers
+  `nvidia-*`, `libnvidia-*`, and `kmod-nvidia-open*` and requires `%{VERSION}`
+  `620.70.06` (release/epoch not asserted); `nvidia-driver-selinux` is the only
+  exact-name, `noarch`, policy-only exemption, and a zero-driver, unreadable, or
+  nonzero-`rpm` stage fails closed, restoring versionlock with no
+  `.nvidia-upgrade.*` backup. Optional fabricmanager/persistenced
   packages are availability-gated and may be omitted with a warning; a staged
   prebuilt kmod must carry `nvidia.ko` while a staged `kmod-nvidia-open-dkms`
   must carry `dkms.conf` with `dkms` and matching kernel-devel/headers present.
@@ -945,11 +959,13 @@ Expected target characteristics:
   the deploying user; a missing stage parent is created `0755`, an existing mount
   root is only checked for traversal, and a DNF `0` exit alone does not prove
   staging succeeded. Verify it with the read-only stage-only mode
-  (`NVIDIA_STAGE_ONLY=1` / `setup-gpu.sh --stage-only`) before any drain or
-  install. An in-place rollback needs a verified pre-upgrade 595 `.run`/RPM
-  artifact preserved off-host (the instance-store stage closure is lost on
-  stop); otherwise the instance is replaced. See `deploy/aws/README.md` §1.1 and
-  §6.
+  (`NVIDIA_STAGE_ONLY=1` / `setup-gpu.sh --stage-only`) **on the host** from an
+  extracted candidate bundle before any drain or install — exporting it locally
+  before `setup_strimserver` is not forwarded. An in-place rollback needs a
+  verified pre-upgrade 595 `.run`/RPM artifact preserved off-host (the
+  instance-store stage closure is lost on stop); otherwise the instance is
+  replaced. See `deploy/aws/README.md` §1.1 (*Staged-version validation*,
+  *Staging directory access*) and §6 (*Rollback*).
 - Storage: the NVMe instance-store device is selected by model
   (`Amazon EC2 NVMe Instance Storage`; numeric first match when
   several exist), safety-checked, then reused or formatted `ext4`

@@ -44,6 +44,8 @@ begin_case() {
   fi
   case_tmp="$(mktemp -d)"
   case_path="$PATH"
+  STAGE_VERSION_FIXTURE_FILES=()
+  STAGE_VERSION_FIXTURE_CREATED_DIRS=()
   command mkdir -p "$case_tmp/fw/nvidia/620.70.06"
   : >"$case_tmp/fw/nvidia/620.70.06/gsp_tu10x.bin"
   export NVIDIA_STAGE_DIR="$case_tmp/stage"
@@ -80,6 +82,7 @@ end_case() {
     FAKE_DKMS_STATUS FAKE_DKMS_RC FAKE_DKMS_STATUS_RC FAKE_DKMS_REMOVE_RC \
     FAKE_DKMS_RPM FAKE_DKMS_PAYLOAD FAKE_DKMS_CONF_MISSING FAKE_DKMS_TOOL_MISSING \
     FAKE_DKMS_BUILD_RC FAKE_STAGE_INCLUDE_DKMS FAKE_STAGE_INCLUDE_BUILD_PREREQS \
+    FAKE_STAGE_INCLUDE_SELINUX FAKE_SELINUX_PAYLOAD_HAS_DRIVER \
     FAKE_KERNEL_HEADERS_MISSING FAKE_KERNEL_DEVEL_MISSING \
     FAKE_PAYLOAD_MISSING_MODULE FAKE_MODINFO_MISSING \
     FAKE_DNF_EMPTY FAKE_OPTIONAL_DOWNLOAD_RC FAKE_DNF_DOWNLOADONLY_CHMOD \
@@ -102,6 +105,16 @@ procs_620() { grep -q '620\.70\.06' "$NVIDIA_PROC_VERSION_FILE"; }
 
 # Helper set shared with the Phase 3-5 cases (owned by the next wave).
 count_calls() { grep -Ec "$1" "$FAKE_GPU_CALLS" 2>/dev/null || true; }
+# Literal call-log lookups. `%{NAME}`/`%{VERSION}` query formats contain regex
+# metacharacters, and a `$SUDO rpm ...` call is recorded twice (the fake-sudo
+# wrapper and the rpm shim), so anchor the match at column 1 to count only the
+# shim invocation exactly once per query.
+fixed_index() {
+  awk -v pat="$1" 'index($0, pat) == 1 { print NR; exit }' "${FAKE_GPU_CALLS:?fake_gpu_install must run first}"
+}
+fixed_count() {
+  awk -v pat="$1" 'index($0, pat) == 1 { n++ } END { print n + 0 }' "${FAKE_GPU_CALLS:?fake_gpu_install must run first}"
+}
 after() {
   local first second
   first="$(call_index "$1")"
@@ -162,6 +175,118 @@ stage_rpm_count() {
   (( had_nullglob == 1 )) && shopt -u nullglob
   printf '%s\n' "${#files[@]}"
 }
+# --- staged-version fixtures (Phase 2.2/2.3 harness contract) ----------------
+# Track exactly what a case's fixtures created so a case can clean up a shared
+# stage without disturbing pre-existing content. Normal cases rely on end_case
+# removing $case_tmp; these arrays make the helper's side effects inspectable.
+declare -a STAGE_VERSION_FIXTURE_FILES=()
+declare -a STAGE_VERSION_FIXTURE_CREATED_DIRS=()
+
+# stage_version_fixture <file_name> <version> <release> <arch>
+#                       [header_name] [header_version] [rpm_qp_rc]
+#
+# Create a regular dummy RPM in $NVIDIA_STAGE_DIR plus the per-file header
+# override the fake `rpm -qp` reads from
+# $FAKE_GPU_STATE/rpm_headers/<basename> (`key=value` lines; the harness
+# documents keys name/version/release/arch/rc with override > filename-derived
+# precedence). Filename-derived headers are the default: omit header_name to
+# let the fake derive the name, and omit header_version to reuse <version>.
+# Supplying an explicit empty header_name/header_version forces the fake to
+# return an empty value, which the RED cases need. Safe to call after
+# fake_gpu_install and idempotent for the same arguments.
+stage_version_fixture() {
+  local file_name="$1" version="$2" release="$3" arch="$4"
+  local header_name="${5-}" header_version="${6-}" rpm_qp_rc="${7:-0}"
+  local have_header_name=0 have_header_version=0
+  (( $# >= 5 )) && have_header_name=1
+  (( $# >= 6 )) && have_header_version=1
+
+  local dir="${NVIDIA_STAGE_DIR:?stage_version_fixture: NVIDIA_STAGE_DIR is unset}"
+  local state="${FAKE_GPU_STATE:?stage_version_fixture: run fake_gpu_install first}"
+  if [[ ! -d "$dir" ]]; then
+    command mkdir -p "$dir"
+    command chmod 0755 "$dir"
+    STAGE_VERSION_FIXTURE_CREATED_DIRS+=("$dir")
+  fi
+
+  local rpmfile="$dir/$file_name"
+  # A prior negative case may have left a directory or dangling symlink here;
+  # replace it so the fixture is always a regular, readable RPM file.
+  if [[ -e "$rpmfile" || -L "$rpmfile" ]]; then
+    command rm -rf -- "$rpmfile"
+  fi
+  : >"$rpmfile"
+  command chmod 0644 "$rpmfile"
+  STAGE_VERSION_FIXTURE_FILES+=("$rpmfile")
+
+  local hdir="$state/rpm_headers"
+  command mkdir -p "$hdir"
+  local base="${file_name##*/}"
+  local effective_version="$version"
+  (( have_header_version == 1 )) && effective_version="$header_version"
+  {
+    (( have_header_name == 1 )) && printf 'name=%s\n' "$header_name"
+    printf 'version=%s\n' "$effective_version"
+    printf 'release=%s\n' "$release"
+    printf 'arch=%s\n' "$arch"
+    printf 'rc=%s\n' "$rpm_qp_rc"
+  } >"$hdir/$base"
+}
+
+# Remove only the files/dirs this case's fixtures created (used by cases that
+# inspect a stage shared with pre-existing content; end_case is the usual path).
+stage_version_fixture_cleanup() {
+  local path
+  for path in "${STAGE_VERSION_FIXTURE_FILES[@]}"; do
+    command rm -f -- "$path"
+  done
+  for path in "${STAGE_VERSION_FIXTURE_CREATED_DIRS[@]}"; do
+    command rmdir -- "$path" 2>/dev/null || true
+  done
+  STAGE_VERSION_FIXTURE_FILES=()
+  STAGE_VERSION_FIXTURE_CREATED_DIRS=()
+}
+
+# Every case_* function must appear in the invocation list; a definition that
+# is never called would silently pass and hide a regression. This scans the
+# script's own invocation lines (bare `case_name` lines, never `case_name()`
+# definitions) and diffs them against the functions currently defined.
+assert_cases_registered() {
+  local script="${BASH_SOURCE[0]}"
+  local -a defined invoked
+  local name cand missing="" unknown="" found
+  mapfile -t defined < <(compgen -A function | grep -E '^case_' | sort)
+  mapfile -t invoked < <(grep -E '^case_[A-Za-z0-9_]+$' "$script" | sort -u)
+  # Membership is checked in pure shell. A `printf ... | grep -Fxq` pipeline is
+  # wrong here: under `set -o pipefail`, grep's early exit can SIGPIPE the
+  # printf (pipeline status 141) and falsely report a registration mismatch.
+  for name in "${defined[@]}"; do
+    found=0
+    for cand in "${invoked[@]}"; do
+      [[ "$cand" == "$name" ]] && { found=1; break; }
+    done
+    (( found == 1 )) || missing+=" $name"
+  done
+  for name in "${invoked[@]}"; do
+    found=0
+    for cand in "${defined[@]}"; do
+      [[ "$cand" == "$name" ]] && { found=1; break; }
+    done
+    (( found == 1 )) || unknown+=" $name"
+  done
+  if [[ -n "$missing" ]]; then
+    printf 'FAIL: case functions defined but never invoked:%s\n' "$missing" >&2
+    failures=$((failures + 1))
+  fi
+  if [[ -n "$unknown" ]]; then
+    printf 'FAIL: case invocations with no definition:%s\n' "$unknown" >&2
+    failures=$((failures + 1))
+  fi
+  if [[ -z "$missing" && -z "$unknown" ]]; then
+    printf 'ok: all %d case functions are registered\n' "${#defined[@]}"
+  fi
+}
+
 # Run a probe as an unprivileged user: directly when non-root, else via setpriv
 # or runuser. Returns 77 (and says so) when root has neither tool.
 as_unprivileged() {
@@ -1632,6 +1757,444 @@ case_assert_staged_versions_empty() {
   end_case
 }
 
+# ===========================================================================
+# Staged-version validation (Phase 2.3/2.4) -- RED against the pre-fix
+# validator. Each fixture is a real file plus a per-basename `rpm -qp` header
+# override in $FAKE_GPU_STATE/rpm_headers/ (see stage_version_fixture).
+# ===========================================================================
+# Run the validator for a directory; the optional machine argument selects the
+# target architecture (the fixed validator takes it as $3).
+staged_versions_out() {
+  local dir="$1" machine="${2:-}"
+  if [[ -n "$machine" ]]; then
+    nvidia__assert_staged_versions "$SUDO" "$dir" "$machine" 2>&1
+  else
+    nvidia__assert_staged_versions "$SUDO" "$dir" 2>&1
+  fi
+}
+
+# Assert the header query shape for one fixture: %{NAME} is issued before
+# %{VERSION}, and each query runs exactly once. Used for every fixture the
+# validator reads so a broadened/narrowed query contract cannot slip through.
+check_query_shape() {
+  local label="$1" file="$2" ni vi
+  ni="$(fixed_index "rpm -qp --qf %{NAME} $file")"
+  vi="$(fixed_index "rpm -qp --qf %{VERSION} $file")"
+  check "$label: NAME is queried before VERSION" \
+    bash -c '[[ -n "$1" && -n "$2" && "$1" -lt "$2" ]]' _ "$ni" "$vi"
+  check "$label: NAME queried exactly once" \
+    test "$(fixed_count "rpm -qp --qf %{NAME} $file")" -eq 1
+  check "$label: VERSION queried exactly once" \
+    test "$(fixed_count "rpm -qp --qf %{VERSION} $file")" -eq 1
+}
+
+# Shared fail-closed assertions: exit 1, [closure]/[kernel-module], the offending
+# path, an expected message fragment, and no destructive driver action.
+check_staged_versions_fail() {
+  local label="$1" rc="$2" out="$3" path="$4" pat="$5"
+  check "$label: exits 1" test "$rc" -eq 1
+  check "$label: names [closure]/[kernel-module]" \
+    bash -c 'grep -Eq "\[closure\]|\[kernel-module\]" <<<"$1"' _ "$out"
+  check "$label: names the offending path" \
+    bash -c 'grep -Fq -- "$1" <<<"$2"' _ "$path" "$out"
+  check "$label: includes the expected message" \
+    bash -c 'grep -Eqi -- "$1" <<<"$2"' _ "$pat" "$out"
+  check "$label: no resume marker" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  check "$label: no nvidia-uninstall" no_call 'nvidia-uninstall'
+  check "$label: no offline install" no_call '^dnf install .*--allowerasing'
+}
+
+case_staged_versions_allows_selinux_policy() {
+  begin_case
+  fake_gpu_install
+  local sel="$NVIDIA_STAGE_DIR/nvidia-driver-selinux-0.1-3.el9.noarch.rpm"
+  local driver="$NVIDIA_STAGE_DIR/nvidia-driver-620.70.06-1.el9.x86_64.rpm"
+  stage_version_fixture 'nvidia-driver-620.70.06-1.el9.x86_64.rpm' \
+    620.70.06 1.el9 x86_64 nvidia-driver 620.70.06
+  stage_version_fixture 'nvidia-driver-selinux-0.1-3.el9.noarch.rpm' \
+    0.1 3.el9 noarch nvidia-driver-selinux 0.1
+
+  # Fixture self-check before the validator: prove the fake reports the exact
+  # independently-versioned policy header, not 620.70.06.
+  local fname fver
+  fname="$("$SUDO" rpm -qp --qf '%{NAME}' "$sel" 2>/dev/null)"
+  fver="$("$SUDO" rpm -qp --qf '%{VERSION}' "$sel" 2>/dev/null)"
+  check "selinux policy: fake NAME is nvidia-driver-selinux" test "$fname" = "nvidia-driver-selinux"
+  check "selinux policy: fake VERSION is 0.1" test "$fver" = "0.1"
+
+  # Reset the call log so the query-shape assertions count only validator calls.
+  : >"$FAKE_GPU_CALLS"
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check "selinux policy: validator exits 0" test "$rc" -eq 0
+  check "selinux policy: no [closure] diagnostic" \
+    bash -c '! grep -q "\[closure\]" <<<"$1"' _ "$out"
+  # Query shape: %{NAME} before %{VERSION}, exactly once each, per fixture.
+  check_query_shape "selinux policy" "$sel"
+  check_query_shape "620 driver" "$driver"
+  end_case
+}
+
+case_staged_versions_rejects_non_620_driver() {
+  begin_case
+  fake_gpu_install
+  local rpmfile="$NVIDIA_STAGE_DIR/nvidia-driver-619.99.99-1.el9.x86_64.rpm"
+  stage_version_fixture 'nvidia-driver-619.99.99-1.el9.x86_64.rpm' \
+    619.99.99 1.el9 x86_64 nvidia-driver 619.99.99
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check_staged_versions_fail "non-620 driver" "$rc" "$out" "$rpmfile" '619\.99\.99.*620\.70\.06|620\.70\.06.*619\.99\.99'
+  end_case
+}
+
+case_staged_versions_rejects_non_620_kmod() {
+  begin_case
+  fake_gpu_install
+  local name rpmfile out rc
+  for name in kmod-nvidia-open kmod-nvidia-open-dkms; do
+    export NVIDIA_STAGE_DIR="$case_tmp/${name}"
+    rpmfile="$NVIDIA_STAGE_DIR/${name}-619.99.99-1.el9.x86_64.rpm"
+    stage_version_fixture "${name}-619.99.99-1.el9.x86_64.rpm" \
+      619.99.99 1.el9 x86_64 "$name" 619.99.99
+    out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+    check_staged_versions_fail "non-620 ${name}" "$rc" "$out" "$rpmfile" \
+      '619\.99\.99'
+    check "non-620 ${name}: no offline install" no_call '^dnf install .*--allowerasing'
+  done
+  end_case
+}
+
+case_staged_versions_rejects_non_620_families() {
+  begin_case
+  fake_gpu_install
+  local name rpmfile out rc i=0
+  local -a families=(
+    nvidia-open nvidia-driver nvidia-driver-cuda nvidia-driver-common
+    nvidia-driver-libs nvidia-kmod-common kmod-nvidia-open kmod-nvidia-open-dkms
+    libnvidia-ml libnvidia-encode nvidia-persistenced nvidia-modprobe nvidia-settings
+    nvidia-libXNVCtrl
+  )
+  for name in "${families[@]}"; do
+    i=$((i + 1))
+    export NVIDIA_STAGE_DIR="$case_tmp/family-$i"
+    rpmfile="$NVIDIA_STAGE_DIR/${name}-619.99.99-1.el9.x86_64.rpm"
+    stage_version_fixture "${name}-619.99.99-1.el9.x86_64.rpm" \
+      619.99.99 1.el9 x86_64 "$name" 619.99.99
+    out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+    check_staged_versions_fail "non-620 family ${name}" "$rc" "$out" "$rpmfile" \
+      '619\.99\.99'
+  done
+  end_case
+}
+
+case_staged_versions_empty_name_fails() {
+  begin_case
+  fake_gpu_install
+  local bad_name out rc name
+  local -a cases=(empty whitespace none)
+  local good="$NVIDIA_STAGE_DIR/good/nvidia-driver-620.70.06-1.el9.x86_64.rpm"
+  for name in "${cases[@]}"; do
+    export NVIDIA_STAGE_DIR="$case_tmp/$name"
+    good="$NVIDIA_STAGE_DIR/nvidia-driver-620.70.06-1.el9.x86_64.rpm"
+    stage_version_fixture 'nvidia-driver-620.70.06-1.el9.x86_64.rpm' \
+      620.70.06 1.el9 x86_64 nvidia-driver 620.70.06
+    case "$name" in
+      empty) bad_name="" ;;
+      whitespace) bad_name="   " ;;
+      none) bad_name="(none)" ;;
+    esac
+    stage_version_fixture 'nvidia-driver-badname-0.1-3.el9.noarch.rpm' \
+      620.70.06 3.el9 noarch "$bad_name" 620.70.06
+    local bad="$NVIDIA_STAGE_DIR/nvidia-driver-badname-0.1-3.el9.noarch.rpm"
+    out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+    check_staged_versions_fail "empty name (${name})" "$rc" "$out" "$bad" \
+      'name|empty|\(none\)'
+    # A second valid 620 fixture in the same stage must remain readable.
+    check "empty name (${name}): second fixture stays readable" test -r "$good"
+    local v
+    v="$("$SUDO" rpm -qp --qf '%{VERSION}' "$good" 2>/dev/null)"
+    check "empty name (${name}): second fixture still reports 620.70.06" \
+      test "$v" = "620.70.06"
+  done
+  end_case
+}
+
+case_staged_versions_empty_version_fails() {
+  begin_case
+  fake_gpu_install
+  local rpmfile="$NVIDIA_STAGE_DIR/nvidia-driver-620.70.06-1.el9.x86_64.rpm"
+  stage_version_fixture 'nvidia-driver-620.70.06-1.el9.x86_64.rpm' \
+    620.70.06 1.el9 x86_64 nvidia-driver ""
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check_staged_versions_fail "empty version" "$rc" "$out" "$rpmfile" \
+    'version|empty'
+  end_case
+}
+
+case_staged_versions_garbage_version_fails() {
+  begin_case
+  fake_gpu_install
+  local rpmfile="$NVIDIA_STAGE_DIR/nvidia-driver-620.70.06-1.el9.x86_64.rpm"
+  stage_version_fixture 'nvidia-driver-620.70.06-1.el9.x86_64.rpm' \
+    620.70.06 1.el9 x86_64 nvidia-driver notaversion
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check_staged_versions_fail "garbage version" "$rc" "$out" "$rpmfile" 'unrecognized version'
+  end_case
+}
+
+case_staged_versions_nonzero_rc_fails() {
+  begin_case
+  fake_gpu_install
+  local rpmfile="$NVIDIA_STAGE_DIR/nvidia-driver-620.70.06-1.el9.x86_64.rpm"
+  stage_version_fixture 'nvidia-driver-620.70.06-1.el9.x86_64.rpm' \
+    620.70.06 1.el9 x86_64 nvidia-driver 620.70.06 2
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check_staged_versions_fail "nonzero rpm -qp rc" "$rc" "$out" "$rpmfile" \
+    'rc[^0-9]*2|status[^0-9]*2|exit[^0-9]*2'
+  end_case
+}
+
+case_staged_versions_header_name_spoof_rejected() {
+  begin_case
+  fake_gpu_install
+  # Filename looks like the exempt policy package; the header is a driver.
+  local rpmfile="$NVIDIA_STAGE_DIR/nvidia-driver-selinux-0.1-3.el9.noarch.rpm"
+  stage_version_fixture 'nvidia-driver-selinux-0.1-3.el9.noarch.rpm' \
+    0.1 3.el9 noarch nvidia-driver 619.99.99
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check_staged_versions_fail "selinux filename, driver header" "$rc" "$out" "$rpmfile" \
+    '619\.99\.99.*620\.70\.06|620\.70\.06.*619\.99\.99'
+  end_case
+}
+
+case_staged_versions_header_name_spoof_accepted_only_for_policy() {
+  begin_case
+  export NVIDIA_STAGE_DIR="$case_tmp/ok"
+  fake_gpu_install
+  # Driver-looking filename, but the header is the exempt policy package and
+  # rpm -qlp lists policy/license paths only -> must pass.
+  local sel="$NVIDIA_STAGE_DIR/nvidia-driver-0.1-3.el9.x86_64.rpm"
+  stage_version_fixture 'nvidia-driver-620.70.06-1.el9.x86_64.rpm' \
+    620.70.06 1.el9 x86_64 nvidia-driver 620.70.06
+  stage_version_fixture 'nvidia-driver-0.1-3.el9.x86_64.rpm' \
+    0.1 3.el9 noarch nvidia-driver-selinux 0.1
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check "policy header spoof (policy payload): exits 0" test "$rc" -eq 0
+  check "policy header spoof (policy payload): no [closure]" \
+    bash -c '! grep -q "\[closure\]" <<<"$1"' _ "$out"
+
+  # Same fixture with a driver payload (.ko/libnvidia*.so) must fail the
+  # narrow exemption.
+  export NVIDIA_STAGE_DIR="$case_tmp/bad"
+  export FAKE_SELINUX_PAYLOAD_HAS_DRIVER=1
+  local sel_bad="$NVIDIA_STAGE_DIR/nvidia-driver-0.1-3.el9.x86_64.rpm"
+  stage_version_fixture 'nvidia-driver-620.70.06-1.el9.x86_64.rpm' \
+    620.70.06 1.el9 x86_64 nvidia-driver 620.70.06
+  stage_version_fixture 'nvidia-driver-0.1-3.el9.x86_64.rpm' \
+    0.1 3.el9 noarch nvidia-driver-selinux 0.1
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check_staged_versions_fail "policy spoof with driver payload" "$rc" "$out" "$sel_bad" \
+    'payload|driver|\.ko|libnvidia|exempt'
+  end_case
+}
+
+case_staged_versions_similar_name_not_exempt() {
+  begin_case
+  fake_gpu_install
+  local name rpmfile out rc i=0
+  # Near-misses must not match the exact-name exemption. The third is a header
+  # name that merely starts with the exempt name.
+  local -a names=(nvidia-driver-selinux-extra nvidia-driver-selinux-devel nvidia-driver-selinux.x86_64)
+  for name in "${names[@]}"; do
+    i=$((i + 1))
+    export NVIDIA_STAGE_DIR="$case_tmp/near-$i"
+    rpmfile="$NVIDIA_STAGE_DIR/nvidia-driver-selinux-0.1-3.el9.noarch.rpm"
+    stage_version_fixture 'nvidia-driver-selinux-0.1-3.el9.noarch.rpm' \
+      0.1 3.el9 noarch "$name" 0.1
+    out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+    check_staged_versions_fail "near-miss name ${name}" "$rc" "$out" "$rpmfile" \
+      '620\.70\.06|not exempt|unexpected'
+  done
+  end_case
+}
+
+case_staged_versions_exempt_requires_noarch() {
+  begin_case
+  fake_gpu_install
+  # The exact exempt header name on a host-arch package must still fail: the
+  # exemption is noarch-only, so a driver-arch policy-looking package is not a
+  # policy-only package.
+  local rpmfile="$NVIDIA_STAGE_DIR/nvidia-driver-selinux-0.1-3.el9.x86_64.rpm"
+  stage_version_fixture 'nvidia-driver-selinux-0.1-3.el9.x86_64.rpm' \
+    0.1 3.el9 x86_64 nvidia-driver-selinux 0.1
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR" x86_64)"; rc=$?
+  check_staged_versions_fail "exempt name on non-noarch package" "$rc" "$out" "$rpmfile" \
+    'noarch|not noarch'
+  end_case
+}
+
+case_staged_versions_selinux_only_fails() {
+  begin_case
+  fake_gpu_install
+  local rpmfile="$NVIDIA_STAGE_DIR/nvidia-driver-selinux-0.1-3.el9.noarch.rpm"
+  stage_version_fixture 'nvidia-driver-selinux-0.1-3.el9.noarch.rpm' \
+    0.1 3.el9 noarch nvidia-driver-selinux 0.1
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  # There is no offending file: the defect is that the directory contained no
+  # asserted driver RPM, so the diagnostic names the directory.
+  check_staged_versions_fail "selinux-only stage" "$rc" "$out" "$NVIDIA_STAGE_DIR" \
+    'no .*driver|at least one|zero|assert'
+  end_case
+}
+
+case_staged_versions_non_regular_path_fails() {
+  begin_case
+  fake_gpu_install
+  # A dangling symlink named like an RPM: the old validator skipped it with
+  # `[[ -e ]] || continue`, so only the valid fixture was seen.
+  export NVIDIA_STAGE_DIR="$case_tmp/dangling"
+  local good="$NVIDIA_STAGE_DIR/nvidia-driver-620.70.06-1.el9.x86_64.rpm"
+  local bad="$NVIDIA_STAGE_DIR/nvidia-driver-777.77.77-1.el9.x86_64.rpm"
+  stage_version_fixture 'nvidia-driver-620.70.06-1.el9.x86_64.rpm' \
+    620.70.06 1.el9 x86_64 nvidia-driver 620.70.06
+  command ln -s "$NVIDIA_STAGE_DIR/does-not-exist.rpm" "$bad"
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check_staged_versions_fail "dangling symlink RPM" "$rc" "$out" "$bad" \
+    'regular|not a file|directory|symlink|readable'
+
+  # A directory named like an RPM must also fail closed.
+  export NVIDIA_STAGE_DIR="$case_tmp/directory"
+  good="$NVIDIA_STAGE_DIR/nvidia-driver-620.70.06-1.el9.x86_64.rpm"
+  bad="$NVIDIA_STAGE_DIR/nvidia-driver-888.88.88-1.el9.x86_64.rpm"
+  stage_version_fixture 'nvidia-driver-620.70.06-1.el9.x86_64.rpm' \
+    620.70.06 1.el9 x86_64 nvidia-driver 620.70.06
+  command mkdir -p "$bad"
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check_staged_versions_fail "directory RPM path" "$rc" "$out" "$bad" \
+    'regular|not a file|directory|symlink|readable'
+
+  # An unreadable regular RPM must fail closed too. A chmod-000 file is only
+  # unreadable to a non-root caller; under root it would stay readable, so skip
+  # the probe there rather than assert a false negative.
+  if [[ "$(id -u)" -ne 0 ]]; then
+    export NVIDIA_STAGE_DIR="$case_tmp/unreadable"
+    good="$NVIDIA_STAGE_DIR/nvidia-driver-620.70.06-1.el9.x86_64.rpm"
+    bad="$NVIDIA_STAGE_DIR/nvidia-driver-999.99.99-1.el9.x86_64.rpm"
+    stage_version_fixture 'nvidia-driver-620.70.06-1.el9.x86_64.rpm' \
+      620.70.06 1.el9 x86_64 nvidia-driver 620.70.06
+    stage_version_fixture 'nvidia-driver-999.99.99-1.el9.x86_64.rpm' \
+      620.70.06 1.el9 x86_64 nvidia-driver 620.70.06
+    command chmod 000 "$bad"
+    out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+    check_staged_versions_fail "unreadable RPM file" "$rc" "$out" "$bad" \
+      'regular|readable|not a file'
+    command chmod 0644 "$bad"
+  else
+    printf 'skip: unreadable-file coverage needs a non-root caller\n'
+  fi
+  end_case
+}
+
+case_staged_versions_same_version_different_release() {
+  begin_case
+  fake_gpu_install
+  # Only %{VERSION} is asserted; release (and epoch) may differ from the floor.
+  stage_version_fixture 'nvidia-driver-620.70.06-2.el9.x86_64.rpm' \
+    620.70.06 2.el9 x86_64 nvidia-driver 620.70.06
+  local out rc
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR")"; rc=$?
+  check "same version, different release: exits 0" test "$rc" -eq 0
+  check "same version, different release: no [closure]" \
+    bash -c '! grep -q "\[closure\]" <<<"$1"' _ "$out"
+  end_case
+}
+
+case_staged_versions_wrong_arch_fails() {
+  begin_case
+  fake_gpu_install
+  local rpmfile out rc
+  # Wrong foreign arch on an x86_64 target must fail.
+  export NVIDIA_STAGE_DIR="$case_tmp/wrong"
+  rpmfile="$NVIDIA_STAGE_DIR/nvidia-driver-620.70.06-1.el9.aarch64.rpm"
+  stage_version_fixture 'nvidia-driver-620.70.06-1.el9.aarch64.rpm' \
+    620.70.06 1.el9 aarch64 nvidia-driver 620.70.06
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR" x86_64)"; rc=$?
+  check_staged_versions_fail "wrong arch aarch64 on x86_64" "$rc" "$out" "$rpmfile" \
+    'arch|aarch64|x86_64'
+
+  # noarch is allowed on x86_64.
+  export NVIDIA_STAGE_DIR="$case_tmp/noarch"
+  stage_version_fixture 'nvidia-kmod-common-620.70.06-1.el9.noarch.rpm' \
+    620.70.06 1.el9 noarch nvidia-kmod-common 620.70.06
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR" x86_64)"; rc=$?
+  check "noarch on x86_64: exits 0" test "$rc" -eq 0
+
+  # i686 compat libraries are allowed on x86_64.
+  export NVIDIA_STAGE_DIR="$case_tmp/i686"
+  stage_version_fixture 'libnvidia-ml-620.70.06-1.el9.i686.rpm' \
+    620.70.06 1.el9 i686 libnvidia-ml 620.70.06
+  out="$(staged_versions_out "$NVIDIA_STAGE_DIR" x86_64)"; rc=$?
+  check "i686 compat on x86_64: exits 0" test "$rc" -eq 0
+  end_case
+}
+
+case_ensure_driver_floor_with_selinux_closure() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_STAGE_INCLUDE_SELINUX=1
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "selinux closure: exits 0" test "$rc" -eq 0
+  check "selinux closure: no [closure] diagnostic" \
+    bash -c '! grep -q "\[closure\]" "$1"' _ "$err"
+  check "selinux closure: reaches 620.70.06" procs_620
+  check "selinux closure: stages the SELinux policy package" \
+    bash -c 'compgen -G "$1/nvidia-driver-selinux-*.rpm" >/dev/null' _ "$NVIDIA_STAGE_DIR"
+  check "selinux closure: no nvidia-uninstall" no_call 'nvidia-uninstall'
+  end_case
+}
+
+case_versionlock_restored_on_validator_failure() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  # Both knobs make the staged SELinux RPM fail validation in the pre-fix
+  # (version 0.1 != 620.70.06) and post-fix (payload contains a .ko) code.
+  export FAKE_STAGE_INCLUDE_SELINUX=1 FAKE_SELINUX_PAYLOAD_HAS_DRIVER=1
+  local vl="$case_tmp/versionlock.list"
+  printf 'nvidia-fabricmanager-595.112.07-1.el9.x86_64\nkeep-this-package\n' >"$vl"
+  export NVIDIA_VERSIONLOCK_FILE="$vl"
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia__stage_closure "$SUDO" >"$out" 2>"$err"; rc=$?
+
+  check "versionlock/validator failure: exits 1" test "$rc" -eq 1
+  check "versionlock/validator failure: prints [closure]" \
+    bash -c 'grep -q "\[closure\]" "$1"' _ "$err"
+  check "versionlock/validator failure: original lock restored" \
+    bash -c 'grep -q "nvidia-fabricmanager-595" "$1" && grep -q "keep-this-package" "$1"' _ "$vl"
+  check "versionlock/validator failure: no .nvidia-upgrade.* remains" \
+    bash -c '[[ -z "$(compgen -G "$1.nvidia-upgrade.*")" ]]' _ "$vl"
+  check "versionlock/validator failure: no resume marker" \
+    bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  check "versionlock/validator failure: no nvidia-uninstall" no_call 'nvidia-uninstall'
+  check "versionlock/validator failure: no offline install" no_call '^dnf install .*--allowerasing'
+  # Drop the EXIT trap this call installed so it cannot restore across cases.
+  trap - EXIT
+  nvidia__versionlock_backup=""
+  nvidia__versionlock_path=""
+  nvidia__versionlock_sudo=""
+  end_case
+}
+
 case_payload_has_running_module_empty() {
   begin_case
   fake_gpu_install
@@ -2196,6 +2759,25 @@ case_validate_closure_unreadable
 case_validate_closure_empty
 case_validate_signatures_empty
 case_assert_staged_versions_empty
+# Staged-version validation (Phase 2.3/2.4)
+case_staged_versions_allows_selinux_policy
+case_staged_versions_rejects_non_620_driver
+case_staged_versions_rejects_non_620_kmod
+case_staged_versions_rejects_non_620_families
+case_staged_versions_empty_name_fails
+case_staged_versions_empty_version_fails
+case_staged_versions_garbage_version_fails
+case_staged_versions_nonzero_rc_fails
+case_staged_versions_header_name_spoof_rejected
+case_staged_versions_header_name_spoof_accepted_only_for_policy
+case_staged_versions_similar_name_not_exempt
+case_staged_versions_exempt_requires_noarch
+case_staged_versions_selinux_only_fails
+case_staged_versions_non_regular_path_fails
+case_staged_versions_same_version_different_release
+case_staged_versions_wrong_arch_fails
+case_ensure_driver_floor_with_selinux_closure
+case_versionlock_restored_on_validator_failure
 case_payload_has_running_module_empty
 case_payload_has_gsp_unreadable
 case_payload_has_gsp_host_firmware_short_circuit
@@ -2217,6 +2799,10 @@ case_versionlock_restore_semantics
 case_versionlock_no_backup_left_on_success
 case_dnf_lock_metadata_diagnostic
 case_stage_only_no_driver_action
+
+# Meta-check: a case_* function that is never invoked is invisible. Compare the
+# defined set against the invocation list above so unregistered cases fail.
+assert_cases_registered
 
 if [[ "$failures" -ne 0 ]]; then
   printf '\n%d failure(s)\n' "$failures" >&2
