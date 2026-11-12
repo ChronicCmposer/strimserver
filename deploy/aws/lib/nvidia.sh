@@ -47,12 +47,17 @@
 #               deploying user, fix traversal, then re-run.
 #   [kernel-module] the staged payload cannot serve the RUNNING kernel: a kmod
 #               has no nvidia.ko, a DKMS RPM has no dkms.conf, the staged stage
-#               is unreadable, the dkms tool or kernel-devel/headers are missing,
-#               the staged DKMS source cannot build for `uname -r`, the installed
+#               is unreadable, the running kernel's build tree is missing (no
+#               /usr/src/kernels/<kernel>/Makefile or no
+#               /lib/modules/<kernel>/build), the dkms tool is absent, the
+#               staged DKMS source cannot build for `uname -r`, the installed
 #               620 build is absent, or GSP firmware is missing. The old driver
-#               is never removed first.
+#               is never removed first. The prerequisite is the build tree, not
+#               a package name: AL2023 provides kernel6.12-devel/
+#               kernel6.12-headers while RHEL-family hosts provide
+#               kernel-devel/kernel-headers, and both install the same paths.
 #               Recovery: verify `dkms status`, `modinfo -k $(uname -r) nvidia`,
-#               the kernel-devel match, and the 620 GSP firmware.
+#               the kernel build tree, and the 620 GSP firmware.
 #   [optional]  an optional unit (fabricmanager/persistenced) was omitted or
 #               its 620 package is unavailable. This is a warning, not a fatal
 #               state; the required nvidia-open closure still installs.
@@ -619,11 +624,42 @@ nvidia__staged_dkms_rpm() {
   return 1
 }
 
-# A DKMS host needs a usable dkms tool plus kernel-devel/headers for the
-# running kernel. Install any supplied by the staged closure BEFORE the build
-# proof; fail fast, before touching the host, when one is absent.
+# The authoritative DKMS build prerequisite is the RUNNING kernel's build tree,
+# not a package name. Both naming schemes install the same two paths:
+#   RHEL-family  kernel-devel-$kernel / kernel-headers-$kernel
+#   AL2023       kernel6.12-devel-$kernel / kernel6.12-headers-$kernel
+# so test the tree itself and stay name-agnostic.
+nvidia__kernel_build_prereq_present() {
+  local sudo_cmd="$1" kernel="$2"
+  "$sudo_cmd" test -f "/usr/src/kernels/$kernel/Makefile" 2>/dev/null \
+    && "$sudo_cmd" test -e "/lib/modules/$kernel/build" 2>/dev/null
+}
+
+# Print repo-resolvable prerequisite specs for the RUNNING kernel, preferring
+# the legacy RHEL-family name over the AL2023 kernel6.12-* name for each
+# family. Prints nothing when the build tree already exists (nothing to stage).
+nvidia__kernel_prereq_specs() {
+  local sudo_cmd="$1" kernel="$2" family candidate result
+  nvidia__kernel_build_prereq_present "$sudo_cmd" "$kernel" && return 0
+  for family in devel headers; do
+    for candidate in "kernel-${family}-${kernel}" "kernel6.12-${family}-${kernel}"; do
+      result="$("$sudo_cmd" dnf -q repoquery --available \
+        --qf '%{name}-%{version}-%{release}' "$candidate" 2>/dev/null || true)"
+      if [[ -n "$result" ]]; then
+        printf '%s\n' "$result"
+        break
+      fi
+    done
+  done
+}
+
+# A DKMS host needs a usable dkms tool plus the running kernel's build tree.
+# Install any kernel-devel/headers supplied by the staged closure BEFORE the
+# build proof; fail fast, before touching the host, when the tree is absent and
+# cannot be completed. The staged globs are deliberately broad (kernel*-devel-*
+# / kernel*-headers-*) so both the legacy and AL2023 package names match.
 nvidia__ensure_dkms_prereqs() {
-  local sudo_cmd="$1" dir="$2" kernel rpmfile missing=""
+  local sudo_cmd="$1" dir="$2" kernel rpmfile
   local -a install_rpms=()
   kernel="$(uname -r)"
 
@@ -636,23 +672,16 @@ nvidia__ensure_dkms_prereqs() {
       return 1
     fi
   fi
-  if ! "$sudo_cmd" rpm -q "kernel-devel-$kernel" >/dev/null 2>&1; then
-    if rpmfile="$(nvidia__staged_rpm "$dir" 'kernel-devel-*.rpm')"; then
+  # The build tree is the prerequisite: AL2023 can satisfy it with
+  # kernel6.12-devel/kernel6.12-headers even when the legacy rpm -q names are
+  # absent. Stage whichever kernel-devel/headers RPM the closure carries.
+  if ! nvidia__kernel_build_prereq_present "$sudo_cmd" "$kernel"; then
+    if rpmfile="$(nvidia__staged_rpm "$dir" 'kernel*-devel-*.rpm')"; then
       install_rpms+=("$rpmfile")
-    else
-      missing="kernel-devel-$kernel"
     fi
-  fi
-  if ! "$sudo_cmd" rpm -q "kernel-headers-$kernel" >/dev/null 2>&1; then
-    if rpmfile="$(nvidia__staged_rpm "$dir" 'kernel-headers-*.rpm')"; then
+    if rpmfile="$(nvidia__staged_rpm "$dir" 'kernel*-headers-*.rpm')"; then
       install_rpms+=("$rpmfile")
-    else
-      missing="${missing:+$missing }kernel-headers-$kernel"
     fi
-  fi
-  if [[ -n "$missing" ]]; then
-    nvidia__fail kernel-module "missing kernel build prerequisites for $kernel: $missing (nothing was uninstalled)"
-    return 1
   fi
 
   if (( ${#install_rpms[@]} > 0 )); then
@@ -662,11 +691,10 @@ nvidia__ensure_dkms_prereqs() {
     fi
   fi
 
-  # Re-read host state: the tool and headers must now be usable.
-  if ! command -v dkms >/dev/null 2>&1 \
-      || ! "$sudo_cmd" rpm -q "kernel-devel-$kernel" >/dev/null 2>&1 \
-      || ! "$sudo_cmd" rpm -q "kernel-headers-$kernel" >/dev/null 2>&1; then
-    nvidia__fail kernel-module "staged kernel build prerequisites for $kernel did not install (nothing was uninstalled)"
+  # Re-read the build tree: the staged RPMs (or a pre-existing tree) must now
+  # provide both paths before the DKMS build proof runs.
+  if ! nvidia__kernel_build_prereq_present "$sudo_cmd" "$kernel"; then
+    nvidia__fail kernel-module "missing kernel build prerequisites for $kernel: kernel-devel-$kernel|kernel6.12-devel-$kernel kernel-headers-$kernel|kernel6.12-headers-$kernel (nothing was uninstalled)"
     return 1
   fi
   return 0
@@ -1081,8 +1109,9 @@ nvidia__stage_make_readable() {
 nvidia__stage_closure() {
   local sudo_cmd="$1" machine="${2:-$(uname -m)}"
   local expected_nevra tmp parent backup variant extra optional_output err_file
-  local dnf_err detail stage_base
-  local -a extras=()
+  local dnf_err detail stage_base spec existing
+  local duplicate
+  local -a extras=() required=()
   NVIDIA_OPTIONAL_PACKAGES_RESOLVED=""
   NVIDIA_OPTIONAL_PACKAGES_OMITTED=""
 
@@ -1131,11 +1160,35 @@ nvidia__stage_closure() {
     return 1
   }
 
+  # The required closure is the pinned nvidia-open NEVRA plus, on a DKMS host
+  # whose running kernel has no build tree, the distro kernel-devel/headers
+  # specs. They must be downloaded now because the build proof runs before any
+  # uninstall. nvidia__kernel_prereq_specs prints nothing when the tree already
+  # exists and resolves the AL2023 kernel6.12-* names as well as the legacy
+  # kernel-*-$kernel names. Skip any spec already required or queued optional.
+  required=("$expected_nevra")
+  if [[ "$variant" == "dkms" ]]; then
+    while IFS= read -r spec; do
+      [[ -n "$spec" ]] || continue
+      duplicate=0
+      for existing in "${required[@]}" ${extras[@]+"${extras[@]}"}; do
+        if [[ "$existing" == "$spec" ]]; then
+          duplicate=1
+          break
+        fi
+      done
+      if (( duplicate == 0 )); then
+        required+=("$spec")
+      fi
+    done < <(nvidia__kernel_prereq_specs "$sudo_cmd" "$(uname -r)")
+  fi
+
   dnf_err="$(mktemp 2>/dev/null || true)"
-  # Stage the REQUIRED nvidia-open NEVRA in its own transaction first. An
-  # unavailable optional package can never abort this stage.
+  # Stage the REQUIRED nvidia-open NEVRA (and any missing kernel build
+  # prerequisites) in its own transaction first. An unavailable optional package
+  # can never abort this stage.
   if ! "$sudo_cmd" dnf install -y --downloadonly --disableexcludes=all \
-      --setopt=metadata_expire=0 --destdir "$tmp" "$expected_nevra" \
+      --setopt=metadata_expire=0 --destdir "$tmp" "${required[@]}" \
       2>"${dnf_err:-/dev/stderr}"; then
     detail=""
     [[ -n "$dnf_err" && -s "$dnf_err" ]] && detail="$(cat "$dnf_err" 2>/dev/null || true)"

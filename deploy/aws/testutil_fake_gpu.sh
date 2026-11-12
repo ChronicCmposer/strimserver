@@ -111,6 +111,34 @@
 #   FAKE_STAGE_INCLUDE_BUILD_PREREQS 1 -> the staged closure also contains the
 #                             `dkms`, `kernel-devel-<kernel>` and
 #                             `kernel-headers-<kernel>` RPMs
+#   FAKE_STAGE_INCLUDE_KERNEL_PREREQS 1 -> the staged closure also contains the
+#                             configured kernel devel/headers RPMs (AL2023
+#                             `kernel6.12-*` names by default)
+#   FAKE_KERNEL_PREREQ_FLAVOR "legacy" (default) or "al2023": the package
+#                             naming scheme installed on the fake host and used
+#                             for the staged prerequisites. Legacy names are
+#                             `kernel-devel-<kernel>`/`kernel-headers-<kernel>`;
+#                             AL2023 names are
+#                             `kernel6.12-devel-<kernel>`/`kernel6.12-headers-<kernel>`.
+#   FAKE_KERNEL_PREREQ_PREFIX explicit package prefix override for the staged
+#                             devel/headers RPMs (default: `kernel` or
+#                             `kernel6.12` from FAKE_KERNEL_PREREQ_FLAVOR)
+#   FAKE_KERNEL_PREREQ_PKG_INSTALLED 0 -> neither devel nor headers RPM is
+#                             installed on the fake host (overrides the legacy
+#                             FAKE_KERNEL_*_MISSING knobs)
+#   FAKE_KERNEL_BUILD_ROOT    filesystem root that models absolute /usr/src and
+#                             /lib/modules lookups (default:
+#                             $FAKE_GPU_STATE/kernel-root). A recording `test`
+#                             shim maps those two prefixes under it so helpers
+#                             that probe the real absolute paths stay hermetic.
+#   FAKE_KERNEL_BUILD_TREE_PRESENT 1 -> create the running kernel's build tree
+#                             even when its packages are absent; 0 -> never
+#                             create it. Unset derives it from the devel/headers
+#                             package state (both installed => tree present).
+#   FAKE_REPOQUERY_KERNEL_DEVEL / FAKE_REPOQUERY_KERNEL_HEADERS
+#   FAKE_REPOQUERY_KERNEL6_12_DEVEL / FAKE_REPOQUERY_KERNEL6_12_HEADERS
+#                             newline-separated `<version>-<release>` rows for
+#                             the matching `dnf repoquery --available` candidate
 #   FAKE_DNF_DKMS_INSTALL_REGISTERS 1 -> the offline driver install of a DKMS
 #                             payload makes `dkms status` report
 #                             nvidia-open/620.70.06 for the running kernel
@@ -165,7 +193,9 @@ fake_gpu_install() {
   FAKE_REAL_CP="$(type -P cp)"
   FAKE_REAL_CHMOD="$(type -P chmod)"
   FAKE_REAL_TEE="$(type -P tee)"
-  export FAKE_REAL_MKDIR FAKE_REAL_RM FAKE_REAL_CP FAKE_REAL_CHMOD FAKE_REAL_TEE
+  FAKE_REAL_TEST="$(type -P test)"
+  export FAKE_REAL_MKDIR FAKE_REAL_RM FAKE_REAL_CP FAKE_REAL_CHMOD FAKE_REAL_TEE \
+    FAKE_REAL_TEST
   FAKE_GPU_BINDIR="$(mktemp -d)"
   FAKE_GPU_CALLS="$(mktemp)"
   FAKE_DNF_ARGV="$(mktemp)"
@@ -191,16 +221,43 @@ fake_gpu_install() {
   printf '%s' "${FAKE_KERNEL_MODULE_VARIANT:-kmod}" >"$FAKE_GPU_STATE/kmod_variant"
   # Kernel build prerequisites are installed unless a case forces them missing.
   # A fake `dnf install <staged RPM>` flips these back on, so the library must
-  # really install the staged RPMs before it can build.
-  if [[ "${FAKE_KERNEL_DEVEL_MISSING:-0}" == "1" ]]; then
-    printf '0' >"$FAKE_GPU_STATE/kernel_devel"
-  else
-    printf '1' >"$FAKE_GPU_STATE/kernel_devel"
+  # really install the staged RPMs before it can build. The flavour selects
+  # which package names answer `rpm -q`; AL2023 uses kernel6.12-* names.
+  local prereq_flavor="${FAKE_KERNEL_PREREQ_FLAVOR:-legacy}"
+  local prereq_prefix="${FAKE_KERNEL_PREREQ_PREFIX:-}"
+  local prereq_devel prereq_headers prereq_kernel
+  case "$prereq_flavor" in
+    al2023) : "${prereq_prefix:=kernel6.12}" ;;
+    legacy|"") : "${prereq_prefix:=kernel}" ;;
+    *) : "${prereq_prefix:=kernel}" ;;
+  esac
+  printf '%s' "$prereq_flavor" >"$FAKE_GPU_STATE/kernel_prereq_flavor"
+  printf '%s' "$prereq_prefix" >"$FAKE_GPU_STATE/kernel_prereq_prefix"
+
+  prereq_devel=1
+  prereq_headers=1
+  [[ "${FAKE_KERNEL_DEVEL_MISSING:-0}" == "1" ]] && prereq_devel=0
+  [[ "${FAKE_KERNEL_HEADERS_MISSING:-0}" == "1" ]] && prereq_headers=0
+  if [[ "${FAKE_KERNEL_PREREQ_PKG_INSTALLED:-1}" == "0" ]]; then
+    prereq_devel=0
+    prereq_headers=0
   fi
-  if [[ "${FAKE_KERNEL_HEADERS_MISSING:-0}" == "1" ]]; then
-    printf '0' >"$FAKE_GPU_STATE/kernel_headers"
-  else
-    printf '1' >"$FAKE_GPU_STATE/kernel_headers"
+  printf '%s' "$prereq_devel" >"$FAKE_GPU_STATE/kernel_devel"
+  printf '%s' "$prereq_headers" >"$FAKE_GPU_STATE/kernel_headers"
+
+  # Model the running kernel's build tree under an override root. The `test`
+  # shim maps /usr/src and /lib/modules lookups here, so the library's absolute
+  # probes never touch the test host. When the knob is unset, the tree follows
+  # the package state (both prerequisites installed => tree present).
+  FAKE_KERNEL_BUILD_ROOT="${FAKE_KERNEL_BUILD_ROOT:-$FAKE_GPU_STATE/kernel-root}"
+  export FAKE_KERNEL_BUILD_ROOT
+  prereq_kernel="${FAKE_KERNEL_RELEASE:-5.10.240-217.935.amzn2.x86_64}"
+  if [[ "${FAKE_KERNEL_BUILD_TREE_PRESENT:-}" == "1" ]] \
+      || [[ "${FAKE_KERNEL_BUILD_TREE_PRESENT:-}" != "0" \
+        && "$prereq_devel" == "1" && "$prereq_headers" == "1" ]]; then
+    "$FAKE_REAL_MKDIR" -p "$FAKE_KERNEL_BUILD_ROOT/usr/src/kernels/$prereq_kernel"
+    : >"$FAKE_KERNEL_BUILD_ROOT/usr/src/kernels/$prereq_kernel/Makefile"
+    "$FAKE_REAL_MKDIR" -p "$FAKE_KERNEL_BUILD_ROOT/lib/modules/$prereq_kernel/build"
   fi
   "$FAKE_REAL_MKDIR" -p "$FAKE_GPU_STATE/dkms"
   printf '0' >"$FAKE_GPU_STATE/dcgm_active"
@@ -352,6 +409,20 @@ closure_dest() {
       : >"$dest/kernel-devel-$kernel.x86_64.rpm"
       : >"$dest/kernel-headers-$kernel.x86_64.rpm"
     fi
+    # AL2023 satisfies the same build tree with kernel6.12-devel/headers. The
+    # prefix knob allows a case to model either naming scheme explicitly.
+    if [[ "${FAKE_STAGE_INCLUDE_KERNEL_PREREQS:-0}" == "1" ]]; then
+      kernel="${FAKE_KERNEL_RELEASE:-5.10.240-217.935.amzn2.x86_64}"
+      prefix="${FAKE_KERNEL_PREREQ_PREFIX:-}"
+      if [[ -z "$prefix" ]]; then
+        case "$(cat "$FAKE_GPU_STATE/kernel_prereq_flavor" 2>/dev/null)" in
+          al2023) prefix="kernel6.12" ;;
+          *)      prefix="kernel" ;;
+        esac
+      fi
+      : >"$dest/$prefix-devel-$kernel.x86_64.rpm"
+      : >"$dest/$prefix-headers-$kernel.x86_64.rpm"
+    fi
   fi
 }
 
@@ -384,6 +455,18 @@ case "$subcmd" in
       closure_dest "$stage_dest" "${FAKE_ARCH:-x86_64}" \
         "${FAKE_DNF_CLOSURE_INCOMPLETE:-0}" \
         "$(cat "$FAKE_GPU_STATE/kmod_variant" 2>/dev/null || echo kmod)"
+      # An explicitly requested kernel build-prerequisite spec (resolved by
+      # repoquery) is downloaded as its own RPM. Create it once even when the
+      # same package also came from closure_dest.
+      for tok in "${positionals[@]}"; do
+        case "$tok" in
+          kernel*-devel-*|kernel*-headers-*)
+            base="${tok##*/}"
+            [[ "$base" == *.rpm ]] || base="$base.${FAKE_ARCH:-x86_64}.rpm"
+            : >"$stage_dest/$base"
+            ;;
+        esac
+      done
       if [[ -n "${FAKE_DNF_DOWNLOADONLY_CHMOD:-}" ]]; then
         "$FAKE_REAL_CHMOD" "${FAKE_DNF_DOWNLOADONLY_CHMOD}" "$stage_dest" 2>/dev/null || true
       fi
@@ -407,8 +490,19 @@ case "$subcmd" in
           fi
           printf '1' >"$FAKE_GPU_STATE/dkms_tool"
           ;;
-        kernel-devel-*.rpm) printf '1' >"$FAKE_GPU_STATE/kernel_devel" ;;
-        kernel-headers-*.rpm) printf '1' >"$FAKE_GPU_STATE/kernel_headers" ;;
+        kernel*-devel-*.rpm)
+          printf '1' >"$FAKE_GPU_STATE/kernel_devel"
+          kernel="${FAKE_KERNEL_RELEASE:-5.10.240-217.935.amzn2.x86_64}"
+          root="${FAKE_KERNEL_BUILD_ROOT:-$FAKE_GPU_STATE/kernel-root}"
+          "$FAKE_REAL_MKDIR" -p "$root/usr/src/kernels/$kernel"
+          : >"$root/usr/src/kernels/$kernel/Makefile"
+          ;;
+        kernel*-headers-*.rpm)
+          printf '1' >"$FAKE_GPU_STATE/kernel_headers"
+          kernel="${FAKE_KERNEL_RELEASE:-5.10.240-217.935.amzn2.x86_64}"
+          root="${FAKE_KERNEL_BUILD_ROOT:-$FAKE_GPU_STATE/kernel-root}"
+          "$FAKE_REAL_MKDIR" -p "$root/lib/modules/$kernel/build"
+          ;;
       esac
     done
     # Only the driver-closure install (explicit nvidia RPMs or --allowerasing)
@@ -446,6 +540,10 @@ case "$subcmd" in
       case "$tok" in
         *fabricmanager*) name="nvidia-fabricmanager"; rows="${FAKE_REPOQUERY_FABRICMANAGER:-}" ;;
         *persistenced*) name="nvidia-persistenced"; rows="${FAKE_REPOQUERY_PERSISTENCED:-}" ;;
+        *kernel6.12-devel-*) name="kernel6.12-devel"; rows="${FAKE_REPOQUERY_KERNEL6_12_DEVEL:-}" ;;
+        *kernel6.12-headers-*) name="kernel6.12-headers"; rows="${FAKE_REPOQUERY_KERNEL6_12_HEADERS:-}" ;;
+        *kernel-devel-*) name="kernel-devel"; rows="${FAKE_REPOQUERY_KERNEL_DEVEL:-}" ;;
+        *kernel-headers-*) name="kernel-headers"; rows="${FAKE_REPOQUERY_KERNEL_HEADERS:-}" ;;
         *) continue ;;
       esac
       arch="${repoquery_arch:-${FAKE_ARCH:-x86_64}}"
@@ -691,11 +789,24 @@ case "$args" in
   *'kmod-nvidia-open'*)
     [[ "$variant" == "kmod" && "$installed" == "1" ]] && exit 0 || exit 1
     ;;
-  *'kernel-devel-'*)
-    [[ "$(cat "$FAKE_GPU_STATE/kernel_devel" 2>/dev/null)" == "1" ]] && exit 0 || exit 1
+  *'kernel6.12-devel-'*|*'kernel-devel-'*)
+    # Only the installed naming scheme answers `rpm -q`: an AL2023 host reports
+    # kernel6.12-devel-<kernel> installed while kernel-devel-<kernel> is absent,
+    # and vice versa. The two schemas MUST NOT alias each other.
+    qprefix="kernel"
+    [[ "$args" == *'kernel6.12-devel-'* ]] && qprefix="kernel6.12"
+    iprefix="$(cat "$FAKE_GPU_STATE/kernel_prereq_prefix" 2>/dev/null)"
+    [[ "$qprefix" == "$iprefix" \
+      && "$(cat "$FAKE_GPU_STATE/kernel_devel" 2>/dev/null)" == "1" ]] \
+      && exit 0 || exit 1
     ;;
-  *'kernel-headers-'*)
-    [[ "$(cat "$FAKE_GPU_STATE/kernel_headers" 2>/dev/null)" == "1" ]] && exit 0 || exit 1
+  *'kernel6.12-headers-'*|*'kernel-headers-'*)
+    qprefix="kernel"
+    [[ "$args" == *'kernel6.12-headers-'* ]] && qprefix="kernel6.12"
+    iprefix="$(cat "$FAKE_GPU_STATE/kernel_prereq_prefix" 2>/dev/null)"
+    [[ "$qprefix" == "$iprefix" \
+      && "$(cat "$FAKE_GPU_STATE/kernel_headers" 2>/dev/null)" == "1" ]] \
+      && exit 0 || exit 1
     ;;
   *'-q'*)
     pkg="${pkgs[0]:-}"
@@ -1108,6 +1219,25 @@ if [[ -n "${NVIDIA_STAGE_DIR:-}" && -n "${FAKE_CHMOD_RC:-}" \
   esac
 fi
 exec "${FAKE_REAL_CHMOD:-chmod}" "$@"
+SHIM
+
+  # --- test (recording, path-remapping) ------------------------------------
+  # The kernel build-prerequisite helpers probe absolute /usr/src and
+  # /lib/modules paths through `$SUDO test`. fake-sudo execs `test`, so this
+  # shim receives those arguments and maps the two system prefixes under
+  # FAKE_KERNEL_BUILD_ROOT. Bash's builtin `test` in callers is unaffected.
+  cat >"$FAKE_GPU_BINDIR/test" <<'SHIM'
+#!/usr/bin/env bash
+printf 'test %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+root="${FAKE_KERNEL_BUILD_ROOT:-}"
+args=()
+for a in "$@"; do
+  case "$a" in
+    /usr/src/*|/lib/modules/*) [[ -n "$root" ]] && a="$root$a" ;;
+  esac
+  args+=("$a")
+done
+exec "${FAKE_REAL_TEST:-/usr/bin/test}" "${args[@]}"
 SHIM
 
   # --- fake-sudo ------------------------------------------------------------

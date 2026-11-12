@@ -102,8 +102,13 @@ path, or a nonzero `rpm` exit fails closed, and a validator failure restores the
 original versionlock with no `.nvidia-upgrade.*` backup left behind. Optional
 fabricmanager/persistenced packages are availability-gated and may be omitted
 with a warning; a staged prebuilt kmod must carry `nvidia.ko` while a staged
-`kmod-nvidia-open-dkms` must carry `dkms.conf` with `dkms` and the matching
-kernel-devel/headers present. The upgrade restores only units that were active
+`kmod-nvidia-open-dkms` must carry `dkms.conf` with `dkms` and the running
+kernel's build tree present. That prerequisite is the tree, not a package name:
+AL2023 6.12 hosts satisfy it with `kernel6.12-devel`/`kernel6.12-headers`, and
+`lib/nvidia.sh` checks `/usr/src/kernels/$(uname -r)/Makefile` and
+`/lib/modules/$(uname -r)/build`, failing closed before any driver
+uninstall/install if the tree is missing. See `deploy/aws/README.md` §1.1
+(*Kernel build prerequisites*). The upgrade restores only units that were active
 before the drain (fabricmanager start failure is non-fatal; persistenced failure
 is fatal), and an in-place rollback requires a pre-upgrade 595 artifact
 preserved off-host. Staging itself is a permissions-sensitive step: the root-owned
@@ -952,7 +957,9 @@ Expected target characteristics:
   `.nvidia-upgrade.*` backup. Optional fabricmanager/persistenced
   packages are availability-gated and may be omitted with a warning; a staged
   prebuilt kmod must carry `nvidia.ko` while a staged `kmod-nvidia-open-dkms`
-  must carry `dkms.conf` with `dkms` and matching kernel-devel/headers present.
+  must carry `dkms.conf` with `dkms` and the running kernel's build tree present
+  (AL2023 6.12: `kernel6.12-devel`/`kernel6.12-headers`; see
+  `deploy/aws/README.md` §1.1, *Kernel build prerequisites*).
   Restore touches only units that were active before the drain (a fabricmanager
   start failure is non-fatal; persistenced failure is fatal). The root-owned
   `mktemp` stage and all of its parent components must be readable/traversable by

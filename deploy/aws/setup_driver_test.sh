@@ -82,6 +82,11 @@ end_case() {
     FAKE_DKMS_STATUS FAKE_DKMS_RC FAKE_DKMS_STATUS_RC FAKE_DKMS_REMOVE_RC \
     FAKE_DKMS_RPM FAKE_DKMS_PAYLOAD FAKE_DKMS_CONF_MISSING FAKE_DKMS_TOOL_MISSING \
     FAKE_DKMS_BUILD_RC FAKE_STAGE_INCLUDE_DKMS FAKE_STAGE_INCLUDE_BUILD_PREREQS \
+    FAKE_STAGE_INCLUDE_KERNEL_PREREQS FAKE_KERNEL_PREREQ_FLAVOR \
+    FAKE_KERNEL_PREREQ_PREFIX FAKE_KERNEL_PREREQ_PKG_INSTALLED \
+    FAKE_KERNEL_BUILD_ROOT FAKE_KERNEL_BUILD_TREE_PRESENT \
+    FAKE_REPOQUERY_KERNEL_DEVEL FAKE_REPOQUERY_KERNEL_HEADERS \
+    FAKE_REPOQUERY_KERNEL6_12_DEVEL FAKE_REPOQUERY_KERNEL6_12_HEADERS \
     FAKE_STAGE_INCLUDE_SELINUX FAKE_SELINUX_PAYLOAD_HAS_DRIVER \
     FAKE_KERNEL_HEADERS_MISSING FAKE_KERNEL_DEVEL_MISSING \
     FAKE_PAYLOAD_MISSING_MODULE FAKE_MODINFO_MISSING \
@@ -129,7 +134,20 @@ stage_has_package() {
 stage_omits_package() { ! stage_has_package "$1"; }
 # The first recorded `dnf install ... --downloadonly` call line.
 stage_line() { grep -E '^dnf install .*--downloadonly' "$FAKE_GPU_CALLS" | head -n1; }
+# Number of times an exact whitespace-delimited token appears across every
+# `dnf install ... --downloadonly` line of the staged closure.
+stage_token_count() {
+  local want="$1"
+  grep -E '^dnf install .*--downloadonly' "$FAKE_GPU_CALLS" \
+    | awk -v w="$want" '{ for (i = 1; i <= NF; i++) if ($i == w) n++ } END { print n + 0 }'
+}
 state_flag() { [[ "$(cat "$FAKE_GPU_STATE/$1" 2>/dev/null)" == "1" ]]; }
+# The fake host's modelled running-kernel build tree (override root).
+kernel_build_tree_present() {
+  local root="${FAKE_KERNEL_BUILD_ROOT:?fake_gpu_install must run first}" kernel
+  kernel="$("$(command -v uname)" -r)"
+  [[ -f "$root/usr/src/kernels/$kernel/Makefile" && -e "$root/lib/modules/$kernel/build" ]]
+}
 stdout_has() { grep -Eq "$2" <<<"$1"; }
 stderr_has() { grep -Eq "$2" <<<"$1"; }
 unit_started() {
@@ -1333,6 +1351,209 @@ case_dkms_kernel_headers_missing() {
     bash -c 'grep -q "\[kernel-module\]" "$1" && grep -Eq "kernel-(headers|devel)" "$1"' _ "$err"
   check "kernel headers missing: no uninstall attempted" no_call 'nvidia-uninstall'
   check "kernel headers missing: no offline install attempted" no_call '^dnf install .*--allowerasing'
+  end_case
+}
+
+# ===========================================================================
+# AL2023 kernel build prerequisites (kernel6.12-devel/headers)
+#
+# The prerequisite is the RUNNING kernel's build tree. A host that satisfies it
+# through kernel6.12-* names must pass exactly like a legacy kernel-devel host.
+# ===========================================================================
+case_kernel_prereq_al2023_installed_passes() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  export FAKE_KERNEL_PREREQ_FLAVOR=al2023 FAKE_KERNEL_PREREQ_PKG_INSTALLED=1
+  export FAKE_KERNEL_BUILD_TREE_PRESENT=1
+  fake_gpu_install
+  export FAKE_DKMS_STATUS="nvidia-open/620.70.06, $("$(command -v uname)" -r), x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" kernel rc
+  kernel="$("$(command -v uname)" -r)"
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "al2023 prereq: the build tree is modelled" kernel_build_tree_present
+  check "al2023 prereq: the legacy package names are absent" \
+    bash -c '! rpm -q "kernel-devel-$1" >/dev/null 2>&1 \
+      && ! rpm -q "kernel-headers-$1" >/dev/null 2>&1' _ "$kernel"
+  check "al2023 prereq: the AL2023 package names are installed" \
+    bash -c 'rpm -q "kernel6.12-devel-$1" >/dev/null 2>&1 \
+      && rpm -q "kernel6.12-headers-$1" >/dev/null 2>&1' _ "$kernel"
+  check "al2023 prereq: the upgrade succeeds" test "$rc" -eq 0
+  check "al2023 prereq: no kernel prerequisite install" \
+    no_call '^dnf install .*kernel[^ ]*-(devel|headers)-'
+  check "al2023 prereq: no driver uninstall" no_call 'nvidia-uninstall'
+  check "al2023 prereq: the running module reports 620" procs_620
+  end_case
+}
+
+case_kernel_prereq_legacy_installed_passes() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  export FAKE_KERNEL_PREREQ_FLAVOR=legacy FAKE_KERNEL_PREREQ_PKG_INSTALLED=1
+  export FAKE_KERNEL_BUILD_TREE_PRESENT=1
+  fake_gpu_install
+  export FAKE_DKMS_STATUS="nvidia-open/620.70.06, $("$(command -v uname)" -r), x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" kernel rc
+  kernel="$("$(command -v uname)" -r)"
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "legacy prereq: the legacy package names are installed" \
+    bash -c 'rpm -q "kernel-devel-$1" >/dev/null 2>&1 \
+      && rpm -q "kernel-headers-$1" >/dev/null 2>&1' _ "$kernel"
+  check "legacy prereq: the AL2023 package names are absent" \
+    bash -c '! rpm -q "kernel6.12-devel-$1" >/dev/null 2>&1 \
+      && ! rpm -q "kernel6.12-headers-$1" >/dev/null 2>&1' _ "$kernel"
+  check "legacy prereq: the upgrade succeeds" test "$rc" -eq 0
+  check "legacy prereq: no kernel prerequisite install" \
+    no_call '^dnf install .*kernel[^ ]*-(devel|headers)-'
+  check "legacy prereq: no driver uninstall" no_call 'nvidia-uninstall'
+  end_case
+}
+
+case_kernel_prereq_build_tree_passes() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  # No package name is installed, but the running kernel's build tree exists.
+  export FAKE_KERNEL_PREREQ_FLAVOR=legacy FAKE_KERNEL_PREREQ_PKG_INSTALLED=0
+  export FAKE_KERNEL_BUILD_TREE_PRESENT=1
+  fake_gpu_install
+  export FAKE_DKMS_STATUS="nvidia-open/620.70.06, $("$(command -v uname)" -r), x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" kernel rc
+  kernel="$("$(command -v uname)" -r)"
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "build tree only: the build tree is modelled" kernel_build_tree_present
+  check "build tree only: neither package naming scheme is installed" \
+    bash -c '! rpm -q "kernel-devel-$1" >/dev/null 2>&1 \
+      && ! rpm -q "kernel6.12-devel-$1" >/dev/null 2>&1 \
+      && ! rpm -q "kernel-headers-$1" >/dev/null 2>&1 \
+      && ! rpm -q "kernel6.12-headers-$1" >/dev/null 2>&1' _ "$kernel"
+  check "build tree only: the upgrade succeeds" test "$rc" -eq 0
+  check "build tree only: no kernel prerequisite install" \
+    no_call '^dnf install .*kernel[^ ]*-(devel|headers)-'
+  check "build tree only: no driver uninstall" no_call 'nvidia-uninstall'
+  end_case
+}
+
+case_kernel_prereq_staged_al2023_packages_install() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  export FAKE_KERNEL_PREREQ_FLAVOR=al2023 FAKE_KERNEL_PREREQ_PKG_INSTALLED=0
+  export FAKE_KERNEL_BUILD_TREE_PRESENT=0
+  export FAKE_STAGE_INCLUDE_KERNEL_PREREQS=1
+  fake_gpu_install
+  export FAKE_DKMS_STATUS="nvidia-open/620.70.06, $("$(command -v uname)" -r), x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "staged al2023: the upgrade succeeds" test "$rc" -eq 0
+  check "staged al2023: installs the devel RPM" \
+    has_call '^dnf install -y --disableexcludes=all .*kernel6\.12-devel-'
+  check "staged al2023: installs the headers RPM" \
+    has_call '^dnf install -y --disableexcludes=all .*kernel6\.12-headers-'
+  check "staged al2023: devel is now installed" state_flag kernel_devel
+  check "staged al2023: headers are now installed" state_flag kernel_headers
+  check "staged al2023: the installed RPMs provide the build tree" kernel_build_tree_present
+  check "staged al2023: the prerequisite install precedes the build proof" \
+    before '^dnf install -y --disableexcludes=all .*kernel6\.12-devel-' '^dkms (build|install)'
+  check "staged al2023: no driver uninstall" no_call 'nvidia-uninstall'
+  end_case
+}
+
+case_kernel_prereq_missing_fails() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  export FAKE_KERNEL_PREREQ_FLAVOR=al2023 FAKE_KERNEL_PREREQ_PKG_INSTALLED=0
+  export FAKE_KERNEL_BUILD_TREE_PRESENT=0
+  fake_gpu_install
+  local kernel out="$case_tmp/out" err="$case_tmp/err" rc
+  kernel="$("$(command -v uname)" -r)"
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "missing prereq: exits 1" test "$rc" -eq 1
+  check "missing prereq: names [kernel-module]" \
+    bash -c 'grep -q "\[kernel-module\]" "$1"' _ "$err"
+  check "missing prereq: names the legacy and AL2023 devel/headers candidates" \
+    bash -c 'grep -q "kernel-devel-$1" "$2" \
+      && grep -q "kernel6.12-devel-$1" "$2" \
+      && grep -q "kernel-headers-$1" "$2" \
+      && grep -q "kernel6.12-headers-$1" "$2"' _ "$kernel" "$err"
+  check "missing prereq: no kernel prerequisite install" \
+    no_call '^dnf install .*kernel[^ ]*-(devel|headers)-'
+  check "missing prereq: no package install at all" \
+    bash -c '! grep -E "^dnf install " "$1" | grep -vq -- "--downloadonly"' _ "$FAKE_GPU_CALLS"
+  check "missing prereq: no driver uninstall" no_call 'nvidia-uninstall'
+  check "missing prereq: no offline driver install" no_call '^dnf install .*--allowerasing'
+  check "missing prereq: no resume marker" bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+case_kernel_prereq_stage_closure_includes_specs() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_KERNEL_PREREQ_FLAVOR=al2023 FAKE_KERNEL_PREREQ_PKG_INSTALLED=0
+  export FAKE_KERNEL_BUILD_TREE_PRESENT=0
+  export FAKE_REPOQUERY_KERNEL6_12_DEVEL=6.12.0-1.amzn2023
+  export FAKE_REPOQUERY_KERNEL6_12_HEADERS=6.12.0-1.amzn2023
+  export NVIDIA_STAGE_ONLY=1
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "stage specs: stage-only exits 0" test "$rc" -eq 0
+  check "stage specs: the resolved AL2023 devel spec is staged" \
+    stage_has_package 'kernel6.12-devel-6.12.0-1.amzn2023'
+  check "stage specs: the resolved AL2023 headers spec is staged" \
+    stage_has_package 'kernel6.12-headers-6.12.0-1.amzn2023'
+  check "stage specs: the devel spec appears exactly once" \
+    test "$(stage_token_count 'kernel6.12-devel-6.12.0-1.amzn2023')" -eq 1
+  check "stage specs: the headers spec appears exactly once" \
+    test "$(stage_token_count 'kernel6.12-headers-6.12.0-1.amzn2023')" -eq 1
+  check "stage specs: the devel RPM is staged once" \
+    bash -c '[[ "$(compgen -G "$1/kernel6.12-devel-*.rpm" | wc -l)" -eq 1 ]]' _ "$NVIDIA_STAGE_DIR"
+  check "stage specs: the headers RPM is staged once" \
+    bash -c '[[ "$(compgen -G "$1/kernel6.12-headers-*.rpm" | wc -l)" -eq 1 ]]' _ "$NVIDIA_STAGE_DIR"
+  end_case
+}
+
+case_kernel_prereq_globs_cover_al2023() {
+  begin_case
+  export FAKE_KERNEL_PREREQ_FLAVOR=al2023 FAKE_KERNEL_PREREQ_PKG_INSTALLED=0
+  export FAKE_KERNEL_BUILD_TREE_PRESENT=0
+  fake_gpu_install
+  local kernel dir devel headers rc
+  kernel="$("$(command -v uname)" -r)"
+  dir="$NVIDIA_STAGE_DIR"
+  command mkdir -p "$dir"
+  : >"$dir/kernel6.12-devel-$kernel.x86_64.rpm"
+  : >"$dir/kernel6.12-headers-$kernel.x86_64.rpm"
+  devel="$(nvidia__staged_rpm "$dir" 'kernel*-devel-*.rpm')"
+  headers="$(nvidia__staged_rpm "$dir" 'kernel*-headers-*.rpm')"
+  nvidia__ensure_dkms_prereqs fake-sudo "$dir" >/dev/null 2>&1; rc=$?
+
+  check "globs: kernel*-devel-* matches the AL2023 devel RPM" \
+    bash -c 'grep -q "kernel6.12-devel-" <<<"$1"' _ "$devel"
+  check "globs: kernel*-headers-* matches the AL2023 headers RPM" \
+    bash -c 'grep -q "kernel6.12-headers-" <<<"$1"' _ "$headers"
+  check "globs: the prerequisite helper accepts the AL2023 closure" test "$rc" -eq 0
+  check "globs: the devel RPM is installed" state_flag kernel_devel
+  check "globs: the headers RPM is installed" state_flag kernel_headers
+  check "globs: the installed RPMs provide the build tree" kernel_build_tree_present
   end_case
 }
 
@@ -2728,6 +2949,15 @@ case_persistenced_start_failure_fatal
 case_resume_preserves_active_state
 case_marker_write_failure
 case_resume_at_floor_short_circuit
+
+# AL2023 kernel build prerequisites (kernel6.12-devel/headers)
+case_kernel_prereq_al2023_installed_passes
+case_kernel_prereq_legacy_installed_passes
+case_kernel_prereq_build_tree_passes
+case_kernel_prereq_staged_al2023_packages_install
+case_kernel_prereq_missing_fails
+case_kernel_prereq_stage_closure_includes_specs
+case_kernel_prereq_globs_cover_al2023
 
 # Phase 5 (closure fix) -- DKMS-only payload
 case_dkms_only_closure_succeeds

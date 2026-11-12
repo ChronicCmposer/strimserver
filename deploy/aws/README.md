@@ -73,9 +73,10 @@ the host without a usable driver:
    - a staged prebuilt `kmod-nvidia-open` RPM must contain `nvidia.ko` for the
      running kernel;
    - a staged `kmod-nvidia-open-dkms` (or `nvidia-open-dkms`) RPM must contain
-     `dkms.conf`, and the `dkms` tool plus `kernel-devel`/`kernel-headers` for
-     the running kernel must already be present or supplied by the staged
-     closure; the DKMS source must also prove it can build for `uname -r`;
+     `dkms.conf`, and the `dkms` tool plus the running kernel's build tree must
+     already be present or supplied by the staged closure (see *Kernel build
+     prerequisites* below); the DKMS source must also prove it can build for
+     `uname -r`;
    - the `nvidia-open` metapackage carries no kernel module and is exempt.
 
    The staged closure must contain the 620 `gsp_tu10x.bin` (or the host must
@@ -117,6 +118,30 @@ the host without a usable driver:
    and a start failure is a loud warning, not a failure. Persistenced failure is
    fatal. DCGM/exporter and containerd are never restarted here. Finally remove
    the marker.
+
+#### Kernel build prerequisites (AL2023)
+
+A DKMS build needs the **running kernel's build tree**, not a particular package
+name. Before any driver uninstall/install, `nvidia__ensure_dkms_prereqs` treats
+the actual tree as authoritative and checks both
+`/usr/src/kernels/$(uname -r)/Makefile` and
+`/lib/modules/$(uname -r)/build`.
+
+- On AL2023 6.12 hosts those paths are installed by `kernel6.12-devel` and
+  `kernel6.12-headers`; the legacy `kernel-devel` / `kernel-headers` names are
+  not the versioned packages for the running kernel.
+- If the build tree is absent, the staged `kernel*-devel-*.rpm` /
+  `kernel*-headers-*.rpm` are installed. During staging,
+  `nvidia__kernel_prereq_specs` resolves the correct repo package names for the
+  running kernel, including the AL2023 `kernel6.12-*` names, and adds them to
+  the required closure.
+- A missing prerequisite still fails closed (`nvidia: ERROR [kernel-module]`)
+  before any driver uninstall/install; the old driver is never removed first.
+
+The host failure that prompted this check was a **false negative**: the required
+packages were already installed under the `kernel6.12-*` names, so no host
+package install is required for that case. Verify the tree, not the package
+name.
 
 The upgrade therefore needs outbound access to the NVIDIA CUDA repository at
 deploy time; the RPM payload itself is staged locally before removal so an
@@ -601,12 +626,18 @@ rpm -qa 'kmod-nvidia-open*' 'nvidia-driver-selinux'   # validator-covered / exem
 cat /proc/driver/nvidia/version
 ls -l /usr/lib64/libnvidia-encode.so.1   # NVENC userspace
 sudo test -f /lib/firmware/nvidia/620.70.06/gsp_tu10x.bin   # GSP firmware present
+ls -l /usr/src/kernels/$(uname -r)/Makefile /lib/modules/$(uname -r)/build   # DKMS build tree
 sudo systemctl status nvidia-persistenced
 ```
 
 `kmod-nvidia-open*` is covered by the staged-version validator and must report
 `620.70.06`; `nvidia-driver-selinux` is the one exemption, expected `noarch` and
 policy-only (see §1.1, *Staged-version validation*).
+
+On a DKMS host, confirm the running kernel's build tree directly rather than
+`rpm -q kernel-devel`/`kernel-headers`: AL2023 6.12 satisfies it with
+`kernel6.12-devel`/`kernel6.12-headers`, so the legacy package-name check is a
+false negative on those hosts (see §1.1, *Kernel build prerequisites*).
 
 **Controller:**
 
@@ -709,6 +740,14 @@ validation **before the swap** leaves the host on its existing driver (595 on
 the reference host); do not manually uninstall or reboot to "retry". DNF exiting
 `0` alone does not prove staging succeeded — the fail-closed access guard is
 what proves it (see §1.1, *Staging directory access*).
+
+On a DKMS host the kernel prerequisite is the running kernel's **build tree**
+(`/usr/src/kernels/$(uname -r)/Makefile` and
+`/lib/modules/$(uname -r)/build`), not the legacy package names: AL2023 6.12
+hosts satisfy it with `kernel6.12-devel`/`kernel6.12-headers`. A missing tree
+fails closed before any drain/uninstall/install, so a rollback is never needed
+for that case; do not pre-install `kernel-devel`/`kernel-headers` by name (see
+§1.1, *Kernel build prerequisites*).
 
 **Rollback:** the deployment tar is fully self-contained — the three image tars
 plus config/scripts live inside it, with no external runtime dependencies. To
