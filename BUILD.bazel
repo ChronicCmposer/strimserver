@@ -99,6 +99,21 @@ pkg_files(
     strip_prefix = strip_prefix.files_only(),
 )
 
+# lib/nvidia.sh is sourced by setup-gpu.sh as "$script_dir/lib/nvidia.sh", so it
+# MUST keep its lib/ path in the bundle. The flattening bundle_scripts /
+# bundle_exec_scripts targets would land it at /mnt/nvme/nvidia.sh, breaking the
+# source stanza; hence a dedicated pkg_files with an explicit rename. 0755
+# matches the executable contract (setup_strimserver chmods it too).
+pkg_files(
+    name = "bundle_nvidia_lib",
+    srcs = ["//deploy/aws/lib:nvidia.sh"],
+    attributes = pkg_attributes(mode = "0755"),
+    renames = {
+        "//deploy/aws/lib:nvidia.sh": "lib/nvidia.sh",
+    },
+    strip_prefix = strip_prefix.files_only(),
+)
+
 # The systemd unit is the SECOND bundle member that differs per language (the
 # controller image below is the first): the Go bundle ships the generated Go
 # unit (//deploy/aws:strimserver_unit_go) and the C bundle the generated C unit
@@ -261,6 +276,7 @@ pkg_tar(
         ":bundle_openssh_rpm",
         ":bundle_exec_scripts",
         ":bundle_scripts",
+        ":bundle_nvidia_lib",
     ],
     out = "strimserver-deployment-go-amd64.unchecked.tar",
     # Manual: the base tar is built ONLY inside the two arch transitions below.
@@ -353,6 +369,7 @@ pkg_tar(
         ":bundle_openssh_rpm",
         ":bundle_exec_scripts",
         ":bundle_scripts",
+        ":bundle_nvidia_lib",
     ],
     out = "strimserver-deployment-c.unchecked.tar",
     tags = ["manual"],

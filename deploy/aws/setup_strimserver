@@ -40,6 +40,46 @@ def run_ssh_commands(hostname, username, port, commands):
         ssh_run(hostname, username, port, cmd, capture=False)
 
 
+def ssh_capture(hostname, username, port, cmd):
+    """Run a remote probe and return its trimmed stdout ('' on any failure).
+
+    Unlike ssh_run this never raises on a non-zero exit and never prints the
+    raw output: it is for read-only questions such as "is /mnt/nvme mounted?".
+    """
+    ssh_cmd = os.environ.get("SSH_CMD", "ssh")
+    full_cmd = (ssh_cmd.split() + ssh_identity_flags()
+                + known_hosts.ssh_options()
+                + ["-p", f"{port}", "-t", f"{username}@{hostname}", cmd])
+    print(f"\n>>> Checking: {cmd}")
+    try:
+        result = subprocess.run(full_cmd, text=True, capture_output=True)
+    except FileNotFoundError:
+        print("Error: ssh client not found. Make sure OpenSSH is installed.", file=sys.stderr)
+        sys.exit(1)
+    return (result.stdout or "").strip()
+
+
+def parse_nvme_mode(argv):
+    """'auto' (reuse an existing filesystem, else format), 'reuse', or 'format'."""
+    mode = "auto"
+    for arg in argv[1:]:
+        if arg == "--no-format":
+            mode = "reuse"
+        elif arg == "--format":
+            mode = "format"
+        else:
+            sys.exit(f"unknown argument: {arg} (expected --format or --no-format)")
+    return mode
+
+
+def resolve_nvme_device():
+    """Device used when no interactive format prompt runs (NVME_DEVICE override)."""
+    dev = os.environ.get("NVME_DEVICE", "/dev/nvme1n1").strip() or "/dev/nvme1n1"
+    if not dev.startswith("/dev/"):
+        dev = "/dev/" + dev
+    return dev
+
+
 def scp_to_remote(local_path, hostname, username, port, remote_path):
     scp_cmd = os.environ.get("SCP_CMD", "scp")
     # scp uses -P (uppercase) for the port, unlike ssh's -p.
@@ -324,21 +364,49 @@ if __name__ == "__main__":
               file=sys.stderr)
     bind_target_instance(HOST)
 
-    # select nvme drive
-    r = ssh_run(HOST, USER, PORT, "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT", capture=True)
-    print("\nRemote disks:\n")
-    print(r.stdout)
-    dev = input("Enter the device to format [/dev/nvme1n1]: ").strip() or "/dev/nvme1n1"
-    if not dev.startswith("/dev/"):
-        dev = "/dev/" + dev
-
-    # 1) format + mount nvme, make it writable by the deploy user
-    run_ssh_commands(HOST, USER, PORT, [
-        f"sudo mkfs.ext4 -F {dev}",
-        "sudo mkdir -p /mnt/nvme",
-        f"sudo mount {dev} /mnt/nvme",
-        f"sudo chown {USER}:{USER} /mnt/nvme",
-    ])
+    # 1) prepare /mnt/nvme - non-destructive by default.
+    #    * already mounted                -> keep it untouched
+    #    * --format (explicit)            -> prompt, then mkfs + mount (wipe)
+    #    * --no-format                    -> reuse only; error without a filesystem
+    #    * auto (default)                 -> reuse an existing filesystem, else mkfs
+    nvme_mode = parse_nvme_mode(sys.argv)
+    nvme_mount = "/mnt/nvme"
+    if ssh_capture(HOST, USER, PORT, f"findmnt -n {nvme_mount}"):
+        print(f"\n{nvme_mount} is already mounted; keeping it (no mkfs, no mount).\n")
+    elif nvme_mode == "format":
+        r = ssh_run(HOST, USER, PORT, "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT", capture=True)
+        print("\nRemote disks:\n")
+        print(r.stdout)
+        dev = input("Enter the device to format [/dev/nvme1n1]: ").strip() or "/dev/nvme1n1"
+        if not dev.startswith("/dev/"):
+            dev = "/dev/" + dev
+        print(f"\n*** WIPING {dev}: an explicit --format was requested. ***\n")
+        run_ssh_commands(HOST, USER, PORT, [
+            f"sudo mkfs.ext4 -F {dev}",
+            f"sudo mkdir -p {nvme_mount}",
+            f"sudo mount {dev} {nvme_mount}",
+            f"sudo chown {USER}:{USER} {nvme_mount}",
+        ])
+    else:
+        dev = resolve_nvme_device()
+        fs_type = ssh_capture(HOST, USER, PORT, f"blkid -o value -s TYPE {dev} || true")
+        if nvme_mode == "reuse" and not fs_type:
+            sys.exit(f"--no-format requested but {dev} has no filesystem to reuse")
+        if fs_type:
+            print(f"\nReusing the existing {fs_type} filesystem on {dev}.\n")
+            run_ssh_commands(HOST, USER, PORT, [
+                f"sudo mkdir -p {nvme_mount}",
+                f"sudo mount {dev} {nvme_mount}",
+                f"sudo chown {USER}:{USER} {nvme_mount}",
+            ])
+        else:
+            print(f"\nNo filesystem found on {dev}; formatting it.\n")
+            run_ssh_commands(HOST, USER, PORT, [
+                f"sudo mkfs.ext4 -F {dev}",
+                f"sudo mkdir -p {nvme_mount}",
+                f"sudo mount {dev} {nvme_mount}",
+                f"sudo chown {USER}:{USER} {nvme_mount}",
+            ])
 
     # 2) place the deployment tar at REMOTE_TAR, by source type
     if scheme == "s3":
@@ -387,6 +455,7 @@ if __name__ == "__main__":
         f"cd /mnt/nvme && rm -f {DEPLOYMENT}",
         "cd /mnt/nvme && chmod +x deploy.sh",
         "cd /mnt/nvme && chmod +x setup-gpu.sh",
+        "cd /mnt/nvme && chmod +x lib/nvidia.sh",
         "cd /mnt/nvme && ./deploy.sh",
     ])
 

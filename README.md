@@ -88,6 +88,12 @@ whatever driver the DLAMI happens to ship. For more on CDI,
 see the specification at
 <https://github.com/cncf-tags/container-device-interface>.
 
+The image stays driver-version-agnostic, but the **host** driver is a pinned
+contract: CUDA 13.5 requires `nvidia-open 620.70.06` (T4/T4G `sm_75`, GSP
+firmware required). The AMI pin selects a deterministic DLAMI image; it does
+**not** pin the installed driver, which `deploy/aws/setup-gpu.sh` enforces and
+fails closed on (see `deploy/aws/README.md` §1.1).
+
 ### Controller API and behavior
 
 The controller listens on `CONTROLLER_HTTP_PORT` (default
@@ -896,9 +902,12 @@ above) or adjust the target accordingly.
 
 Expected target characteristics:
 
-- AMI family: latest Amazon Linux 2023 DLAMI.
-- GPU/container runtime: NVIDIA driver and container tooling
-  supplied by the DLAMI.
+- AMI family: latest Amazon Linux 2023 DLAMI. The amd64 AMI is pinned for
+  determinism, but the pin covers the **image**, not the installed GPU driver.
+- GPU/container runtime: NVIDIA container tooling supplied by the DLAMI; the
+  installed driver is brought to the `nvidia-open 620.70.06` floor (CUDA 13.5,
+  `sm_75`, GSP firmware required) by `deploy/aws/setup-gpu.sh`, which fails
+  closed if the floor cannot be met.
 - Storage: NVMe ephemeral device formatted as `ext4` and
   mounted at `/mnt/nvme` by `deploy/aws/setup_strimserver`.
 - Runtime: containerd with its root and state directories

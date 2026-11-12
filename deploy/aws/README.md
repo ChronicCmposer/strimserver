@@ -16,8 +16,37 @@ the production cutover — read it before any arm64 launch.
 | Instance | `g4dn.xlarge` (x86_64 + T4) / `g6.xlarge` (L4) | `g5g.2xlarge` (Graviton2 + T4G) |
 | CPU ISA | x86_64 | arm64, armv8.2-a (Neoverse N1) |
 | GPU / gencode | T4 `sm_75` (L4 `sm_89` on g6) | T4G `sm_75` — same gencode as T4 |
-| AMI | Pinned x86_64 AL2023 NVIDIA DLAMI 20261106 (`DEFAULT_AMI_ID`, us-east-2) | arm64 AL2023 NVIDIA DLAMI via the SSM float `.../arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id` |
+| AMI | Pinned x86_64 AL2023 NVIDIA DLAMI 20261106 (`DEFAULT_AMI_ID`, us-east-2) — **pins the AMI, not the installed driver** (see §1.1) | arm64 AL2023 NVIDIA DLAMI via the SSM float `.../arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id` — also does not pin the installed driver |
+| Driver (installed) | `nvidia-open 620.70.06` floor, enforced by `setup-gpu.sh` | same `620.70.06` floor via `nvidia-open-620.70.06-1.amzn2023.noarch` (arm64 caveat in §1.1) |
 | Controller in image | Go controller (the oracle), pure-Go static `linux/amd64` | Go controller (the oracle), pure-Go static `linux/arm64`; the alternate asm build (`//core/controller/alternate/asm:controller_asm`) is explicit/manual |
+
+### 1.1 GPU driver floor contract
+
+The host GPU driver is a **versioned contract**, not an incidental AMI
+property. Both architectures require driver **620.70.06** with CUDA 13.5:
+
+| Item | Contract |
+|---|---|
+| Driver floor | `620.70.06` exactly (CUDA 13.5 requires R620 with zero headroom; never a floating `>=620`) |
+| amd64 RPM | `nvidia-open-3:620.70.06-1.el9` |
+| arm64 RPM | `nvidia-open-620.70.06-1.amzn2023.noarch` (published in `amzn2023/sbsa`; see caveat below) |
+| CUDA | 13.5 |
+| GPU / gencode | `sm_75` (T4 and T4G) |
+| GSP firmware | **required** — `gsp_tu10x.bin`; never set `NVreg_EnableGpuFirmware=0` |
+
+The AMI is pinned for **determinism** (`DEFAULT_AMI_ID`,
+`ami-0198b63ccfac121e8`), but the AMI pin does **not** pin the installed driver:
+the DLAMI ships whatever driver its build carried, and the arm64 `/latest`
+float likewise does not pin it. `setup-gpu.sh` (via `lib/nvidia.sh`) enforces the
+floor: it detects the installed driver, upgrades to the pinned NEVRA when below
+the floor, never downgrades, confirms `gsp_tu10x.bin`, and **fails closed** if
+the floor cannot be met.
+
+**arm64 caveat:** `nvidia-open-620.70.06-1.amzn2023.noarch` is published in
+`amzn2023/sbsa`, but AL2023 **generic Arm64 is outside the vendor's 620 support
+matrix** (and `sbsa` `cuda-drivers` tops out at 610.57.04). The arm64 RPM epoch
+is unverified, so a T4G acceptance run (Phase 8) is required before treating
+arm64 as supported.
 
 The controller image is platform-selected in `core/controller/BUILD.bazel`:
 both amd64 and arm64 ship the pure-Go controller binary (static, so it needs
@@ -255,12 +284,15 @@ bundled defaults (DDNS disabled) stay in effect.
 
 1. Inject `TWITCH_STREAM_KEY` into `config/strimserver.env` (then scrub the
    transfer file). No key → warning, egress disabled until one is set.
-2. **NVIDIA runtime (new in the arm64 rollout): run `setup-gpu.sh` before the
-   containerd restart** — configures the NVIDIA container runtime with
-   `nvidia-ctk runtime configure --runtime=containerd --cdi.enabled --set-as-default`
-   on arm64. This wires the T4G driver + the CDI spec the controller's
-   `cdi.WithCDIDevices("nvidia.com/gpu=0")` requests consume, on the DLAMI's
-   containerd 2.x (config v3).
+2. **NVIDIA runtime: run `setup-gpu.sh` before the containerd restart** — it
+   enforces the `620.70.06` driver floor first (upgrade/recovery before the
+   `nvidia-smi` guard, failing closed if the floor is unmet), then on amd64
+   generates the JSON CDI spec the controller's
+   `cdi.WithCDIDevices("nvidia.com/gpu=0")` request consumes (containerd 2.x,
+   config v3). It does **not** run `nvidia-ctk runtime configure --set-as-default`:
+   the default runtime stays plain `runc`, and on arm64 the raw-API assembly
+   controller produces no CDI spec at all. It also enables
+   `nvidia-persistenced`.
 3. Prepend `root='/mnt/nvme/containerd'` / `state='/mnt/nvme/containerd-state'`
    to `/etc/containerd/config.toml`, restart containerd.
 4. Install the bundle's generated systemd unit to
@@ -314,12 +346,14 @@ and installs the matching generated unit.
 
 ## 5. Post-deploy verification (arm64)
 
-**Host GPU / driver:**
+**Host GPU / driver** — expect `620.70.06, 7.5` (T4/T4G `sm_75`):
 
 ```sh
-nvidia-smi                            # T4G, driver ~595.x
+nvidia-smi --query-gpu=driver_version,compute_cap --format=csv,noheader
+rpm -q nvidia-open                    # amd64: nvidia-open-3:620.70.06-1.el9
 cat /proc/driver/nvidia/version
 ls -l /usr/lib64/libnvidia-encode.so.1   # NVENC userspace
+sudo test -f /lib/firmware/nvidia/620.70.06/gsp_tu10x.bin   # GSP firmware present
 sudo systemctl status nvidia-persistenced
 ```
 
@@ -399,22 +433,30 @@ revert, point `DEPLOYMENT_SRC` at the previously published bundle (keeping
 e.g. `deploy/aws/launch --type g4dn.xlarge --wait`. Tear down the abandoned
 instance with `deploy/aws/terminate -y` (matches the `Project` tag).
 
+**Host-driver caveat:** the bundle contains no driver. Reverting
+`DEPLOYMENT_SRC` reverts the application, **not** the host driver — a host that
+already runs `620.70.06` keeps it. Because `setup-gpu.sh` never downgrades, there
+is no automated driver rollback: to go back below the floor, replace the instance
+from the pinned AMI (Tier B) rather than reinstalling in place. A manual
+`nvidia-uninstall` + `.run` reinstall is a last-resort operator action, not an
+automated rollback (the `.run` payload is not bundled).
+
 ## 7. Known blockers / TODOs — CRITICAL
 
-| # | Blocker | Impact | Resolution track |
-|---|---|---|---|
-| 1 | **arm64 ffmpeg artifact is NOT yet published** | **BLOCKED for production cutover** | Out-of-band `linux-sbsa` ffmpeg build (`tools/ffmpeg-dist/publish.sh`), then repoint the `@ffmpeg_dist` pin in `MODULE.bazel` |
-
-The arm64 `ffmpeg_image` currently embeds the **amd64** ffmpeg binary; no script
-change can fix it until an NVENC-capable arm64 ffmpeg artifact exists and is
-repinned. Because T4G is `sm_75` with gencode identical to the T4, the rebuild
-is architecture-only — no `-gencode` change. Treat this as the **hard gate** for
-the cutover: do not run a full arm64 production rollout off the current bundle.
+The former arm64 **artifact** blockers are resolved and no longer gate the
+cutover: the arm64 ffmpeg artifact is published (`@ffmpeg_dist_arm64`,
+`ffmpeg-8.1-deb20261104-cuda13.5.0-sm75-1a748fe-arm64.tar.gz`) and the arm64
+OpenSSH RPM is published (`openssh-experimental-aarch64.rpm`), so the arm64
+image no longer embeds an amd64 ffmpeg binary and experimental sshd no longer
+warns "not published".
 
 | # | Blocker | Impact | Resolution track |
 |---|---|---|---|
-| 2 | openssh arm64 RPM not published | Experimental sshd unavailable on arm64; deploy prints the skip warning | Out-of-band arm64 OpenSSH rebuild via `tools/openssh/publish.sh`; the bundled RPM is amd64-only today |
-| 3 | Smoke-test scripts not arch-parameterized | `ffmpeg_smoke_test.sh` / `mediamtx_smoke_test.sh` hardcode the x86_64 loader + multiarch lib paths | Parameterize the `run_dynamic` loader/multiarch dirs; the arm64 tar is already verified runnable |
+| 1 | **arm64 T4G driver is outside the vendor's 620 support matrix** | Production arm64 cutover is gated on a hardware acceptance run, not on artifacts | Phase 8 T4G acceptance on `g5g.2xlarge`; if sm_75/NVENC/GSP fails, split per-arch driver pins (plan Phase 6.8-6.14) |
+| 2 | arm64 RPM epoch unverified | Installability of `nvidia-open-620.70.06-1.amzn2023.noarch` on a T4G DLAMI is unproven | Capture `rpm -qp --qf '%{EPOCH}'` during acceptance, then pin the exact NEVRA |
+
+Do not run a full arm64 production rollout until the T4G acceptance run
+(Phase 8, `deploy/aws/gpu_acceptance_test.sh`) passes.
 
 ## 8. Architecture / migration rationale
 

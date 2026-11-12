@@ -171,14 +171,14 @@ from the **actual working tree** (no invented values).
 | tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | ffmpeg | 8.1 | version | yes |
 | tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | FFMPEG_COMMIT | 1a748fe2cd43e3ead22fafb1b5b7d77f153898a8 | version | no |
 | tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | nv-codec-headers | n13.1.15.0 | version | yes |
-| tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | NV_CODEC_HEADERS_COMMIT | 88fee5c37318c991a8762d423530f91681e32e3a | version | no |
+| tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | NV_CODEC_HEADERS_COMMIT | 0a6fba9a2820628b8103464f4c8753ee05838baa | version | no |
 | tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | CUDA | 13.5.0 | version | yes |
 | tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | debian | 20261104T000000Z | version | yes |
 | tools/ffmpeg-dist/build.sh | `tools/ffmpeg-dist/build.sh` | GENCODE | arch=compute_75,code=sm_75 | version | no |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | ffmpeg | 8.1 | version | yes |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | FFMPEG_COMMIT | 1a748fe2cd43e3ead22fafb1b5b7d77f153898a8 | version | no |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | nv-codec-headers | n13.1.15.0 | version | yes |
-| tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | NV_CODEC_HEADERS_COMMIT | 88fee5c37318c991a8762d423530f91681e32e3a | version | no |
+| tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | NV_CODEC_HEADERS_COMMIT | 0a6fba9a2820628b8103464f4c8753ee05838baa | version | no |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | CUDA | 13.5.0 | version | yes |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | debian | 20261104T000000Z | version | yes |
 | tools/ffmpeg-dist/publish.sh | `tools/ffmpeg-dist/publish.sh` | GENCODE | arch=compute_75,code=sm_75 | version | no |

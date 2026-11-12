@@ -11,16 +11,22 @@
 #
 # Background
 # ----------
-# The deployment relies entirely on the NVIDIA GPU DLAMI for AL2023 for the
-# driver + NVIDIA container toolkit; nothing here installs a driver. For the
+# The deployment enforces a host NVIDIA driver floor of 620.70.06 (the exact
+# R620 release CUDA 13.5 requires). This script sources lib/nvidia.sh and calls
+# nvidia_ensure_driver_floor BEFORE any nvidia-smi guard, so a host whose
+# driver is missing, below the floor, or left mid-swap is upgraded/recovered
+# here instead of failing the deploy. The NVIDIA GPU DLAMI for AL2023 remains
+# the normal source of the driver + container toolkit; PATH B below is now only
+# a fallback for hosts that cannot upgrade via the pinned RPM. For the
 # arm64 target (g5g.*, T4G) deploy/aws/launch selects the arm64 NVIDIA DLAMI
 # via the SSM parameter
 #   /aws/service/deeplearning/ami/arm64/
 #     base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id
-# (or AMI_ID can point at one explicitly). It ships the driver (595.x),
-# nvidia-container-toolkit (>= 1.15, so the nvidia runtime wrapper comes from
-# the toolkit package - there is no separate nvidia-container-runtime package),
-# and containerd 2.x. The amd64 path keeps the existing x86_64 DLAMI behavior.
+# (or AMI_ID can point at one explicitly). It ships the driver (raised to the
+# floor here when older), nvidia-container-toolkit (>= 1.15, so the nvidia
+# runtime wrapper comes from the toolkit package - there is no separate
+# nvidia-container-runtime package), and containerd 2.x. The amd64 path keeps
+# the existing x86_64 DLAMI behavior.
 #
 # Option C (arm64) vs CDI injection (amd64)
 # -----------------------------------------
@@ -50,12 +56,14 @@
 # the single restart only picks up deploy.sh's root/state config prepend. Do
 # not restart containerd here.
 #
-# PATH B - manual driver install on a stock AL2023 arm64 AMI (REFERENCE ONLY)
-# ---------------------------------------------------------------------------
+# PATH B - manual driver install on a stock AL2023 arm64 AMI (FALLBACK ONLY)
+# -------------------------------------------------------------------------
 # The amazonlinux-nvidia repo is x86_64-only, so an arm64 manual install MUST
 # use NVIDIA's CUDA repo with the sbsa (NOT aarch64) architecture token. The
-# commands below are for operators who deliberately launch from a stock AL2023
-# arm64 AMI instead of the arm64 DLAMI; this script never executes them.
+# pinned-RPM upgrade above is the normal path; the commands below are a
+# last-resort fallback for operators who deliberately launch from a stock
+# AL2023 arm64 AMI instead of the arm64 DLAMI; this script never executes them.
+# Re-run this script afterwards to enforce the 620.70.06 floor.
 #
 #   dnf config-manager --add-repo \
 #     https://developer.download.nvidia.com/compute/cuda/repos/amzn2023/sbsa/cuda-amzn2023.repo
@@ -73,6 +81,11 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/nvidia.sh
+source "$script_dir/lib/nvidia.sh"
+SUDO="${SUDO:-sudo}"
+
 # --- arch detection ----------------------------------------------------------
 MACHINE="$(uname -m)"
 if [[ "$MACHINE" == "aarch64" ]]; then
@@ -83,31 +96,72 @@ fi
 
 printf "configuring NVIDIA GPU runtime (%s)...\n" "$ARCH"
 
-# --- fail-loud guard: the DLAMI carries the driver, stock AL2023 does not -----
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-   printf "\n*** ERROR: NVIDIA driver not found on this %s instance. ***\n" "$ARCH"
-   if [[ "$ARCH" == "arm64" ]]; then
-      printf "The arm64 strimserver target (g5g.*) MUST run on the arm64 NVIDIA DLAMI\n"
-      printf "for AL2023 - the amazonlinux-nvidia repo is x86_64-only. deploy/aws/launch\n"
-      printf "selects this AMI automatically for g5g* via the SSM parameter\n"
-      printf "  /aws/service/deeplearning/ami/arm64/\n"
-      printf "    base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id\n"
-      printf "(or set AMI_ID to an arm64 NVIDIA DLAMI explicitly). A stock AL2023 arm64\n"
-      printf "AMI requires the manual driver install (PATH B) documented at the top of\n"
-      printf "deploy/aws/setup-gpu.sh; that path is reference only and is NOT run here.\n\n"
-   else
-      printf "The amd64 strimserver target relies on the x86_64 NVIDIA DLAMI for the\n"
-      printf "driver and container toolkit. Relaunch from the AL2023 GPU DLAMI\n"
-      printf "(deploy/aws/launch's default for amd64 instance types).\n\n"
-   fi
+# Can a missing nvidia-smi still be recovered? A pending resume marker or an
+# installable pinned package means yes; otherwise the guard below fails closed.
+nvidia_recovery_possible() {
+   [[ -e "${NVIDIA_RESUME_MARKER:-/var/lib/strimserver/driver-upgrade.state}" ]] && return 0
+   command -v dnf >/dev/null 2>&1 || return 1
+   local nevra
+   nevra="$(nvidia__pinned_nevra "$MACHINE")" || return 1
+   "$SUDO" dnf --quiet list --available "$nevra" >/dev/null 2>&1
+}
+
+# --- driver floor: upgrade/recovery runs BEFORE the nvidia-smi guard ----------
+# nvidia_ensure_driver_floor detects the installed driver, upgrades to the floor
+# when needed and finishes a half-completed swap. It MUST run before the guard,
+# because after a failed swap the nvidia-smi binary may be temporarily absent.
+if ! nvidia_ensure_driver_floor; then
+   printf "\n*** ERROR: the NVIDIA driver is below the %s floor and could not be upgraded/recovered. ***\n" "$NVIDIA_DRIVER_FLOOR"
+   printf "Inspect the nvidia: ERROR lines above for the failing state and its recovery command.\n\n"
    exit 1
 fi
 
+# --- fail-loud guard: no driver AND nothing left to install ------------------
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+   if ! nvidia_recovery_possible; then
+      printf "\n*** ERROR: NVIDIA driver not found on this %s instance. ***\n" "$ARCH"
+      if [[ "$ARCH" == "arm64" ]]; then
+         printf "The arm64 strimserver target (g5g.*) MUST run on the arm64 NVIDIA DLAMI\n"
+         printf "for AL2023 - the amazonlinux-nvidia repo is x86_64-only. deploy/aws/launch\n"
+         printf "selects this AMI automatically for g5g* via the SSM parameter\n"
+         printf "  /aws/service/deeplearning/ami/arm64/\n"
+         printf "    base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id\n"
+         printf "(or set AMI_ID to an arm64 NVIDIA DLAMI explicitly). A stock AL2023 arm64\n"
+         printf "AMI requires the manual driver install (PATH B) documented at the top of\n"
+         printf "deploy/aws/setup-gpu.sh; that path is reference only and is NOT run here.\n\n"
+      else
+         printf "The amd64 strimserver target relies on the x86_64 NVIDIA DLAMI for the\n"
+         printf "driver and container toolkit. Relaunch from the AL2023 GPU DLAMI\n"
+         printf "(deploy/aws/launch's default for amd64 instance types).\n\n"
+      fi
+      exit 1
+   fi
+   printf "nvidia-smi is not on PATH yet; the module-load step below will recover it.\n"
+fi
+
 # --- verify the driver actually initializes (T4G visible on g5g) --------------
+# A failing nvidia-smi means the module is not loaded (not that the driver is
+# absent): reload the module graph and re-check the floor before failing.
 printf "verifying NVIDIA driver...\n"
-nvidia-smi
+if ! nvidia-smi; then
+   printf "nvidia-smi failed; treating the driver module as unloaded and reloading...\n"
+   "$SUDO" depmod -a
+   "$SUDO" modprobe nvidia
+   "$SUDO" modprobe nvidia_uvm
+   if ! nvidia_ensure_driver_floor; then
+      printf "\n*** ERROR: the NVIDIA driver did not reach the %s floor after reloading. ***\n\n" "$NVIDIA_DRIVER_FLOOR"
+      exit 1
+   fi
+   if ! nvidia-smi; then
+      printf "\n*** ERROR: the NVIDIA driver is installed but nvidia-smi still fails. ***\n"
+      printf "Inspect: dmesg | tail ; modinfo nvidia ; lsmod | grep nvidia\n\n"
+      exit 1
+   fi
+fi
 
 # --- Option C / CDI wiring ----------------------------------------------------
+# The driver floor is already verified (and the module loaded) above, so any
+# CDI spec generated below reflects a working 620.70.06 driver.
 # containerd is restarted exactly once by deploy.sh AFTER this script, so any
 # containerd config change below is picked up together with deploy.sh's
 # root/state config prepend. Do not restart containerd here.
@@ -128,10 +182,10 @@ if [[ "$ARCH" == "arm64" ]]; then
       printf "then re-run this setup.\n\n"
       exit 1
    fi
-   # NOTE: no nvidia-ctk runtime configure (--set-as-default or otherwise) and
-   # no nvidia-ctk cdi generate here - both are CRI-only / unused by the raw-API
-   # assembly controller. The default runtime stays plain runc.
-   sudo systemctl enable --now nvidia-persistenced
+   # NOTE: no runtime configure (--set-as-default or otherwise) and no CDI
+   # generation here - both are CRI-only / unused by the raw-API assembly
+   # controller. The default runtime stays plain runc.
+   "$SUDO" systemctl enable --now nvidia-persistenced
 else
    # amd64: the controllers inject CDI themselves (the Go controller via
    # cdi.WithCDIDevices, the C controller via its JSON-only CDI scanner), so
@@ -140,18 +194,18 @@ else
    # /etc/cdi for host-side tooling. The default runtime is deliberately left
    # unchanged (behavior-preserving; no --set-as-default).
    printf "generating the CDI device spec for the controllers...\n"
-   sudo mkdir -p /var/run/cdi /etc/cdi
+   "$SUDO" mkdir -p /var/run/cdi /etc/cdi
    # Remove stale YAML (and any old JSON) from the dynamic dir first: the Go
    # CDI cache hard-fails when the same device appears in both nvidia.yaml and
    # nvidia.json in the same directory ("unresolvable CDI devices"). We ship
    # JSON only (canonical CDI format; both the C and Go controllers read it).
-   sudo rm -f /var/run/cdi/nvidia.yaml /var/run/cdi/nvidia.yml /var/run/cdi/nvidia.json
-   sudo nvidia-ctk cdi generate --format=json --output=/var/run/cdi/nvidia.json
+   "$SUDO" rm -f /var/run/cdi/nvidia.yaml /var/run/cdi/nvidia.yml /var/run/cdi/nvidia.json
+   "$SUDO" nvidia-ctk cdi generate --format=json --output=/var/run/cdi/nvidia.json
    # Same hygiene for the /etc/cdi copy: a stale YAML beside the JSON we copy
    # would be a same-dir duplicate conflict for host-side Go CDI tooling.
-   sudo rm -f /etc/cdi/nvidia.yaml /etc/cdi/nvidia.yml
-   sudo cp /var/run/cdi/nvidia.json /etc/cdi/nvidia.json
-   sudo systemctl enable --now nvidia-persistenced
+   "$SUDO" rm -f /etc/cdi/nvidia.yaml /etc/cdi/nvidia.yml
+   "$SUDO" cp /var/run/cdi/nvidia.json /etc/cdi/nvidia.json
+   "$SUDO" systemctl enable --now nvidia-persistenced
 fi
 printf "NVIDIA runtime wiring done!\n"
 

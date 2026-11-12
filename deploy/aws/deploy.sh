@@ -34,10 +34,21 @@ rm -f /mnt/nvme/imdslib.sh
 mkdir -p /mnt/nvme/config
 mkdir -p /mnt/nvme/bin
 
-mv /mnt/nvme/strimserver.env /mnt/nvme/config/strimserver.env
-mv /mnt/nvme/mediamtx.yaml.template /mnt/nvme/config/mediamtx.yaml.template
-mv /mnt/nvme/transcode.sh /mnt/nvme/bin/transcode.sh
-mv /mnt/nvme/notify /mnt/nvme/bin/notify
+# --- install the bundled config + tools (idempotent on re-run) ---------------
+# Only install the bundled env when no config is already present: a re-run (or
+# a cutover) must never overwrite an operator-injected /mnt/nvme/config.
+if [ ! -f /mnt/nvme/config/strimserver.env ] && [ -f /mnt/nvme/strimserver.env ]; then
+   mv /mnt/nvme/strimserver.env /mnt/nvme/config/strimserver.env
+fi
+if [ -f /mnt/nvme/mediamtx.yaml.template ]; then
+   mv /mnt/nvme/mediamtx.yaml.template /mnt/nvme/config/mediamtx.yaml.template
+fi
+if [ -f /mnt/nvme/transcode.sh ]; then
+   mv /mnt/nvme/transcode.sh /mnt/nvme/bin/transcode.sh
+fi
+if [ -f /mnt/nvme/notify ]; then
+   mv /mnt/nvme/notify /mnt/nvme/bin/notify
+fi
 
 chmod +x /mnt/nvme/bin/transcode.sh
 chmod +x /mnt/nvme/bin/notify
@@ -104,17 +115,19 @@ else
 fi
 # ------------------------------------------------------------------------------
 
-# NVIDIA GPU runtime: arch-aware (the DLAMI carries the driver + container
-# toolkit). Both controllers -- the Go controller (CONTROLLER_VARIANT=go-*)
-# and the C controller (CONTROLLER_VARIANT=c-*, the musl-static Go-equivalent
-# port) -- inject CDI themselves from JSON specs in the bind-mounted
-# /var/run/cdi (setup-gpu.sh generates /var/run/cdi/nvidia.json there; the C
-# controller mirrors the Go cdi.WithCDIDevices behavior), so no runtime shim
-# switch is needed on either arch. Runs BEFORE the containerd block below so
-# the single restart picks up any GPU wiring together with the root/state
-# config prepend.
+# NVIDIA GPU runtime: arch-aware. setup-gpu.sh sources lib/nvidia.sh and
+# enforces/upgrades the host driver floor (620.70.06) before wiring the
+# container runtime; the DLAMI's bundled driver is only the starting point.
+# Both controllers -- the Go controller (CONTROLLER_VARIANT=go-*) and the C
+# controller (CONTROLLER_VARIANT=c-*, the musl-static Go-equivalent port) --
+# inject CDI themselves from JSON specs in the bind-mounted /var/run/cdi
+# (setup-gpu.sh generates /var/run/cdi/nvidia.json there; the C controller
+# mirrors the Go cdi.WithCDIDevices behavior), so no runtime shim switch is
+# needed on either arch. Runs BEFORE the containerd block below so the single
+# restart picks up any GPU wiring together with the root/state config prepend.
+# setup-gpu.sh is removed only in the success-only cleanup at the end, so a
+# failed run can be retried.
 bash ./setup-gpu.sh
-rm -f /mnt/nvme/setup-gpu.sh
 
 # containerd
 printf "configuring containerd...\n"
@@ -155,12 +168,19 @@ rm -f {controller,ffmpeg,mediamtx}-container.tar
 set +x
 printf "image import started!\n"
 
-# Generate SRT passphrase
-printf "generating SRT passphrase...\n"
+# Generate an SRT passphrase once. On a re-run keep the existing passphrase so
+# the operator's already-configured encoder keeps working.
 SRT_READ_PASSPHRASE_FILE=/mnt/nvme/srt-passphrase
-export SRT_READ_PASSPHRASE="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 70)"
-printf "%s\n" "$SRT_READ_PASSPHRASE" > $SRT_READ_PASSPHRASE_FILE
-printf "srt passphrase generated!\n"
+if [ -f "$SRT_READ_PASSPHRASE_FILE" ]; then
+   printf "keeping the existing SRT passphrase...\n"
+   SRT_READ_PASSPHRASE="$(cat "$SRT_READ_PASSPHRASE_FILE")"
+else
+   printf "generating SRT passphrase...\n"
+   SRT_READ_PASSPHRASE="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 70)"
+   printf "%s\n" "$SRT_READ_PASSPHRASE" > "$SRT_READ_PASSPHRASE_FILE"
+fi
+export SRT_READ_PASSPHRASE
+printf "srt passphrase ready!\n"
 
 source /mnt/nvme/fish-deploy.sh
 rm -f /mnt/nvme/fish-deploy.sh
@@ -199,7 +219,13 @@ printf "video-files directory created: %s\n" "$VIDEO_FILES_DIRECTORY"
 printf "configuring offline segment...\n"
 set -x
 OFFLINE_SEGMENT_FILE_NAME=strimserver-offline-2160p60.mp4
-mv "$OFFLINE_SEGMENT_FILE_NAME" "$VIDEO_FILES_DIRECTORY"
+# Re-runnable: the bundled clip is only moved when it is still present (a
+# re-run, or a volume that already holds it, must not fail here).
+if [ -f "$OFFLINE_SEGMENT_FILE_NAME" ]; then
+   mv "$OFFLINE_SEGMENT_FILE_NAME" "$VIDEO_FILES_DIRECTORY"
+else
+   printf "offline segment already installed; skipping the move\n"
+fi
 set +x
 printf "offline segment configured: %s\n" "$OFFLINE_SEGMENT_FILE_NAME"
 
@@ -336,5 +362,11 @@ else
    printf "configure-local-encoder.zsh --strimserver-host %s --passphrase %s\n\n" "$PUBLIC_IP" "$SRT_READ_PASSPHRASE"
 fi
 
+# --- success-only cleanup ----------------------------------------------------
+# Reached only after every deploy step above succeeded (including the DDNS
+# verification when enabled), so a failed run keeps its payload for a retry.
+printf "cleaning up deployment payloads...\n"
+rm -f /mnt/nvme/setup-gpu.sh
+rm -f /mnt/nvme/lib/nvidia.sh
 rm -f /mnt/nvme/deploy.sh
 

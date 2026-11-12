@@ -114,6 +114,27 @@ var pins = []pin{
 		needles: []string{"ami-0198b63ccfac121e8"},
 	},
 	{
+		// Option B driver floor. lib/nvidia.sh is authored by the driver-core
+		// lane; skipIfMissing keeps a concurrent tree without it from
+		// hard-failing rather than asserting a file that does not exist yet.
+		name:          "nvidia-driver-floor-620.70.06",
+		file:          "deploy/aws/lib/nvidia.sh",
+		needles:       []string{`NVIDIA_DRIVER_FLOOR="620.70.06"`},
+		skipIfMissing: true,
+	},
+	{
+		name:          "nvidia-open-nevra-620.70.06",
+		file:          "deploy/aws/lib/nvidia.sh",
+		needles:       []string{`NVIDIA_OPEN_NEVRA="nvidia-open-3:620.70.06-1.el9"`},
+		skipIfMissing: true,
+	},
+	{
+		// The floor is documented in the deployment runbook's contract table.
+		name:    "deploy-aws-readme-driver-floor",
+		file:    "deploy/aws/README.md",
+		needles: []string{"620.70.06"},
+	},
+	{
 		name: "openssh-10.6p2",
 		file: "tools/openssh/build.sh",
 		needles: []string{

@@ -36,6 +36,9 @@ jobs:
       - name: Run pin oracle
         run: bazel test //tools/deps-pins:all
 
+      - name: Run deploy/aws tests
+        run: bazel test //deploy/aws:all
+
   package-build:
     runs-on: ubuntu-latest
     steps:
@@ -48,3 +51,6 @@ jobs:
 
       - name: Build the deployment package
         run: bazel build //:package
+
+      - name: Build the arm64 deployment package
+        run: bazel build //:package_arm64

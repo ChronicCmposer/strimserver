@@ -76,7 +76,9 @@ import known_hosts
 # Driver GPU AMI (Amazon Linux 2023) 20261106") for us-east-2: ships the NVIDIA
 # driver, containerd, and the NVIDIA container toolkit (CDI) strimserver needs.
 # Pinned (not the /latest SSM float) so the containerd runtime is deterministic
-# across launches.
+# across launches. The pin covers the AMI image, NOT the installed GPU driver:
+# setup-gpu.sh enforces the nvidia-open 620.70.06 floor (CUDA 13.5, sm_75, GSP
+# firmware) and fails closed if it cannot be met.
 #
 # NOTE: value is the base-oss-nvidia-driver GPU DLAMI (AL2023 x86_64) for
 # us-east-2, resolved via SSM on 2026-11-11 (the current date). Confirm it with
@@ -94,7 +96,10 @@ DEFAULT_DLAMI_SSM_PARAM = (
 
 # arm64 DLAMI SSM family (aarch64: Graviton CPU + T4G GPU). Unlike the x86_64
 # path there is NO pinned arm64 AMI id here: the /latest float is resolved via
-# SSM so the region's current arm64 NVIDIA DLAMI (if any) is used. OPERATOR MUST
+# SSM so the region's current arm64 NVIDIA DLAMI (if any) is used. This float
+# does NOT pin the installed GPU driver: setup-gpu.sh enforces the nvidia-open
+# 620.70.06 floor (CUDA 13.5, sm_75, GSP firmware) on whatever the DLAMI ships.
+# OPERATOR MUST
 # VERIFY this path exists in their region before an arm64 launch:
 #   aws ssm get-parameter --region <region> --name "<DEFAULT_DLAMI_SSM_PARAM_ARM64>"
 # An arm64 NVIDIA DLAMI may or may not exist for the region (they are

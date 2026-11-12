@@ -142,3 +142,49 @@ sh_test(
     ],
     tags = ["manual"],
 )
+
+# --- NVIDIA driver floor (620.70.06) -----------------------------------------
+# lib/nvidia.sh owns the version compare, detection precedence and the
+# stage-then-swap upgrade. These tests drive it (and setup-gpu.sh) through
+# testutil_fake_gpu.sh, which installs PATH shims for nvidia-smi, dnf, rpm,
+# modinfo, systemctl, rmmod/modprobe/depmod, fuser and a recording fake-sudo.
+sh_test(
+    name = "nvidia_version_test",
+    srcs = ["nvidia_version_test.sh"],
+    data = [
+        "//deploy/aws/lib:nvidia.sh",
+        "testutil_fake_gpu.sh",
+    ],
+)
+
+sh_test(
+    name = "setup_driver_test",
+    srcs = ["setup_driver_test.sh"],
+    data = [
+        "//deploy/aws/lib:nvidia.sh",
+        "testutil_fake_gpu.sh",
+    ],
+)
+
+# setup-gpu.sh is owned by the deploy-wiring lane; this target still runs in the
+# default test set and fails loudly until that script calls
+# nvidia_ensure_driver_floor before the nvidia-smi guard.
+sh_test(
+    name = "setup_gpu_test",
+    srcs = ["setup_gpu_test.sh"],
+    data = [
+        "//deploy/aws/lib:nvidia.sh",
+        "setup-gpu.sh",
+        "testutil_fake_gpu.sh",
+    ],
+)
+
+# Real-hardware acceptance only (T4/T4G, GSP, NVENC, CDI, containerd). Excluded
+# from wildcards; run directly on a GPU host:
+#   bash deploy/aws/gpu_acceptance_test.sh
+sh_test(
+    name = "gpu_acceptance_test",
+    srcs = ["gpu_acceptance_test.sh"],
+    data = ["//deploy/aws/lib:nvidia.sh"],
+    tags = ["manual"],
+)
