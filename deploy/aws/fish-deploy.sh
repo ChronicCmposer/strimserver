@@ -1,5 +1,50 @@
 #!/usr/bin/env bash
 
+# Write the system fish config without ever reading it back as the unprivileged
+# user. deploy.sh runs under `umask 077`, so a `sudo mkdir` would leave
+# /etc/fish at 0700 root:root and the file at 0600 root:root; a later
+# `cat /etc/fish/config.fish ... | sudo tee` then fails to traverse/read it,
+# truncating the config. Here the header + prompt are composed in a user-owned
+# temp file and installed atomically with explicit modes.
+fish_write_system_config() {
+   local config_file="$1"
+   local prompt_file="$2"
+   local sudo_cmd="${3:-sudo}"
+   local config_dir
+   local tmp
+
+   [[ -n "$config_file" && -n "$prompt_file" ]] || return 1
+
+   config_dir="$(dirname "$config_file")"
+
+   "$sudo_cmd" install -d -m 0755 "$config_dir" || return 1
+   "$sudo_cmd" chmod 0755 "$config_dir" || return 1
+
+   tmp="$(mktemp)" || return 1
+   {
+      printf "if status is-interactive\n"
+      printf "   fish_vi_key_bindings\n"
+      printf "end\n\n"
+      printf "set -gx fish_color_host_remote brcyan\n"
+   } > "$tmp" || { rm -f "$tmp"; return 1; }
+
+   cat "$prompt_file" >> "$tmp" || { rm -f "$tmp"; return 1; }
+
+   "$sudo_cmd" install -m 0644 "$tmp" "$config_file" || { rm -f "$tmp"; return 1; }
+
+   rm -f "$tmp" || return 1
+}
+
+# Tests source this file to exercise fish_write_system_config without running
+# the network install or touching the real /etc. `return` keeps a sourced
+# parent (deploy.sh) alive; `exit` handles a direct invocation.
+if [[ "${FISH_DEPLOY_LIB_ONLY:-0}" == "1" ]]; then
+   if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+      return 0
+   fi
+   exit 0
+fi
+
 # fish is an operator convenience shell, not required by strimserver. The pinned
 # release URL below is x86_64-only; on any other architecture (e.g. aarch64 on
 # the g5g.2xlarge arm64 target) we skip the install loudly rather than download
@@ -26,19 +71,11 @@ set -x
 wget "$FISH_DIST_URL" -O "$FISH_DIST_FILE" 
 echo "$FISH_DIST_CHECKSUM  $FISH_DIST_FILE" | sha256sum --check -
 sudo tar -xvJf "$FISH_DIST_FILE" -C /usr/local/bin
-sudo mkdir -p $(dirname $FISH_SYSTEM_CONFIG_FILE)
-{ 
-   printf "if status is-interactive\n"
-   printf "   fish_vi_key_bindings\n"
-   printf "end\n\n"
-   printf "set -gx fish_color_host_remote brcyan\n"
-
-} | sudo tee "$FISH_SYSTEM_CONFIG_FILE"
-
-cat "$FISH_SYSTEM_CONFIG_FILE" prompt_login.fish | sudo tee "$FISH_SYSTEM_CONFIG_FILE"
+fish_write_system_config "$FISH_SYSTEM_CONFIG_FILE" prompt_login.fish
 rm -f /mnt/nvme/prompt_login.fish
 
 sudo mkdir -p "$FISH_VENDOR_COMPLETIONS_DIR"
+sudo chmod 0755 "$FISH_VENDOR_COMPLETIONS_DIR"
 
 FISH_SHELL=$(which fish)
 if [[ ! -s /etc/shells.original ]]; then

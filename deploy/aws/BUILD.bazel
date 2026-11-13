@@ -97,6 +97,15 @@ sh_test(
     ],
 )
 
+# fish_deploy_test.sh sources fish-deploy.sh (FISH_DEPLOY_LIB_ONLY=1) and drives
+# fish_write_system_config through a recording fake sudo. Regression for the
+# umask 077 / 0700-parent bug that truncated config.fish to the prompt body.
+sh_test(
+    name = "fish_deploy_test",
+    srcs = ["fish_deploy_test.sh"],
+    data = ["fish-deploy.sh"],
+)
+
 # --- Offline tests: project-scoped [strimserver] operator account (11b) ------
 # These run without AWS: testutil_fake_aws.sh puts a stub `aws` on PATH.
 sh_test(
