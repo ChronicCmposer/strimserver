@@ -135,6 +135,19 @@ var pins = []pin{
 		needles: []string{"620.70.06"},
 	},
 	{
+		// The runbook documents both accepted factory DKMS source layouts and
+		// the derived `nvidia/620.70.06` identity, so an operator can tell a
+		// legacy `nvidia-open-<floor>` tree from the new `nvidia-<floor>` one.
+		// Wording only: this asserts the existing 620.70.06 pin, no new version.
+		name: "deploy-aws-readme-dkms-source-layouts",
+		file: "deploy/aws/README.md",
+		needles: []string{
+			"usr/src/nvidia-620.70.06/dkms.conf",
+			"usr/src/nvidia-open-620.70.06/dkms.conf",
+			"nvidia/620.70.06",
+		},
+	},
+	{
 		// The staged-version validator contract is documented as an exact-name,
 		// noarch, policy-only exemption for nvidia-driver-selinux while
 		// kmod-nvidia-open* stays version-asserted at the 620.70.06 floor.

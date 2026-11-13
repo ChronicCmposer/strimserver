@@ -102,14 +102,19 @@ path, or a nonzero `rpm` exit fails closed, and a validator failure restores the
 original versionlock with no `.nvidia-upgrade.*` backup left behind. Optional
 fabricmanager/persistenced packages are availability-gated and may be omitted
 with a warning; a staged prebuilt kmod must carry `nvidia.ko` while a staged
-`kmod-nvidia-open-dkms` must carry `dkms.conf` with `dkms` and the running
-kernel's build tree present. That prerequisite is the tree, not a package name:
+`kmod-nvidia-open-dkms` must carry a factory `dkms.conf` — under either the
+`nvidia-<floor>` or the legacy `nvidia-open-<floor>` source layout — with `dkms`
+and the running kernel's build tree present. The DKMS identity
+(`nvidia/620.70.06` or legacy `nvidia-open/620.70.06`) is derived from that
+factory `dkms.conf`, and variant detection, `dkms status`, and post-install
+verification accept both. That prerequisite is the tree, not a package name:
 AL2023 6.12 hosts satisfy it with `kernel6.12-devel`/`kernel6.12-headers`, and
 `lib/nvidia.sh` checks `/usr/src/kernels/$(uname -r)/Makefile` and
 `/lib/modules/$(uname -r)/build`, failing closed before any driver
 uninstall/install if the tree is missing. See `deploy/aws/README.md` §1.1
-(*Kernel build prerequisites*). The upgrade restores only units that were active
-before the drain (fabricmanager start failure is non-fatal; persistenced failure
+(*DKMS source layout and identity* and *Kernel build prerequisites*). The upgrade
+restores only units that were active before the drain (fabricmanager start
+failure is non-fatal; persistenced failure
 is fatal), and an in-place rollback requires a pre-upgrade 595 artifact
 preserved off-host. Staging itself is a permissions-sensitive step: the root-owned
 `mktemp` stage and every parent component must be readable and traversable by the
@@ -957,9 +962,14 @@ Expected target characteristics:
   `.nvidia-upgrade.*` backup. Optional fabricmanager/persistenced
   packages are availability-gated and may be omitted with a warning; a staged
   prebuilt kmod must carry `nvidia.ko` while a staged `kmod-nvidia-open-dkms`
-  must carry `dkms.conf` with `dkms` and the running kernel's build tree present
-  (AL2023 6.12: `kernel6.12-devel`/`kernel6.12-headers`; see
-  `deploy/aws/README.md` §1.1, *Kernel build prerequisites*).
+  must carry a factory `dkms.conf` under either the `nvidia-<floor>` or the
+  legacy `nvidia-open-<floor>` source layout, with `dkms` and the running
+  kernel's build tree present (AL2023 6.12:
+  `kernel6.12-devel`/`kernel6.12-headers`). The DKMS identity
+  (`nvidia/620.70.06` or legacy `nvidia-open/620.70.06`) comes from that
+  `dkms.conf`; variant detection, stale-build cleanup, and post-install
+  verification accept both. See `deploy/aws/README.md` §1.1, *DKMS source
+  layout and identity* and *Kernel build prerequisites*.
   Restore touches only units that were active before the drain (a fabricmanager
   start failure is non-fatal; persistenced failure is fatal). The root-owned
   `mktemp` stage and all of its parent components must be readable/traversable by

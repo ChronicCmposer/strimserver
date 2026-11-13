@@ -73,10 +73,12 @@ the host without a usable driver:
    - a staged prebuilt `kmod-nvidia-open` RPM must contain `nvidia.ko` for the
      running kernel;
    - a staged `kmod-nvidia-open-dkms` (or `nvidia-open-dkms`) RPM must contain
-     `dkms.conf`, and the `dkms` tool plus the running kernel's build tree must
-     already be present or supplied by the staged closure (see *Kernel build
-     prerequisites* below); the DKMS source must also prove it can build for
-     `uname -r`;
+     a factory `dkms.conf` under either accepted source layout
+     (`nvidia-<floor>` or `nvidia-open-<floor>`; see *DKMS source layout and
+     identity* below), and the `dkms` tool plus the running kernel's build tree
+     must already be present or supplied by the staged closure (see *Kernel
+     build prerequisites* below); the DKMS source must also prove it can build
+     for `uname -r`;
    - the `nvidia-open` metapackage carries no kernel module and is exempt.
 
    The staged closure must contain the 620 `gsp_tu10x.bin` (or the host must
@@ -107,8 +109,9 @@ the host without a usable driver:
 7. **Swap:** remove a `.run`-managed payload when present, install the validated
    closure offline (`--allowerasing --disableexcludes=all --disablerepo='*'`),
    confirm the module for the running kernel is 620 (for DKMS, `dkms status`
-   must show `nvidia-open/620.70.06` for `uname -r`; a successful `dnf install`
-   alone is not success), remove only stale below-floor DKMS builds,
+   must show `nvidia/620.70.06` or the legacy `nvidia-open/620.70.06` for
+   `uname -r`; a successful `dnf install` alone is not success), remove only
+   stale below-floor DKMS builds,
    `depmod -a`, unload the old module graph dependency-first, then
    `modprobe nvidia` + `nvidia_uvm`.
 8. **Verify:** proc driver at/above the floor, `nvidia-smi` compute capability
@@ -148,6 +151,37 @@ deploy time; the RPM payload itself is staged locally before removal so an
 interrupted install is recoverable from `/mnt/nvme/nvidia-rpm`. A stage that
 fails validation **before the swap** leaves the host on its existing driver
 (595 on the reference host); the old driver is never uninstalled first.
+
+#### DKMS source layout and identity
+
+The factory 620 DKMS RPM does not have to identify itself as `nvidia-open`.
+Its `dkms.conf` may be extracted as `usr/src/nvidia-620.70.06/dkms.conf` with
+`PACKAGE_NAME="nvidia"` and `PACKAGE_VERSION="620.70.06"`, or as
+`usr/src/nvidia-open-620.70.06/dkms.conf` with the legacy `nvidia-open` package
+name. Both are first-class:
+
+- **Accepted source layouts.** `nvidia__find_dkms_source_dir` accepts a source
+  tree at either `nvidia-<floor>` or `nvidia-open-<floor>`, under the DKMS
+  source root or under `<root>/usr/src` as an RPM extract lands (cpio strips the
+  leading slash). A tree with no `dkms.conf` at either layout fails closed.
+- **Identity from `dkms.conf`.** The DKMS identity is the
+  `PACKAGE_NAME`/`PACKAGE_VERSION` pair read from the factory `dkms.conf`
+  (`nvidia__dkms_identity`). A missing tree, key, or empty value fails closed
+  rather than inventing an identity from a directory name. Registration, the
+  pre-install build proof, and the post-install `dkms status` check therefore
+  use `nvidia/620.70.06` or the legacy `nvidia-open/620.70.06`, whichever the
+  factory payload declares.
+- **Same acceptance everywhere.** Variant detection
+  (`nvidia__kernel_module_variant`) recognizes both `/var/lib/dkms/nvidia` and
+  `/var/lib/dkms/nvidia-open` (and both source-root prefixes plus
+  `nvidia(-open)?/` in `dkms status`); stale-build cleanup matches both
+  identities; and post-install verification accepts either
+  `nvidia/620.70.06` or `nvidia-open/620.70.06` for the running kernel.
+- **Root-owned extraction cleanup.** Extraction runs as root (`rpm2cpio` +
+  `cpio` through `${SUDO:-sudo}`), so the temp extract tree is root-owned.
+  Cleanup therefore also goes through `${SUDO:-sudo}` on every failure path and
+  on success: a failed registration or build must never leave a root-owned
+  temp tree behind for the deploying user.
 
 #### Staged-version validation
 
@@ -627,6 +661,7 @@ cat /proc/driver/nvidia/version
 ls -l /usr/lib64/libnvidia-encode.so.1   # NVENC userspace
 sudo test -f /lib/firmware/nvidia/620.70.06/gsp_tu10x.bin   # GSP firmware present
 ls -l /usr/src/kernels/$(uname -r)/Makefile /lib/modules/$(uname -r)/build   # DKMS build tree
+sudo dkms status   # nvidia/620.70.06 or nvidia-open/620.70.06 for $(uname -r) (DKMS host)
 sudo systemctl status nvidia-persistenced
 ```
 

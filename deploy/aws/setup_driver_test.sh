@@ -81,7 +81,9 @@ end_case() {
     FAKE_ARCH FAKE_KERNEL_RELEASE FAKE_NEVRA FAKE_HOLDER FAKE_KERNEL_MODULE_VARIANT \
     FAKE_DKMS_STATUS FAKE_DKMS_RC FAKE_DKMS_STATUS_RC FAKE_DKMS_REMOVE_RC \
     FAKE_DKMS_RPM FAKE_DKMS_PAYLOAD FAKE_DKMS_CONF_MISSING FAKE_DKMS_TOOL_MISSING \
-    FAKE_DKMS_BUILD_RC FAKE_STAGE_INCLUDE_DKMS FAKE_STAGE_INCLUDE_BUILD_PREREQS \
+    FAKE_DKMS_BUILD_RC FAKE_DKMS_SOURCE_LAYOUT FAKE_DKMS_PACKAGE_NAME \
+    FAKE_DKMS_PACKAGE_VERSION FAKE_DKMS_CLEANUP_RC \
+    FAKE_STAGE_INCLUDE_DKMS FAKE_STAGE_INCLUDE_BUILD_PREREQS \
     FAKE_STAGE_INCLUDE_KERNEL_PREREQS FAKE_KERNEL_PREREQ_FLAVOR \
     FAKE_KERNEL_PREREQ_PREFIX FAKE_KERNEL_PREREQ_PKG_INSTALLED \
     FAKE_KERNEL_BUILD_ROOT FAKE_KERNEL_BUILD_TREE_PRESENT \
@@ -1630,6 +1632,247 @@ case_dkms_source_registration_before_build() {
   end_case
 }
 
+# ===========================================================================
+# Factory DKMS source naming (NVIDIA 620.70.06): the new source layout is
+# `nvidia-<floor>` with PACKAGE_NAME="nvidia"; the legacy `nvidia-open-<floor>`
+# layout must keep working. The factory dkms.conf identity controls dkms add,
+# build and cleanup, and post-install status accepts either identity.
+# ===========================================================================
+case_dkms_source_nvidia_layout_registers() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_SOURCE_LAYOUT=nvidia
+  export FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia/595.112.07, $kernel, x86_64: installed"
+  local src_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-$NVIDIA_DRIVER_FLOOR"
+  local legacy_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-open-$NVIDIA_DRIVER_FLOOR"
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "dkms nvidia layout: upgrade exits 0" test "$rc" -eq 0
+  check "dkms nvidia layout: registers nvidia/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms add nvidia/$NVIDIA_DRIVER_FLOOR\$"
+  check "dkms nvidia layout: builds nvidia/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms build nvidia/$NVIDIA_DRIVER_FLOOR( |\$)"
+  check "dkms nvidia layout: add precedes build" \
+    before "^dkms add nvidia/$NVIDIA_DRIVER_FLOOR\$" \
+      "^dkms build nvidia/$NVIDIA_DRIVER_FLOOR"
+  check "dkms nvidia layout: never registers or removes nvidia-open/$NVIDIA_DRIVER_FLOOR" \
+    no_call "nvidia-open/$NVIDIA_DRIVER_FLOOR"
+  check "dkms nvidia layout: the derived source tree is $src_dir" \
+    test -f "$src_dir/dkms.conf"
+  check "dkms nvidia layout: the copied dkms.conf keeps PACKAGE_NAME=nvidia" \
+    bash -c 'grep -qxF "PACKAGE_NAME=\"nvidia\"" "$1/dkms.conf"' _ "$src_dir"
+  check "dkms nvidia layout: the copied dkms.conf keeps PACKAGE_VERSION=$NVIDIA_DRIVER_FLOOR" \
+    bash -c 'k=PACKAGE_VERSION; grep -qxF "$k=\"$2\"" "$1/dkms.conf"' _ "$src_dir" \
+      "$NVIDIA_DRIVER_FLOOR"
+  check "dkms nvidia layout: no nvidia-open-$NVIDIA_DRIVER_FLOOR source tree was created" \
+    test ! -e "$legacy_dir"
+  end_case
+}
+
+case_dkms_source_legacy_layout_still_works() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_SOURCE_LAYOUT=nvidia-open
+  export FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $kernel, x86_64: installed"
+  local src_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-open-$NVIDIA_DRIVER_FLOOR"
+  local nvidia_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-$NVIDIA_DRIVER_FLOOR"
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "dkms legacy layout: upgrade exits 0" test "$rc" -eq 0
+  check "dkms legacy layout: registers nvidia-open/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms add nvidia-open/$NVIDIA_DRIVER_FLOOR\$"
+  check "dkms legacy layout: builds nvidia-open/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms build nvidia-open/$NVIDIA_DRIVER_FLOOR( |\$)"
+  check "dkms legacy layout: never registers nvidia/$NVIDIA_DRIVER_FLOOR" \
+    no_call "^dkms add nvidia/$NVIDIA_DRIVER_FLOOR\$"
+  check "dkms legacy layout: the derived source tree is $src_dir" \
+    test -f "$src_dir/dkms.conf"
+  check "dkms legacy layout: the copied dkms.conf keeps PACKAGE_NAME=nvidia-open" \
+    bash -c 'grep -qxF "PACKAGE_NAME=\"nvidia-open\"" "$1/dkms.conf"' _ "$src_dir"
+  check "dkms legacy layout: the copied dkms.conf keeps PACKAGE_VERSION=$NVIDIA_DRIVER_FLOOR" \
+    bash -c 'k=PACKAGE_VERSION; grep -qxF "$k=\"$2\"" "$1/dkms.conf"' _ "$src_dir" \
+      "$NVIDIA_DRIVER_FLOOR"
+  check "dkms legacy layout: no nvidia-$NVIDIA_DRIVER_FLOOR source tree was created" \
+    test ! -e "$nvidia_dir"
+  end_case
+}
+
+# The factory dkms.conf identity, not the source-directory name, decides what
+# `dkms add`'s name token must be. Here the payload lands in
+# `/usr/src/nvidia-620.70.06/` but the factory conf says `nvidia-open`, so the
+# layout-derived `nvidia/620.70.06` identity is wrong and must never be used.
+case_dkms_source_conf_identity_overrides_layout() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_SOURCE_LAYOUT=nvidia
+  export FAKE_DKMS_PACKAGE_NAME=nvidia-open
+  export FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $kernel, x86_64: installed"
+  local src_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-open-$NVIDIA_DRIVER_FLOOR"
+  local layout_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-$NVIDIA_DRIVER_FLOOR"
+  local scratch_src="$NVIDIA_DKMS_SRC_ROOT/nvidia-999.9.9"
+  local rc wrong_rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "dkms identity: a conf/layout disagreement still upgrades" test "$rc" -eq 0
+  check "dkms identity: registers the factory identity nvidia-open/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms add nvidia-open/$NVIDIA_DRIVER_FLOOR\$"
+  check "dkms identity: builds the factory identity nvidia-open/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms build nvidia-open/$NVIDIA_DRIVER_FLOOR( |\$)"
+  check "dkms identity: the wrong layout-derived nvidia/$NVIDIA_DRIVER_FLOOR is rejected" \
+    no_call "^dkms add nvidia/$NVIDIA_DRIVER_FLOOR\$"
+  check "dkms identity: the source is copied under the factory-derived nvidia-open-$NVIDIA_DRIVER_FLOOR" \
+    test -f "$src_dir/dkms.conf"
+  check "dkms identity: the copied dkms.conf keeps PACKAGE_NAME=nvidia-open" \
+    bash -c 'grep -qxF "PACKAGE_NAME=\"nvidia-open\"" "$1/dkms.conf"' _ "$src_dir"
+  check "dkms identity: the layout-derived nvidia-$NVIDIA_DRIVER_FLOOR tree was never created" \
+    test ! -e "$layout_dir"
+
+  # Independently prove the harness enforces the factory identity: a source
+  # tree whose dkms.conf disagrees with the requested token name is rejected.
+  command mkdir -p "$scratch_src"
+  printf 'PACKAGE_NAME="nvidia-open"\nPACKAGE_VERSION="999.9.9"\n' \
+    >"$scratch_src/dkms.conf"
+  "$(command -v dkms)" add "nvidia/999.9.9" >/dev/null 2>&1; wrong_rc=$?
+  check "dkms identity: dkms rejects a token that disagrees with dkms.conf" \
+    test "$wrong_rc" -ne 0
+  end_case
+}
+
+case_dkms_cleanup_uses_sudo() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_SOURCE_LAYOUT=nvidia
+  # A factory dkms.conf without PACKAGE_NAME fails identity discovery only
+  # AFTER extraction, so the temp tree cleanup path is exercised. The harness
+  # makes an unprivileged rm of that tree fail with a permission error.
+  export FAKE_DKMS_PACKAGE_NAME=
+  export FAKE_DKMS_CLEANUP_RC=13
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "dkms cleanup: post-extraction failure fails" test "$rc" -ne 0
+  check "dkms cleanup: names [kernel-module]" \
+    bash -c 'grep -q "\[kernel-module\]" "$1"' _ "$err"
+  check "dkms cleanup: extraction cleanup runs through sudo" \
+    has_call '^sudo rm -rf '
+  # fake-sudo logs "sudo rm ..." and then execs the recording `rm` shim, so a
+  # sudo-routed removal produces one of each line. Any extra unprivileged
+  # recursive rm would make the plain count exceed the sudo count.
+  local sudo_rm plain_rm
+  sudo_rm="$(grep -c '^sudo rm -rf ' "$FAKE_GPU_CALLS" || true)"
+  plain_rm="$(grep -c '^rm -rf ' "$FAKE_GPU_CALLS" || true)"
+  check "dkms cleanup: every recursive rm is sudo-routed, none unprivileged" \
+    bash -c '[[ "$1" -ge 1 && "$2" -eq "$1" ]]' _ "$sudo_rm" "$plain_rm"
+  check "dkms cleanup: no unprivileged rm permission-error path" \
+    bash -c '! grep -q "Permission denied" "$1"' _ "$err"
+  check "dkms cleanup: no uninstall attempted" no_call 'nvidia-uninstall'
+  check "dkms cleanup: no offline install attempted" no_call '^dnf install .*--allowerasing'
+  check "dkms cleanup: no marker left behind" \
+    bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+case_dkms_variant_detection_accepts_nvidia() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=kmod
+  export FAKE_DKMS_RPM=0
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  # Model a live factory source tree under the redirected DKMS root (the real
+  # /usr/src cannot be written by a hermetic test).
+  command mkdir -p "$NVIDIA_DKMS_SRC_ROOT/nvidia-$NVIDIA_DRIVER_FLOOR"
+  {
+    printf 'PACKAGE_NAME="nvidia"\n'
+    printf 'PACKAGE_VERSION="%s"\n' "$NVIDIA_DRIVER_FLOOR"
+  } >"$NVIDIA_DKMS_SRC_ROOT/nvidia-$NVIDIA_DRIVER_FLOOR/dkms.conf"
+  export FAKE_DKMS_STATUS="nvidia/$NVIDIA_DRIVER_FLOOR, $kernel, x86_64: installed"
+  local variant
+  variant="$(nvidia__kernel_module_variant fake-sudo 2>/dev/null)"
+  check "dkms variant: nvidia/$NVIDIA_DRIVER_FLOOR is recognised as dkms" \
+    test "$variant" = "dkms"
+  end_case
+
+  # The legacy layout/identity must be detected identically.
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=kmod
+  export FAKE_DKMS_RPM=0
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  kernel="$("$(command -v uname)" -r)"
+  command mkdir -p "$NVIDIA_DKMS_SRC_ROOT/nvidia-open-$NVIDIA_DRIVER_FLOOR"
+  {
+    printf 'PACKAGE_NAME="nvidia-open"\n'
+    printf 'PACKAGE_VERSION="%s"\n' "$NVIDIA_DRIVER_FLOOR"
+  } >"$NVIDIA_DKMS_SRC_ROOT/nvidia-open-$NVIDIA_DRIVER_FLOOR/dkms.conf"
+  export FAKE_DKMS_STATUS="nvidia-open/$NVIDIA_DRIVER_FLOOR, $kernel, x86_64: installed"
+  variant="$(nvidia__kernel_module_variant fake-sudo 2>/dev/null)"
+  check "dkms variant: nvidia-open/$NVIDIA_DRIVER_FLOOR is recognised as dkms" \
+    test "$variant" = "dkms"
+  end_case
+}
+
+case_post_install_status_accepts_nvidia() {
+  local rc kernel
+
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_SOURCE_LAYOUT=nvidia
+  export FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia/595.112.07, $kernel, x86_64: installed"
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "post-install nvidia: accepts nvidia/$NVIDIA_DRIVER_FLOOR for the kernel" \
+    test "$rc" -eq 0
+  check "post-install nvidia: consults dkms status after the offline install" \
+    before '^dnf install .*--allowerasing' 'dkms status'
+  end_case
+
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_SOURCE_LAYOUT=nvidia-open
+  export FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $kernel, x86_64: installed"
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "post-install nvidia-open: still accepts nvidia-open/$NVIDIA_DRIVER_FLOOR for the kernel" \
+    test "$rc" -eq 0
+  end_case
+}
+
 case_run_managed_dkms_detected() {
   begin_case
   export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
@@ -2967,6 +3210,12 @@ case_dkms_tool_staged
 case_dkms_kernel_headers_missing
 case_dkms_build_proof_fails
 case_dkms_source_registration_before_build
+case_dkms_source_nvidia_layout_registers
+case_dkms_source_legacy_layout_still_works
+case_dkms_source_conf_identity_overrides_layout
+case_dkms_cleanup_uses_sudo
+case_dkms_variant_detection_accepts_nvidia
+case_post_install_status_accepts_nvidia
 case_run_managed_dkms_detected
 case_run_managed_dkms_remove_failure
 case_kmod_host_no_dkms

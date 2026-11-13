@@ -103,10 +103,29 @@
 #                             FAKE_DKMS_RC); models a source build that fails
 #   NVIDIA_DKMS_SRC_ROOT      root the fake `dkms` reads for a registered source
 #                             tree (tests redirect it into the case temp dir)
+#   FAKE_DKMS_SOURCE_LAYOUT   factory source layout materialised by
+#                             `rpm2cpio`/`cpio`: "nvidia-open" (default, legacy)
+#                             or "nvidia" (new package name). Selects the
+#                             `/usr/src/<layout>-<version>` directory name and
+#                             the default dkms.conf PACKAGE_NAME.
+#   FAKE_DKMS_PACKAGE_NAME    PACKAGE_NAME written into the materialised
+#                             dkms.conf; defaults to the layout name. An explicit
+#                             empty value omits the key (models a malformed
+#                             factory conf). `dkms add|build` rejects a token
+#                             whose name/version differ from dkms.conf.
+#   FAKE_DKMS_PACKAGE_VERSION PACKAGE_VERSION written into the materialised
+#                             dkms.conf (default 620.70.06)
+#   FAKE_DKMS_CLEANUP_RC      rc for an UNPRIVILEGED cleanup `rm` of a temp
+#                             extraction tree. A clean unprivileged removal
+#                             prints "Permission denied" and exits this rc, so
+#                             tests can prove the library cleans up through
+#                             $SUDO. A sudo-invoked rm (fake-sudo sets
+#                             FAKE_SUDO_ACTIVE=1) always succeeds.
 #   The fake `dkms build` refuses to run unless the module source exists under
 #   $NVIDIA_DKMS_SRC_ROOT and was registered by `dkms add` (or is already in
 #   `dkms status`); `rpm2cpio`/`cpio` only populate that tree for a staged DKMS
-#   source RPM.
+#   source RPM. Both `/usr/src/nvidia-<version>` (PACKAGE_NAME=nvidia) and
+#   `/usr/src/nvidia-open-<version>` (PACKAGE_NAME=nvidia-open) are valid.
 #   FAKE_STAGE_INCLUDE_DKMS   1 -> the staged closure also contains a `dkms` RPM
 #   FAKE_STAGE_INCLUDE_BUILD_PREREQS 1 -> the staged closure also contains the
 #                             `dkms`, `kernel-devel-<kernel>` and
@@ -260,6 +279,33 @@ fake_gpu_install() {
     "$FAKE_REAL_MKDIR" -p "$FAKE_KERNEL_BUILD_ROOT/lib/modules/$prereq_kernel/build"
   fi
   "$FAKE_REAL_MKDIR" -p "$FAKE_GPU_STATE/dkms"
+
+  # Factory DKMS source layout and identity. The layout names the source
+  # directory (`nvidia-<version>` vs the legacy `nvidia-open-<version>`); the
+  # optional PACKAGE_NAME/PACKAGE_VERSION knobs define what the materialised
+  # dkms.conf says and therefore the identity the library must derive.
+  local dkms_layout="${FAKE_DKMS_SOURCE_LAYOUT:-nvidia-open}"
+  local dkms_pkg_name dkms_pkg_version dkms_identity_name
+  case "$dkms_layout" in
+    nvidia|nvidia-open) ;;
+    *)
+      printf 'fake_gpu_install: unknown FAKE_DKMS_SOURCE_LAYOUT=%s\n' "$dkms_layout" >&2
+      return 1
+      ;;
+  esac
+  if [[ -n "${FAKE_DKMS_PACKAGE_NAME+x}" ]]; then
+    dkms_pkg_name="$FAKE_DKMS_PACKAGE_NAME"
+  else
+    dkms_pkg_name="$dkms_layout"
+  fi
+  dkms_pkg_version="${FAKE_DKMS_PACKAGE_VERSION:-620.70.06}"
+  dkms_identity_name="${dkms_pkg_name:-$dkms_layout}"
+  printf '%s' "$dkms_layout" >"$FAKE_GPU_STATE/dkms_source_layout"
+  printf '%s' "$dkms_pkg_name" >"$FAKE_GPU_STATE/dkms_package_name"
+  printf '%s' "$dkms_pkg_version" >"$FAKE_GPU_STATE/dkms_package_version"
+  printf '%s/%s\n' "$dkms_identity_name" "$dkms_pkg_version" \
+    >"$FAKE_GPU_STATE/dkms_install_identity"
+
   printf '0' >"$FAKE_GPU_STATE/dcgm_active"
   printf '0' >"$FAKE_GPU_STATE/dcgm_exporter_active"
   [[ "${FAKE_DCGM_ACTIVE:-0}" == "1" ]] && printf '1' >"$FAKE_GPU_STATE/dcgm_active"
@@ -528,7 +574,9 @@ case "$subcmd" in
       printf '620.70.06' >"$FAKE_GPU_STATE/driver_version"
       printf '1' >"$FAKE_GPU_STATE/rpm_installed"
       if [[ "${FAKE_DNF_DKMS_INSTALL_REGISTERS:-0}" == "1" && "$variant" == "dkms" ]]; then
-        printf 'nvidia-open/620.70.06\n' >"$FAKE_GPU_STATE/dkms_install_registered"
+        identity="$(cat "$FAKE_GPU_STATE/dkms_install_identity" 2>/dev/null)"
+        [[ -n "$identity" ]] || identity="nvidia-open/620.70.06"
+        printf '%s\n' "$identity" >"$FAKE_GPU_STATE/dkms_install_registered"
       fi
     fi
     exit "$rc"
@@ -692,7 +740,9 @@ case "$args" in
       kmod-nvidia-open-dkms-*|nvidia-open-dkms-*)
         if [[ "${FAKE_DKMS_PAYLOAD:-0}" == "1" ]]; then
           [[ "${FAKE_DKMS_CONF_MISSING:-0}" == "1" ]] && exit 0
-          printf '/usr/src/nvidia-open-620.70.06/dkms.conf\n'
+          payload_layout="$(cat "$FAKE_GPU_STATE/dkms_source_layout" 2>/dev/null)"
+          [[ -n "$payload_layout" ]] || payload_layout="nvidia-open"
+          printf '/usr/src/%s-620.70.06/dkms.conf\n' "$payload_layout"
         else
           # Legacy harness default: a .ko payload (keeps the pre-DKMS caller
           # green; set FAKE_DKMS_PAYLOAD=1 to model a real DKMS source RPM).
@@ -959,6 +1009,39 @@ dkms_token() {
   done
   return 1
 }
+# Print a KEY="value" (or KEY=value) assignment from a dkms.conf.
+dkms_conf_value() {
+  local conf="$1" key="$2" line value
+  [[ -f "$conf" ]] || return 1
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line#export }"
+    [[ "$line" == "$key="* ]] || continue
+    value="${line#*=}"
+    value="${value%\"}"
+    value="${value#\"}"
+    printf '%s\n' "$value"
+    return 0
+  done <"$conf"
+  return 1
+}
+# The factory dkms.conf is authoritative: a token whose module name or version
+# disagrees with PACKAGE_NAME/PACKAGE_VERSION is rejected, so a test can prove
+# the library registers the identity it discovered rather than the RPM name.
+dkms_identity_ok() {
+  local src="$1" mod="$2" ver="$3" conf_name conf_ver
+  conf_name="$(dkms_conf_value "$src" PACKAGE_NAME)" || conf_name=""
+  conf_ver="$(dkms_conf_value "$src" PACKAGE_VERSION)" || conf_ver=""
+  if [[ -n "$conf_name" && "$conf_name" != "$mod" ]]; then
+    printf 'Error! dkms.conf PACKAGE_NAME=%s does not match %s\n' "$conf_name" "$mod" >&2
+    return 1
+  fi
+  if [[ -n "$conf_ver" && "$conf_ver" != "$ver" ]]; then
+    printf 'Error! dkms.conf %s=%s does not match %s\n' PACKAGE_VERSION "$conf_ver" "$ver" >&2
+    return 1
+  fi
+  return 0
+}
 case "$1" in
   status)
     [[ -n "${FAKE_DKMS_STATUS:-}" ]] && printf '%s\n' "$FAKE_DKMS_STATUS"
@@ -980,6 +1063,7 @@ case "$1" in
     ver="${token#*/}"
     src="${NVIDIA_DKMS_SRC_ROOT:-/usr/src}/$mod-$ver/dkms.conf"
     [[ -f "$src" ]] || exit 1
+    dkms_identity_ok "$src" "$mod" "$ver" || exit 1
     mkdir -p "$FAKE_GPU_STATE/dkms"
     : >"$FAKE_GPU_STATE/dkms/$mod-$ver"
     exit 0
@@ -997,6 +1081,7 @@ case "$1" in
       printf 'Error! Could not find module source directory for %s\n' "$token" >&2
       exit 1
     fi
+    dkms_identity_ok "$src" "$mod" "$ver" || exit 1
     exit "${FAKE_DKMS_BUILD_RC:-${FAKE_DKMS_RC:-0}}"
     ;;
   *)
@@ -1019,21 +1104,38 @@ case "$base" in
   *) exit 1 ;;
 esac
 [[ -f "$rpmfile" ]] || exit 1
+layout="$(cat "$FAKE_GPU_STATE/dkms_source_layout" 2>/dev/null)"
+[[ -n "$layout" ]] || layout="nvidia-open"
 ver="620.70.06"
 [[ "$base" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] && ver="${BASH_REMATCH[1]}"
-printf '/usr/src/nvidia-open-%s/dkms.conf\n' "$ver"
-printf '/usr/src/nvidia-open-%s/nvidia-open.mod.c\n' "$ver"
+printf '/usr/src/%s-%s/dkms.conf\n' "$layout" "$ver"
+printf '/usr/src/%s-%s/kernel-open/dkms.conf\n' "$layout" "$ver"
+printf '/usr/src/%s-%s/nvidia-open.mod.c\n' "$layout" "$ver"
 SHIM
 
   cat >"$FAKE_GPU_BINDIR/cpio" <<'SHIM'
 #!/usr/bin/env bash
 printf 'cpio %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+pkg_name="$(cat "$FAKE_GPU_STATE/dkms_package_name" 2>/dev/null)"
+pkg_version="$(cat "$FAKE_GPU_STATE/dkms_package_version" 2>/dev/null)"
 wrote=0
 while IFS= read -r path; do
   [[ -n "$path" ]] || continue
   rel="${path#/}"
   "$FAKE_REAL_MKDIR" -p "$PWD/$(dirname "$rel")"
-  : >"$PWD/$rel"
+  case "$rel" in
+    */dkms.conf)
+      {
+        [[ -n "$pkg_name" ]] && printf 'PACKAGE_NAME="%s"\n' "$pkg_name"
+        [[ -n "$pkg_version" ]] && printf 'PACKAGE_VERSION="%s"\n' "$pkg_version"
+        printf 'BUILT_MODULE_NAME[0]="nvidia"\n'
+        printf 'DEST_MODULE_LOCATION[0]="/kernel/drivers/video"\n'
+      } >"$PWD/$rel"
+      ;;
+    *)
+      : >"$PWD/$rel"
+      ;;
+  esac
   wrote=1
 done
 [[ "$wrote" == "1" ]] || exit 1
@@ -1170,6 +1272,30 @@ SHIM
   cat >"$FAKE_GPU_BINDIR/rm" <<'SHIM'
 #!/usr/bin/env bash
 printf 'rm %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+# Model an unprivileged cleanup denied on a root-owned extraction tree:
+# FAKE_DKMS_CLEANUP_RC makes a non-sudo recursive `rm` of a temp tree fail
+# loudly. fake-sudo sets FAKE_SUDO_ACTIVE=1, so the privileged path always
+# succeeds. Non-recursive `rm -f` of a temp file created by the caller is
+# unaffected.
+if [[ -n "${FAKE_DKMS_CLEANUP_RC:-}" && "${FAKE_SUDO_ACTIVE:-0}" != "1" ]]; then
+  recursive=0
+  for a in "$@"; do
+    case "$a" in
+      -*[rR]*) recursive=1 ;;
+    esac
+  done
+  if [[ "$recursive" == "1" ]]; then
+    for a in "$@"; do
+      case "$a" in
+        -*) ;;
+        "${TMPDIR:-/tmp}"/*)
+          printf 'rm: cannot remove '\''%s'\'': Permission denied\n' "$a" >&2
+          exit "$FAKE_DKMS_CLEANUP_RC"
+          ;;
+      esac
+    done
+  fi
+fi
 exec "$FAKE_REAL_RM" "$@"
 SHIM
 
@@ -1244,6 +1370,9 @@ SHIM
   cat >"$FAKE_GPU_BINDIR/fake-sudo" <<'SHIM'
 #!/usr/bin/env bash
 printf 'sudo %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+# Mark the privilege boundary so a delegating shim (notably `rm`) can model
+# what only the privileged path is allowed to do.
+export FAKE_SUDO_ACTIVE=1
 exec "$@"
 SHIM
 

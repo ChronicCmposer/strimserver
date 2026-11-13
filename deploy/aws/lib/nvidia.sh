@@ -46,7 +46,10 @@
 #               inspect `namei -l <dir>` and `stat -c '%a %U:%G' <dir>` as the
 #               deploying user, fix traversal, then re-run.
 #   [kernel-module] the staged payload cannot serve the RUNNING kernel: a kmod
-#               has no nvidia.ko, a DKMS RPM has no dkms.conf, the staged stage
+#               has no nvidia.ko, a DKMS RPM has no dkms.conf (the factory
+#               dkms.conf is authoritative for PACKAGE_NAME/PACKAGE_VERSION),
+#               the staged source is not in an accepted nvidia-<floor> or
+#               nvidia-open-<floor> layout, the staged stage
 #               is unreadable, the running kernel's build tree is missing (no
 #               /usr/src/kernels/<kernel>/Makefile or no
 #               /lib/modules/<kernel>/build), the dkms tool is absent, the
@@ -67,8 +70,9 @@
 #                 sudo dnf install -y --allowerasing --disableexcludes=all \
 #                   --disablerepo='*' /mnt/nvme/nvidia-rpm/*.rpm
 #   [depmod]    `depmod -a` failed; the new module graph is incomplete.
-#   [dkms]      `dkms remove nvidia-open/<old> --all` failed; a stale 595 build
-#               may still shadow the new module.
+#   [dkms]      `dkms remove <package>/<old> --all` failed for an nvidia or
+#               nvidia-open package; a stale 595 build may still shadow the new
+#               module.
 #   [drain]     the DCGM units did not stop within the drain timeout.
 #               Recovery: `sudo systemctl stop nvidia-dcgm-exporter nvidia-dcgm`.
 #   [holders]   a process still holds /dev/nvidia* after the drain stops.
@@ -384,6 +388,64 @@ nvidia__ensure_repo() {
   return 0
 }
 
+# Print the value of a KEY=VALUE assignment from a DKMS dkms.conf. The factory
+# dkms.conf is authoritative for the DKMS package identity, so a missing file,
+# an absent key, or an empty value fails closed (no stdout, return 1) rather
+# than inventing an identity from a directory name.
+nvidia__dkms_conf_value() {
+  local file="$1" key="$2" line value
+
+  [[ -f "$file" ]] || return 1
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line#export }"
+    [[ "$line" == "$key="* ]] || continue
+    value="${line#*=}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    if [[ ${#value} -ge 2 && "$value" == \"*\" ]]; then
+      value="${value:1:${#value}-2}"
+    elif [[ ${#value} -ge 2 && "$value" == \'*\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+    [[ -n "$value" ]] || return 1
+    printf '%s\n' "$value"
+    return 0
+  done <"$file"
+  return 1
+}
+
+# Print "<PACKAGE_NAME> <PACKAGE_VERSION>" derived from a DKMS source tree's
+# factory dkms.conf. Fails closed when the tree or either identity value is
+# absent or empty.
+nvidia__dkms_identity() {
+  local source_dir="$1" conf="$1/dkms.conf" name version
+
+  [[ -f "$conf" ]] || return 1
+  name="$(nvidia__dkms_conf_value "$conf" PACKAGE_NAME)" || return 1
+  version="$(nvidia__dkms_conf_value "$conf" PACKAGE_VERSION)" || return 1
+  printf '%s %s\n' "$name" "$version"
+}
+
+# Print the DKMS source directory for the pinned floor under a root, accepting
+# either factory layout (`nvidia-<floor>` or `nvidia-open-<floor>`) with a
+# dkms.conf at its root. A staged RPM extract lands under <root>/usr/src
+# because cpio strips the leading slash, so check that payload layout too.
+# Fails closed when neither layout is present.
+nvidia__find_dkms_source_dir() {
+  local root="$1" floor="$2" base candidate
+
+  for base in "$root" "$root/usr/src"; do
+    for candidate in "$base/nvidia-$floor" "$base/nvidia-open-$floor"; do
+      if [[ -f "$candidate/dkms.conf" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
 # Detect the installed kernel-module flavour. DKMS wins: a host that has a DKMS
 # package, or a live `dkms status` build, must be cleaned up through dkms even
 # if a stale precompiled kmod RPM is also present.
@@ -401,10 +463,15 @@ nvidia__kernel_module_variant() {
   # Only consult `dkms status` when the host actually has a DKMS tree; a plain
   # precompiled kmod host must never invoke dkms. A live DKMS build still wins
   # over a stale kmod RPM.
+  # Accept both DKMS package names and both source-directory layouts:
+  # `nvidia-<version>` (factory dkms.conf PACKAGE_NAME=nvidia) and the legacy
+  # `nvidia-open-<version>`, under the DKMS source root or /var/lib/dkms.
   if command -v dkms >/dev/null 2>&1 \
-      && { [[ -d /var/lib/dkms/nvidia-open ]] || compgen -G '/usr/src/nvidia-open-*' >/dev/null; }; then
+      && { [[ -d /var/lib/dkms/nvidia ]] || [[ -d /var/lib/dkms/nvidia-open ]] \
+           || compgen -G "$NVIDIA_DKMS_SRC_ROOT/nvidia-[0-9]*" >/dev/null \
+           || compgen -G "$NVIDIA_DKMS_SRC_ROOT/nvidia-open-*" >/dev/null; }; then
     status="$("$sudo_cmd" dkms status 2>/dev/null || true)"
-    if grep -q 'nvidia-open/' <<<"$status"; then
+    if grep -qE 'nvidia(-open)?/' <<<"$status"; then
       printf 'dkms\n'
       return 0
     fi
@@ -701,18 +768,26 @@ nvidia__ensure_dkms_prereqs() {
 }
 
 # Extract the staged DKMS source payload into the DKMS source root and register
-# it so the pre-install build proof can run. This never installs the driver RPM
-# and never touches the installed below-floor driver.
+# it so the pre-install build proof can run. The factory dkms.conf is
+# authoritative: PACKAGE_NAME/PACKAGE_VERSION determine the DKMS identity used
+# for the source-tree path, `dkms add`, and the build proof. Either accepted
+# source layout (`nvidia-$FLOOR` or `nvidia-open-$FLOOR`) is honoured. This
+# never installs the driver RPM and never touches the installed below-floor
+# driver. On success, prints the derived "<name>/<version>" token.
 nvidia__register_dkms_source() {
-  local sudo_cmd="$1" dir="$2" rpmfile tmp src_dir source_dir
+  local sudo_cmd="$1" dir="$2" rpmfile tmp source_dir
+  local identity dkms_name dkms_version src_dir
   local extracted=0
-  src_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-open-$NVIDIA_DRIVER_FLOOR"
 
   nvidia__assert_stage_readable "$dir" kernel-module || return 1
-  if [[ ! -f "$src_dir/dkms.conf" ]]; then
+
+  if source_dir="$(nvidia__find_dkms_source_dir "$NVIDIA_DKMS_SRC_ROOT" "$NVIDIA_DRIVER_FLOOR")"; then
+    # Reuse a pre-existing tree; only its factory dkms.conf defines identity.
+    :
+  else
     extracted=1
     if ! rpmfile="$(nvidia__staged_dkms_rpm "$dir")"; then
-      nvidia__fail kernel-module "staged closure has no DKMS source RPM for nvidia-open/$NVIDIA_DRIVER_FLOOR (nothing was uninstalled)"
+      nvidia__fail kernel-module "staged closure has no DKMS source RPM for nvidia/$NVIDIA_DRIVER_FLOOR or nvidia-open/$NVIDIA_DRIVER_FLOOR (nothing was uninstalled)"
       return 1
     fi
     if ! tmp="$(mktemp -d 2>/dev/null)"; then
@@ -721,31 +796,40 @@ nvidia__register_dkms_source() {
     fi
     if ! "$sudo_cmd" rpm2cpio "$rpmfile" \
         | ( cd "$tmp" && "$sudo_cmd" cpio -idm --quiet ); then
-      rm -rf "$tmp"
+      "$sudo_cmd" rm -rf "$tmp"
       nvidia__fail kernel-module "could not extract the staged DKMS source $rpmfile (nothing was uninstalled)"
       return 1
     fi
-    source_dir="$(find "$tmp" -type d -name "nvidia-open-$NVIDIA_DRIVER_FLOOR" -print -quit 2>/dev/null || true)"
-    if [[ -z "$source_dir" || ! -f "$source_dir/dkms.conf" ]]; then
-      rm -rf "$tmp"
-      nvidia__fail kernel-module "staged DKMS source $rpmfile has no nvidia-open-$NVIDIA_DRIVER_FLOOR/dkms.conf (nothing was uninstalled)"
+    if ! source_dir="$(nvidia__find_dkms_source_dir "$tmp" "$NVIDIA_DRIVER_FLOOR")"; then
+      "$sudo_cmd" rm -rf "$tmp"
+      nvidia__fail kernel-module "staged DKMS source $rpmfile has no dkms.conf under nvidia-$NVIDIA_DRIVER_FLOOR/ or nvidia-open-$NVIDIA_DRIVER_FLOOR/ (nothing was uninstalled)"
       return 1
     fi
+  fi
+
+  if ! identity="$(nvidia__dkms_identity "$source_dir")"; then
+    if [[ "$extracted" == "1" ]]; then
+      "$sudo_cmd" rm -rf "$tmp"
+    fi
+    nvidia__fail kernel-module "DKMS source $source_dir/dkms.conf has no usable PACKAGE_NAME/PACKAGE_VERSION (nothing was uninstalled)"
+    return 1
+  fi
+  dkms_name="${identity%% *}"
+  dkms_version="${identity#* }"
+  src_dir="$NVIDIA_DKMS_SRC_ROOT/$dkms_name-$dkms_version"
+
+  if [[ "$extracted" == "1" ]]; then
     if ! "$sudo_cmd" mkdir -p "$src_dir"; then
-      rm -rf "$tmp"
+      "$sudo_cmd" rm -rf "$tmp"
       nvidia__fail kernel-module "could not create the DKMS source tree $src_dir (nothing was uninstalled)"
       return 1
     fi
     if ! "$sudo_cmd" cp -a "$source_dir/." "$src_dir/"; then
-      rm -rf "$tmp"
+      "$sudo_cmd" rm -rf "$tmp"
       nvidia__fail kernel-module "could not place the staged DKMS source under $src_dir (nothing was uninstalled)"
       return 1
     fi
-    rm -rf "$tmp"
-  fi
-  if [[ ! -f "$src_dir/dkms.conf" ]]; then
-    nvidia__fail kernel-module "DKMS source tree $src_dir has no dkms.conf (nothing was uninstalled)"
-    return 1
+    "$sudo_cmd" rm -rf "$tmp"
   fi
 
   # Register only a source tree that this proof just extracted; a pre-existing
@@ -753,21 +837,29 @@ nvidia__register_dkms_source() {
   # `dkms status` here would run before the driver install and blur the
   # post-install verification ordering.
   if [[ "$extracted" == "1" ]]; then
-    if ! "$sudo_cmd" dkms add "nvidia-open/$NVIDIA_DRIVER_FLOOR"; then
-      nvidia__fail kernel-module "dkms add nvidia-open/$NVIDIA_DRIVER_FLOOR failed (nothing was uninstalled)"
+    if ! "$sudo_cmd" dkms add "$dkms_name/$dkms_version"; then
+      nvidia__fail kernel-module "dkms add $dkms_name/$dkms_version failed (nothing was uninstalled)"
       return 1
     fi
   fi
+  printf '%s/%s\n' "$dkms_name" "$dkms_version"
   return 0
 }
 
 # Prove the staged DKMS source can build for the RUNNING kernel before removing
-# the old driver. A build failure means the old driver must stay installed.
+# the old driver. The identity is derived from dkms.conf by
+# nvidia__register_dkms_source. A build failure means the old driver must stay
+# installed.
 nvidia__prove_dkms_build() {
-  local sudo_cmd="$1" kernel
+  local sudo_cmd="$1" dkms_token="$2" kernel
+
+  if [[ -z "$dkms_token" ]]; then
+    nvidia__fail kernel-module "no DKMS package identity was derived from dkms.conf (nothing was uninstalled)"
+    return 1
+  fi
   kernel="$(uname -r)"
-  if ! "$sudo_cmd" dkms build "nvidia-open/$NVIDIA_DRIVER_FLOOR" -k "$kernel" >/dev/null 2>&1; then
-    nvidia__fail kernel-module "staged DKMS source cannot build nvidia-open/$NVIDIA_DRIVER_FLOOR for $kernel (nothing was uninstalled)"
+  if ! "$sudo_cmd" dkms build "$dkms_token" -k "$kernel" >/dev/null 2>&1; then
+    nvidia__fail kernel-module "staged DKMS source cannot build $dkms_token for $kernel (nothing was uninstalled)"
     return 1
   fi
   return 0
@@ -1109,7 +1201,7 @@ nvidia__stage_make_readable() {
 nvidia__stage_closure() {
   local sudo_cmd="$1" machine="${2:-$(uname -m)}"
   local expected_nevra tmp parent backup variant extra optional_output err_file
-  local dnf_err detail stage_base spec existing
+  local dnf_err detail stage_base spec existing dkms_token
   local duplicate
   local -a extras=() required=()
   NVIDIA_OPTIONAL_PACKAGES_RESOLVED=""
@@ -1274,11 +1366,11 @@ nvidia__stage_closure() {
     # A legacy "dkms" payload that ships a prebuilt .ko has no source to build;
     # only a real dkms.conf payload needs extraction + registration + proof.
     if nvidia__staged_dkms_has_conf "$sudo_cmd" "$tmp"; then
-      if ! nvidia__register_dkms_source "$sudo_cmd" "$tmp"; then
+      if ! dkms_token="$(nvidia__register_dkms_source "$sudo_cmd" "$tmp")"; then
         "$sudo_cmd" rm -rf "$tmp"
         return 1
       fi
-      if ! nvidia__prove_dkms_build "$sudo_cmd"; then
+      if ! nvidia__prove_dkms_build "$sudo_cmd" "$dkms_token"; then
         "$sudo_cmd" rm -rf "$tmp"
         return 1
       fi
@@ -1458,16 +1550,16 @@ nvidia__remove_stale_dkms() {
   status="$("$sudo_cmd" dkms status 2>/dev/null || true)"
   while IFS= read -r found; do
     [[ -n "$found" ]] || continue
-    version="${found#nvidia-open/}"
+    version="${found#*/}"
     if nvidia_driver_ge "$version" "$NVIDIA_DRIVER_FLOOR"; then
       continue
     fi
-    if ! "$sudo_cmd" dkms remove "nvidia-open/${version}" --all; then
-      nvidia__fail dkms "dkms remove nvidia-open/${version} --all failed; a stale build may shadow 620"
+    if ! "$sudo_cmd" dkms remove "$found" --all; then
+      nvidia__fail dkms "dkms remove $found --all failed; a stale build may shadow 620"
       return 1
     fi
-    printf 'nvidia: removed stale DKMS build nvidia-open/%s\n' "$version"
-  done < <(grep -oE 'nvidia-open/[0-9]+([.][0-9]+)*' <<<"$status" | sort -u)
+    printf 'nvidia: removed stale DKMS build %s\n' "$found"
+  done < <(grep -oE '(nvidia|nvidia-open)/[0-9]+([.][0-9]+)*' <<<"$status" | sort -u)
   return 0
 }
 
@@ -1746,9 +1838,11 @@ nvidia_ensure_driver_floor() {
     fi
     if [[ "$dkms_conf" == "1" ]]; then
       dkms_status="$("$sudo_cmd" dkms status 2>/dev/null || true)"
-      if ! grep -q "nvidia-open/$NVIDIA_DRIVER_FLOOR" <<<"$dkms_status" \
+      # The factory dkms.conf may identify the module as either `nvidia` or the
+      # legacy `nvidia-open`; both are valid as long as the floor matches.
+      if ! grep -qE "(nvidia|nvidia-open)/${NVIDIA_DRIVER_FLOOR}([^0-9.]|$)" <<<"$dkms_status" \
           || ! grep -qF "$kernel" <<<"$dkms_status"; then
-        nvidia__resume_hint kernel-module "installed DKMS source did not produce nvidia-open/$NVIDIA_DRIVER_FLOOR for $kernel; not unloading the old driver" "$sudo_cmd"
+        nvidia__resume_hint kernel-module "installed DKMS source did not produce nvidia/$NVIDIA_DRIVER_FLOOR or nvidia-open/$NVIDIA_DRIVER_FLOOR for $kernel; not unloading the old driver" "$sudo_cmd"
         return 1
       fi
     fi
