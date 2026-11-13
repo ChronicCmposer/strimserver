@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# fish_deploy_test.sh -- offline regression test for fish_write_system_config.
+# fish_deploy_test.sh -- offline regression test for fish_write_system_config
+# and fish_write_system_shells.
 #
 # The deploy runs under `umask 077`. The old flow `sudo mkdir /etc/fish` +
 # `cat /etc/fish/config.fish prompt_login.fish | sudo tee ...` left /etc/fish
@@ -97,6 +98,82 @@ check "fake sudo recorded install -m 0644" \
 check "unprivileged cat never read the config" \
   bash -c '! grep -Fxq -- "$1" "$2"' _ "$config_file" "$cat_log"
 check "temp file is removed" \
+  test -z "$(find "$TMPDIR" -mindepth 1 -print -quit)"
+
+# --- fish_write_system_shells ------------------------------------------------
+# The deploy runs under `umask 077`; a plain `sudo cp /etc/shells
+# /etc/shells.original` leaves the copy 0600 root:root and the unprivileged
+# `cat` then fails. These cases prove the helper repairs the mode, composes
+# fish + original, installs 0644, and stays idempotent.
+fish_shell="/usr/local/bin/fish"
+
+shells_root="$tmp/shells"
+mkdir -p "$shells_root"
+
+# Case 1: absent original -> seeded from the current shells file.
+absent_dir="$shells_root/absent"
+mkdir -p "$absent_dir"
+absent_original="$absent_dir/shells.original"
+absent_shells="$absent_dir/shells"
+printf '/bin/bash\n/bin/sh\n' >"$absent_shells"
+: >"$sudo_log"
+
+fish_write_system_shells "$fish_shell" "$absent_original" "$absent_shells" "$fake_bin/sudo"
+
+check "absent original: original created 0644" \
+  test "$(mode_of "$absent_original")" = "644"
+check "absent original: shells file 0644" \
+  test "$(mode_of "$absent_shells")" = "644"
+check "absent original: fish shell is first entry" \
+  test "$(head -n 1 "$absent_shells")" = "$fish_shell"
+check "absent original: original entries preserved after fish" \
+  test "$(tail -n +2 "$absent_shells")" = "$(printf '/bin/bash\n/bin/sh')"
+check "absent original: fish shell appears exactly once" \
+  test "$(grep -Fxc "$fish_shell" "$absent_shells")" = "1"
+check "absent original: fake sudo chmodded 0644 original" \
+  grep -q -- "chmod 0644 $absent_original" "$sudo_log"
+check "absent original: temp file is removed" \
+  test -z "$(find "$TMPDIR" -mindepth 1 -print -quit)"
+
+# Case 2: existing original left 0600 by the inherited umask.
+repair_dir="$shells_root/repair"
+mkdir -p "$repair_dir"
+repair_original="$repair_dir/shells.original"
+repair_shells="$repair_dir/shells"
+printf '/bin/bash\n/usr/bin/zsh\n' >"$repair_original"
+printf '/bin/sh\n' >"$repair_shells"
+chmod 0600 "$repair_original"
+: >"$sudo_log"
+
+fish_write_system_shells "$fish_shell" "$repair_original" "$repair_shells" "$fake_bin/sudo"
+
+check "0600 original: chmodded back to 0644" \
+  test "$(mode_of "$repair_original")" = "644"
+check "0600 original: shells file 0644" \
+  test "$(mode_of "$repair_shells")" = "644"
+check "0600 original: chmod recorded before read" \
+  grep -q -- "chmod 0644 $repair_original" "$sudo_log"
+check "0600 original: fish + existing entries composed" \
+  test "$(cat "$repair_shells")" = "$(printf '%s\n/bin/bash\n/usr/bin/zsh' "$fish_shell")"
+check "0600 original: temp file is removed" \
+  test -z "$(find "$TMPDIR" -mindepth 1 -print -quit)"
+
+# Case 3: repeat invocation is idempotent.
+repair_first="$(cat "$repair_shells")"
+: >"$sudo_log"
+
+fish_write_system_shells "$fish_shell" "$repair_original" "$repair_shells" "$fake_bin/sudo"
+
+check "repeat: content unchanged" \
+  test "$(cat "$repair_shells")" = "$repair_first"
+check "repeat: original preserved unchanged" \
+  test "$(cat "$repair_original")" = "$(printf '/bin/bash\n/usr/bin/zsh')"
+check "repeat: fish shell not duplicated" \
+  test "$(grep -Fxc "$fish_shell" "$repair_shells")" = "1"
+check "repeat: modes remain 0644" \
+  bash -c 'test "$1" = 644 && test "$2" = 644' _ \
+  "$(mode_of "$repair_original")" "$(mode_of "$repair_shells")"
+check "repeat: temp file is removed" \
   test -z "$(find "$TMPDIR" -mindepth 1 -print -quit)"
 
 if [ "$failures" -ne 0 ]; then

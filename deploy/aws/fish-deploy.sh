@@ -35,6 +35,38 @@ fish_write_system_config() {
    rm -f "$tmp" || return 1
 }
 
+# Write an /etc/shells-style file containing the fish shell followed by the
+# preserved original entries. deploy.sh runs under `umask 077`, so a plain
+# `sudo cp` leaves /etc/shells.original at 0600 root:root and an unprivileged
+# `cat` then cannot read it, truncating /etc/shells. Here the original is
+# explicitly chmodded 0644 before it is read and the combined result is
+# installed atomically with a fixed mode.
+fish_write_system_shells() {
+   local fish_shell="$1"
+   local original_file="$2"
+   local shells_file="$3"
+   local sudo_cmd="${4:-sudo}"
+   local tmp
+
+   [[ -n "$fish_shell" && -n "$original_file" && -n "$shells_file" ]] || return 1
+
+   if [[ ! -s "$original_file" ]]; then
+      "$sudo_cmd" install -m 0644 "$shells_file" "$original_file" || return 1
+   fi
+
+   "$sudo_cmd" chmod 0644 "$original_file" || return 1
+
+   tmp="$(mktemp)" || return 1
+   {
+      echo "$fish_shell"
+      cat "$original_file"
+   } > "$tmp" || { rm -f "$tmp"; return 1; }
+
+   "$sudo_cmd" install -m 0644 "$tmp" "$shells_file" || { rm -f "$tmp"; return 1; }
+
+   rm -f "$tmp" || return 1
+}
+
 # Tests source this file to exercise fish_write_system_config without running
 # the network install or touching the real /etc. `return` keeps a sourced
 # parent (deploy.sh) alive; `exit` handles a direct invocation.
@@ -71,6 +103,7 @@ set -x
 wget "$FISH_DIST_URL" -O "$FISH_DIST_FILE" 
 echo "$FISH_DIST_CHECKSUM  $FISH_DIST_FILE" | sha256sum --check -
 sudo tar -xvJf "$FISH_DIST_FILE" -C /usr/local/bin
+sudo chmod 0755 /usr/local/bin/fish /usr/local/bin/fish_indent /usr/local/bin/fish_key_reader 2>/dev/null || true
 fish_write_system_config "$FISH_SYSTEM_CONFIG_FILE" prompt_login.fish
 rm -f /mnt/nvme/prompt_login.fish
 
@@ -78,12 +111,10 @@ sudo mkdir -p "$FISH_VENDOR_COMPLETIONS_DIR"
 sudo chmod 0755 "$FISH_VENDOR_COMPLETIONS_DIR"
 
 FISH_SHELL=$(which fish)
-if [[ ! -s /etc/shells.original ]]; then
-   sudo cp /etc/{shells,shells.original}
-fi
-echo "$FISH_SHELL" | cat /etc/shells.original - | sudo tee /etc/shells
+fish_write_system_shells "$FISH_SHELL" /etc/shells.original /etc/shells
 sudo usermod -s "$FISH_SHELL" ec2-user
 fish --version
 set +x
 printf "fish shell configured!\n"
+rm -rf "$FISH_TEMP_DIR"
 
