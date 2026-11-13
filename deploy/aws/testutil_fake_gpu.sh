@@ -57,6 +57,11 @@
 #   FAKE_DNF_KEY_MISSING      1 -> `rpm --import` and `rpm -K` fail
 #   FAKE_PKG_AVAILABLE        0 -> `dnf install --downloadonly` fails
 #   FAKE_RMMOD_BUSY           1 -> `rmmod`/`modprobe -r` fail (module in use)
+#   FAKE_MODPROBE_RM_PARTIAL  module name -> `modprobe -r <module>` removes that
+#                             module from the loaded set but returns non-zero,
+#                             modelling a softdep target removed while a held
+#                             dependency blocks pruning. A later `rmmod` on the
+#                             removed module then fails as "not loaded".
 #   FAKE_SMI_RC               rc for nvidia-smi (default 0)
 #   FAKE_SMI_MISSING          1 -> do not install an nvidia-smi shim at all
 #   FAKE_RPM_INSTALLED        1 -> `rpm -q nvidia-open` succeeds
@@ -950,6 +955,9 @@ if [[ "$remove" == "1" ]]; then
   if [[ "$mod" == "nvidia" && "${FAKE_PROC_VERSION_STUCK:-0}" != "1" ]]; then
     "$FAKE_REAL_RM" -f "$NVIDIA_PROC_VERSION_FILE"
   fi
+  if [[ -n "${FAKE_MODPROBE_RM_PARTIAL:-}" && "$mod" == "${FAKE_MODPROBE_RM_PARTIAL}" ]]; then
+    exit 1
+  fi
   exit 0
 fi
 rc="${FAKE_MODPROBE_RC:-0}"
@@ -971,6 +979,12 @@ SHIM
 printf 'rmmod %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
 [[ "${FAKE_RMMOD_BUSY:-0}" == "1" ]] && exit 1
 for mod in "$@"; do
+  # Real `rmmod` fails when the module is no longer loaded. This is what the
+  # partial `modprobe -r` case exercises: the target is already gone, so the
+  # fallback reports failure even though the unload succeeded.
+  if ! grep -qx "$mod" "$FAKE_GPU_STATE/modules" 2>/dev/null; then
+    exit 1
+  fi
   if grep -qx "$mod" "$FAKE_GPU_STATE/modules" 2>/dev/null; then
     grep -vx "$mod" "$FAKE_GPU_STATE/modules" >"$FAKE_GPU_STATE/modules.new" || true
     mv "$FAKE_GPU_STATE/modules.new" "$FAKE_GPU_STATE/modules"

@@ -68,7 +68,7 @@ end_case() {
     NVIDIA_DKMS_LIB_ROOT NVIDIA_MODULES_ROOT \
     NVIDIA_DRAIN_TIMEOUT NVIDIA_VERSIONLOCK_FILE NVIDIA_STAGE_ONLY \
     FAKE_REPORTED_DRIVER FAKE_PROC_VERSION FAKE_PROC_VERSION_STUCK FAKE_RPM_INSTALLED \
-    FAKE_RUN_MANAGED FAKE_UNINSTALL_RC FAKE_RMMOD_BUSY FAKE_DNF_RC \
+    FAKE_RUN_MANAGED FAKE_UNINSTALL_RC FAKE_RMMOD_BUSY FAKE_MODPROBE_RM_PARTIAL FAKE_DNF_RC \
     FAKE_DNF_DOWNLOADONLY_RC FAKE_DNF_CLOSURE_INCOMPLETE FAKE_DNF_KEY_MISSING \
     FAKE_DNF_UPGRADES_DRIVER FAKE_DNF_DKMS_INSTALL_REGISTERS \
     FAKE_PKG_AVAILABLE FAKE_SMI_RC FAKE_SMI_MISSING \
@@ -433,6 +433,47 @@ case_rmmod_busy() {
   check "rmmod busy: fails" test "$rc" -ne 0
   check "rmmod busy: message names unload/in-use" bash -c 'grep -Eqi "rmmod|in use|unload" <<<"$1"' _ "$out"
   check "rmmod busy: never loads the new module" no_call 'modprobe nvidia$'
+  end_case
+}
+
+# --- 6b. modprobe -r partial removal (softdep target gone, prune fails) -----
+case_modprobe_rm_partial() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1
+  export FAKE_MODPROBE_RM_PARTIAL=efa_nv_peermem
+  export FAKE_MODULES="nvidia_uvm nvidia_fs gdrdrv efa_nv_peermem nvidia_drm nvidia_modeset nvidia"
+  fake_gpu_install
+  out="$(nvidia_ensure_driver_floor 2>&1)"; local rc=$?
+
+  check "partial rm: exits 0" test "$rc" -eq 0
+  check "partial rm: target is gone from lsmod" \
+    bash -c '! grep -qx efa_nv_peermem "$1/modules"' _ "$FAKE_GPU_STATE"
+  check "partial rm: continues to nvidia_modeset" has_call 'modprobe -r nvidia_modeset$'
+  check "partial rm: continues to nvidia" has_call 'modprobe -r nvidia$'
+  check "partial rm: reloads the driver" has_call 'modprobe nvidia$'
+  check "partial rm: does not emit an rmmod error" \
+    bash -c '! grep -q "\[rmmod\]" <<<"$1"' _ "$out"
+  check "partial rm: does not claim still in use" \
+    bash -c '! grep -qi "still in use" <<<"$1"' _ "$out"
+  end_case
+}
+
+# --- 6c. genuinely still-loaded module still fails closed -------------------
+case_unload_still_loaded_fails_closed() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_RMMOD_BUSY=1
+  export FAKE_MODULES="nvidia_modeset nvidia"
+  fake_gpu_install
+  out="$(nvidia_ensure_driver_floor 2>&1)"; local rc=$?
+
+  check "still loaded: fails closed" test "$rc" -ne 0
+  check "still loaded: module remains in lsmod" \
+    bash -c 'grep -qx nvidia_modeset "$1/modules"' _ "$FAKE_GPU_STATE"
+  check "still loaded: emits an rmmod error" \
+    bash -c 'grep -q "\[rmmod\]" <<<"$1"' _ "$out"
+  check "still loaded: message names still in use" \
+    bash -c 'grep -qi "still in use" <<<"$1"' _ "$out"
+  check "still loaded: never loads the new module" no_call 'modprobe nvidia$'
   end_case
 }
 
@@ -3414,6 +3455,8 @@ case_newer
 case_package_missing
 case_uninstall_failure
 case_rmmod_busy
+case_modprobe_rm_partial
+case_unload_still_loaded_fails_closed
 case_still_below_floor
 case_no_smi_binary
 case_smi_nonzero

@@ -1557,6 +1557,12 @@ nvidia__modules_loaded() {
 # Unload the nvidia module graph dependency-first. Optional modules are removed
 # before nvidia_drm/nvidia_modeset, and nvidia is always last. `modprobe -r`
 # handles the dependency graph dynamically; `rmmod` is the fallback.
+#
+# `modprobe -r` can remove the requested module and still exit non-zero: a
+# softdep such as `pre: nvidia` makes it remove efa_nv_peermem, then fail while
+# pruning nvidia, which is still held by nvidia_modeset. The fallback `rmmod`
+# then reports "not currently loaded". Confirm with `lsmod` before treating the
+# module as still in use, so a partial removal is not a false positive.
 nvidia__unload_modules() {
   local sudo_cmd="$1" module listing
   local -a order=($NVIDIA_UNLOAD_ORDER)
@@ -1570,6 +1576,13 @@ nvidia__unload_modules() {
       continue
     fi
     if "$sudo_cmd" rmmod "$module" 2>/dev/null; then
+      continue
+    fi
+    # `modprobe -r` may have removed the target before failing to prune a held
+    # dependency, so `rmmod` fails on the now-absent module. Continue only when
+    # `lsmod` proves it is gone; otherwise the module is genuinely in use.
+    listing="$("$sudo_cmd" lsmod 2>/dev/null || true)"
+    if ! grep -Eq "^${module}([[:space:]]|$)" <<<"$listing"; then
       continue
     fi
     nvidia__fail rmmod "module $module is still in use. Recovery: $sudo_cmd fuser -v /dev/nvidia* ; $sudo_cmd lsmod | grep nvidia"
