@@ -179,9 +179,14 @@ name. Both are first-class:
   `nvidia/620.70.06` or `nvidia-open/620.70.06` for the running kernel.
 - **Root-owned extraction cleanup.** Extraction runs as root (`rpm2cpio` +
   `cpio` through `${SUDO:-sudo}`), so the temp extract tree is root-owned.
-  Cleanup therefore also goes through `${SUDO:-sudo}` on every failure path and
-  on success: a failed registration or build must never leave a root-owned
-  temp tree behind for the deploying user.
+  Because `deploy.sh` runs under `umask 077`, the extracted `usr` tree can also
+  be `0700` and unreadable to the deploying user. Immediately after extraction,
+  `nvidia__register_dkms_source` normalizes the whole temp tree with
+  `sudo chmod -R a+rX "$tmp"` so the factory `dkms.conf` can be read by the
+  unprivileged probes; a failed normalization fails closed. Cleanup therefore
+  also goes through `${SUDO:-sudo}` on every failure path and on success: a
+  failed registration or build must never leave a root-owned temp tree behind
+  for the deploying user.
 
 #### Staged-version validation
 

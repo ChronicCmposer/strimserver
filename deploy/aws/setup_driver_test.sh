@@ -83,6 +83,7 @@ end_case() {
     FAKE_DKMS_RPM FAKE_DKMS_PAYLOAD FAKE_DKMS_CONF_MISSING FAKE_DKMS_TOOL_MISSING \
     FAKE_DKMS_BUILD_RC FAKE_DKMS_SOURCE_LAYOUT FAKE_DKMS_PACKAGE_NAME \
     FAKE_DKMS_PACKAGE_VERSION FAKE_DKMS_CLEANUP_RC \
+    FAKE_DKMS_EXTRACT_MODE FAKE_DKMS_CHMOD_RC \
     FAKE_STAGE_INCLUDE_DKMS FAKE_STAGE_INCLUDE_BUILD_PREREQS \
     FAKE_STAGE_INCLUDE_KERNEL_PREREQS FAKE_KERNEL_PREREQ_FLAVOR \
     FAKE_KERNEL_PREREQ_PREFIX FAKE_KERNEL_PREREQ_PKG_INSTALLED \
@@ -1795,6 +1796,116 @@ case_dkms_cleanup_uses_sudo() {
   end_case
 }
 
+# Regression: deploy.sh runs under umask 077, so a root-owned DKMS extract can
+# be 0700 and invisible to the deploying user. The library must normalize the
+# whole temp tree with sudo chmod -R a+rX before the dkms.conf probes.
+case_dkms_extract_tree_normalized_readable() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_SOURCE_LAYOUT=nvidia
+  export FAKE_DKMS_EXTRACT_MODE=000
+  export FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia/595.112.07, $kernel, x86_64: installed"
+  local src_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-$NVIDIA_DRIVER_FLOOR"
+  local out="$case_tmp/out" err="$case_tmp/err" rc extract_dir chmod_index cpio_index
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+  extract_dir="$(cat "$FAKE_GPU_STATE/dkms_extract_dir" 2>/dev/null)"
+  chmod_index="$(fixed_index "chmod -R a+rX $extract_dir")"
+  cpio_index="$(fixed_index 'cpio -idm --quiet')"
+
+  check "dkms extract perms: upgrade exits 0" test "$rc" -eq 0
+  check "dkms extract perms: the extraction temp is recorded" test -n "$extract_dir"
+  check "dkms extract perms: sudo normalizes the extraction temp" \
+    bash -c '[[ -n "$1" ]] && grep -qxF "sudo chmod -R a+rX $1" "$2"' _ \
+      "$extract_dir" "$FAKE_GPU_CALLS"
+  check "dkms extract perms: normalization follows cpio extraction" \
+    bash -c '[[ -n "$1" && -n "$2" && "$1" -gt "$2" ]]' _ "$chmod_index" "$cpio_index"
+  check "dkms extract perms: the temp tree is cleaned up" test ! -e "$extract_dir"
+  check "dkms extract perms: the copied source is readable" \
+    test -r "$src_dir/dkms.conf"
+  check "dkms extract perms: registers nvidia/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms add nvidia/$NVIDIA_DRIVER_FLOOR\$"
+  check "dkms extract perms: builds nvidia/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms build nvidia/$NVIDIA_DRIVER_FLOOR( |\$)"
+  check "dkms extract perms: no has-no-dkms.conf false negative" \
+    bash -c '! grep -q "has no dkms.conf" "$1"' _ "$err"
+  end_case
+}
+
+# The same root-owned extraction normalization must keep the legacy
+# nvidia-open/<floor> factory layout working.
+case_dkms_extract_tree_normalized_legacy_layout() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_SOURCE_LAYOUT=nvidia-open
+  export FAKE_DKMS_EXTRACT_MODE=000
+  export FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $kernel, x86_64: installed"
+  local src_dir="$NVIDIA_DKMS_SRC_ROOT/nvidia-open-$NVIDIA_DRIVER_FLOOR"
+  local rc extract_dir
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+  extract_dir="$(cat "$FAKE_GPU_STATE/dkms_extract_dir" 2>/dev/null)"
+
+  check "dkms extract perms legacy: upgrade exits 0" test "$rc" -eq 0
+  check "dkms extract perms legacy: sudo normalizes the extraction temp" \
+    bash -c '[[ -n "$1" ]] && grep -qxF "sudo chmod -R a+rX $1" "$2"' _ \
+      "$extract_dir" "$FAKE_GPU_CALLS"
+  check "dkms extract perms legacy: the copied source is readable" \
+    test -r "$src_dir/dkms.conf"
+  check "dkms extract perms legacy: registers nvidia-open/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms add nvidia-open/$NVIDIA_DRIVER_FLOOR\$"
+  check "dkms extract perms legacy: builds nvidia-open/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms build nvidia-open/$NVIDIA_DRIVER_FLOOR( |\$)"
+  end_case
+}
+
+# A failed normalization must still fail closed: sudo-routed cleanup, no
+# uninstall, no offline install, no resume marker.
+case_dkms_extract_chmod_failure_cleans_up() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_DKMS_SOURCE_LAYOUT=nvidia
+  export FAKE_DKMS_EXTRACT_MODE=000 FAKE_DKMS_CHMOD_RC=17
+  export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc extract_dir
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+  extract_dir="$(cat "$FAKE_GPU_STATE/dkms_extract_dir" 2>/dev/null)"
+
+  check "dkms extract chmod failure: upgrade fails" test "$rc" -ne 0
+  check "dkms extract chmod failure: names [kernel-module]" \
+    bash -c 'grep -q "\[kernel-module\]" "$1"' _ "$err"
+  check "dkms extract chmod failure: message names the normalization" \
+    bash -c 'grep -q "could not make the extracted DKMS source readable" "$1"' _ "$err"
+  check "dkms extract chmod failure: normalization was attempted under sudo" \
+    bash -c '[[ -n "$1" ]] && grep -qxF "sudo chmod -R a+rX $1" "$2"' _ \
+      "$extract_dir" "$FAKE_GPU_CALLS"
+  check "dkms extract chmod failure: cleanup is sudo-routed to the temp tree" \
+    bash -c '[[ -n "$1" ]] && grep -qxF "sudo rm -rf $1" "$2"' _ \
+      "$extract_dir" "$FAKE_GPU_CALLS"
+  check "dkms extract chmod failure: the temp tree is removed" \
+    test ! -e "$extract_dir"
+  check "dkms extract chmod failure: no dkms add attempted" no_call '^dkms add '
+  check "dkms extract chmod failure: no dkms build attempted" no_call '^dkms build '
+  check "dkms extract chmod failure: no uninstall attempted" no_call 'nvidia-uninstall'
+  check "dkms extract chmod failure: no offline install attempted" \
+    no_call '^dnf install .*--allowerasing'
+  check "dkms extract chmod failure: no marker left behind" \
+    bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
 case_dkms_variant_detection_accepts_nvidia() {
   begin_case
   export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=kmod
@@ -3214,6 +3325,9 @@ case_dkms_source_nvidia_layout_registers
 case_dkms_source_legacy_layout_still_works
 case_dkms_source_conf_identity_overrides_layout
 case_dkms_cleanup_uses_sudo
+case_dkms_extract_tree_normalized_readable
+case_dkms_extract_tree_normalized_legacy_layout
+case_dkms_extract_chmod_failure_cleans_up
 case_dkms_variant_detection_accepts_nvidia
 case_post_install_status_accepts_nvidia
 case_run_managed_dkms_detected

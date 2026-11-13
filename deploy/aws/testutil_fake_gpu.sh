@@ -121,6 +121,17 @@
 #                             tests can prove the library cleans up through
 #                             $SUDO. A sudo-invoked rm (fake-sudo sets
 #                             FAKE_SUDO_ACTIVE=1) always succeeds.
+#   FAKE_DKMS_EXTRACT_MODE    mode applied to the extracted `/usr` tree after
+#                             `cpio`, modelling a root-owned extract created
+#                             under umask 077. Use `000` to make it genuinely
+#                             inaccessible to the non-root deploying user until
+#                             the library normalizes the tree with
+#                             `chmod -R a+rX`. Unset leaves normal perms.
+#   FAKE_DKMS_CHMOD_RC        rc for the extraction-tree `chmod -R a+rX` only;
+#                             stage-tree chmods still honour FAKE_CHMOD_RC. A
+#                             nonzero rc exercises the new fail-closed
+#                             normalization branch (cleanup must still be
+#                             sudo-routed).
 #   The fake `dkms build` refuses to run unless the module source exists under
 #   $NVIDIA_DKMS_SRC_ROOT and was registered by `dkms add` (or is already in
 #   `dkms status`); `rpm2cpio`/`cpio` only populate that tree for a staged DKMS
@@ -1116,6 +1127,9 @@ SHIM
   cat >"$FAKE_GPU_BINDIR/cpio" <<'SHIM'
 #!/usr/bin/env bash
 printf 'cpio %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+# Remember where the extract landed so a test can assert the normalization
+# targeted this temp tree rather than a stage directory.
+[[ -n "${FAKE_GPU_STATE:-}" ]] && printf '%s' "$PWD" >"$FAKE_GPU_STATE/dkms_extract_dir"
 pkg_name="$(cat "$FAKE_GPU_STATE/dkms_package_name" 2>/dev/null)"
 pkg_version="$(cat "$FAKE_GPU_STATE/dkms_package_version" 2>/dev/null)"
 wrote=0
@@ -1139,6 +1153,12 @@ while IFS= read -r path; do
   wrote=1
 done
 [[ "$wrote" == "1" ]] || exit 1
+# A real root extract under umask 077 leaves /usr/src root-owned 0700. The
+# knob models that: mode 000 makes the subtree untraversable to the deploying
+# user, so only the library's sudo-chmod normalization can recover it.
+if [[ -n "${FAKE_DKMS_EXTRACT_MODE:-}" && -d "$PWD/usr" ]]; then
+  "${FAKE_REAL_CHMOD:-chmod}" "$FAKE_DKMS_EXTRACT_MODE" "$PWD/usr" || exit 1
+fi
 exit 0
 SHIM
 
@@ -1272,18 +1292,29 @@ SHIM
   cat >"$FAKE_GPU_BINDIR/rm" <<'SHIM'
 #!/usr/bin/env bash
 printf 'rm %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+recursive=0
+for a in "$@"; do
+  case "$a" in
+    -*[rR]*) recursive=1 ;;
+  esac
+done
+# A privileged rm can clear a root-owned extraction tree. Model that by
+# normalizing owner access first; otherwise the mode-000 model would defeat
+# the sudo cleanup path that a real root shell could always perform.
+if [[ "$recursive" == "1" && "${FAKE_SUDO_ACTIVE:-0}" == "1" ]]; then
+  for a in "$@"; do
+    case "$a" in
+      -*) ;;
+      *) [[ -d "$a" ]] && "${FAKE_REAL_CHMOD:-chmod}" -R u+rwX "$a" 2>/dev/null || true ;;
+    esac
+  done
+fi
 # Model an unprivileged cleanup denied on a root-owned extraction tree:
 # FAKE_DKMS_CLEANUP_RC makes a non-sudo recursive `rm` of a temp tree fail
 # loudly. fake-sudo sets FAKE_SUDO_ACTIVE=1, so the privileged path always
 # succeeds. Non-recursive `rm -f` of a temp file created by the caller is
 # unaffected.
 if [[ -n "${FAKE_DKMS_CLEANUP_RC:-}" && "${FAKE_SUDO_ACTIVE:-0}" != "1" ]]; then
-  recursive=0
-  for a in "$@"; do
-    case "$a" in
-      -*[rR]*) recursive=1 ;;
-    esac
-  done
   if [[ "$recursive" == "1" ]]; then
     for a in "$@"; do
       case "$a" in
@@ -1336,6 +1367,21 @@ SHIM
   cat >"$FAKE_GPU_BINDIR/chmod" <<'SHIM'
 #!/usr/bin/env bash
 printf 'chmod %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
+# FAKE_DKMS_CHMOD_RC fails only the extraction-tree normalization; stage-tree
+# chmods are covered by FAKE_CHMOD_RC below.
+if [[ -n "${FAKE_DKMS_CHMOD_RC:-}" ]]; then
+  target="${*: -1}"
+  normalize=0
+  for a in "$@"; do
+    [[ "$a" == *a+rX* ]] && normalize=1
+  done
+  if [[ "$normalize" == "1" ]]; then
+    case "$target" in
+      "${NVIDIA_STAGE_DIR:-/nonexistent}"*) ;;
+      "${TMPDIR:-/tmp}"/*) exit "$FAKE_DKMS_CHMOD_RC" ;;
+    esac
+  fi
+fi
 if [[ -n "${NVIDIA_STAGE_DIR:-}" && -n "${FAKE_CHMOD_RC:-}" \
     && "${FAKE_CHMOD_RC:-0}" != "0" ]]; then
   target="${*: -1}"

@@ -800,6 +800,14 @@ nvidia__register_dkms_source() {
       nvidia__fail kernel-module "could not extract the staged DKMS source $rpmfile (nothing was uninstalled)"
       return 1
     fi
+    # deploy.sh runs under umask 077, so the root-owned extraction tree can be
+    # 0700 and unreadable to the deploying user who runs the dkms.conf probes.
+    # Normalize it, still under sudo, before looking for the factory source.
+    if ! "$sudo_cmd" chmod -R a+rX "$tmp"; then
+      "$sudo_cmd" rm -rf "$tmp"
+      nvidia__fail kernel-module "could not make the extracted DKMS source readable: $tmp (nothing was uninstalled)"
+      return 1
+    fi
     if ! source_dir="$(nvidia__find_dkms_source_dir "$tmp" "$NVIDIA_DRIVER_FLOOR")"; then
       "$sudo_cmd" rm -rf "$tmp"
       nvidia__fail kernel-module "staged DKMS source $rpmfile has no dkms.conf under nvidia-$NVIDIA_DRIVER_FLOOR/ or nvidia-open-$NVIDIA_DRIVER_FLOOR/ (nothing was uninstalled)"
