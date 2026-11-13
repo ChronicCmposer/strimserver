@@ -151,6 +151,8 @@ NVIDIA_DKMS_SRC_ROOT="${NVIDIA_DKMS_SRC_ROOT:-/usr/src}"
 # tool writes /var/lib/dkms; tests redirect this into a temp dir.
 NVIDIA_DKMS_LIB_ROOT="${NVIDIA_DKMS_LIB_ROOT:-/var/lib/dkms}"
 NVIDIA_FIRMWARE_ROOT="${NVIDIA_FIRMWARE_ROOT:-/lib/firmware}"
+# Root of each kernel's module tree (modules.dep{,.bin}); tests redirect it.
+NVIDIA_MODULES_ROOT="${NVIDIA_MODULES_ROOT:-/lib/modules}"
 NVIDIA_RESUME_MARKER="${NVIDIA_RESUME_MARKER:-/var/lib/strimserver/driver-upgrade.state}"
 # Strict loaded-version source; tests point this at a fake file.
 NVIDIA_PROC_VERSION_FILE="${NVIDIA_PROC_VERSION_FILE:-/proc/driver/nvidia/version}"
@@ -264,9 +266,12 @@ nvidia__proc_version() {
 }
 
 # --- detection precedence (pre-swap decision only) --------------------------
+# Route through the privileged command: deploy.sh runs under umask 077 and
+# depmod can leave modules.dep{,.bin} readable only by root, so an unprivileged
+# modinfo would report the module as missing.
 nvidia__modinfo_version() {
-  local out
-  out="$(modinfo -F version nvidia 2>/dev/null)" || return 1
+  local sudo_cmd="${1:-${SUDO:-sudo}}" out
+  out="$("$sudo_cmd" modinfo -F version nvidia 2>/dev/null)" || return 1
   nvidia__is_version "$out" || return 1
   printf '%s\n' "$out"
 }
@@ -1603,6 +1608,21 @@ nvidia__remove_stale_dkms() {
   return 0
 }
 
+# Make the running kernel's module index readable by unprivileged tools.
+# deploy.sh runs under umask 077, so depmod can leave modules.dep{,.bin} as
+# 0600 root:root and a non-root modinfo then sees no module. Best-effort: a
+# chmod failure must never mask a real depmod failure, because the privileged
+# modinfo path still resolves the module.
+nvidia__normalize_module_index() {
+  local sudo_cmd="$1" kernel="$2"
+  local modules_dir="${NVIDIA_MODULES_ROOT:-/lib/modules}/$kernel"
+  local file
+
+  for file in modules.dep modules.dep.bin; do
+    "$sudo_cmd" chmod 0644 "$modules_dir/$file" 2>/dev/null || true
+  done
+}
+
 # Restore only the units that were active before the drain. Fabricmanager is
 # optional on T4/g4dn: it starts only when it was active AND its 620 package was
 # staged, and a start failure is a loud warning rather than a hard failure.
@@ -1898,12 +1918,14 @@ nvidia_ensure_driver_floor() {
       return 1
     fi
 
-    if ! module_version="$(modinfo -k "$kernel" -F version nvidia 2>/dev/null)" \
+    nvidia__normalize_module_index "$sudo_cmd" "$kernel"
+
+    if ! module_version="$("$sudo_cmd" modinfo -k "$kernel" -F version nvidia 2>/dev/null)" \
         || ! nvidia_driver_ge "$module_version" "$NVIDIA_DRIVER_FLOOR"; then
       nvidia__resume_hint kernel-module "installed module for $kernel is not $NVIDIA_DRIVER_FLOOR; not unloading the old driver" "$sudo_cmd"
       return 1
     fi
-    module_file="$(modinfo -k "$kernel" -n nvidia 2>/dev/null || true)"
+    module_file="$("$sudo_cmd" modinfo -k "$kernel" -n nvidia 2>/dev/null || true)"
     if [[ -z "$module_file" || ! -f "$module_file" ]]; then
       nvidia__resume_hint kernel-module "no $NVIDIA_DRIVER_FLOOR nvidia.ko for $kernel on disk; not unloading the old driver" "$sudo_cmd"
       return 1

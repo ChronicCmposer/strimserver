@@ -50,6 +50,7 @@ begin_case() {
   : >"$case_tmp/fw/nvidia/620.70.06/gsp_tu10x.bin"
   export NVIDIA_STAGE_DIR="$case_tmp/stage"
   export NVIDIA_FIRMWARE_ROOT="$case_tmp/fw"
+  export NVIDIA_MODULES_ROOT="$case_tmp/modules"
   export NVIDIA_RESUME_MARKER="$case_tmp/driver-upgrade.state"
   export NVIDIA_PROC_VERSION_FILE="$case_tmp/proc-version"
   export NVIDIA_DEVICE_NODE="$case_tmp/nvidia0"
@@ -64,7 +65,7 @@ end_case() {
   command rm -rf "$case_tmp"
   unset NVIDIA_STAGE_DIR NVIDIA_FIRMWARE_ROOT NVIDIA_RESUME_MARKER \
     NVIDIA_PROC_VERSION_FILE NVIDIA_DEVICE_NODE NVIDIA_DKMS_SRC_ROOT SUDO \
-    NVIDIA_DKMS_LIB_ROOT \
+    NVIDIA_DKMS_LIB_ROOT NVIDIA_MODULES_ROOT \
     NVIDIA_DRAIN_TIMEOUT NVIDIA_VERSIONLOCK_FILE NVIDIA_STAGE_ONLY \
     FAKE_REPORTED_DRIVER FAKE_PROC_VERSION FAKE_PROC_VERSION_STUCK FAKE_RPM_INSTALLED \
     FAKE_RUN_MANAGED FAKE_UNINSTALL_RC FAKE_RMMOD_BUSY FAKE_DNF_RC \
@@ -96,7 +97,7 @@ end_case() {
     FAKE_REPOQUERY_KERNEL6_12_DEVEL FAKE_REPOQUERY_KERNEL6_12_HEADERS \
     FAKE_STAGE_INCLUDE_SELINUX FAKE_SELINUX_PAYLOAD_HAS_DRIVER \
     FAKE_KERNEL_HEADERS_MISSING FAKE_KERNEL_DEVEL_MISSING \
-    FAKE_PAYLOAD_MISSING_MODULE FAKE_MODINFO_MISSING \
+    FAKE_PAYLOAD_MISSING_MODULE FAKE_MODINFO_MISSING FAKE_MODINFO_REQUIRES_ROOT \
     FAKE_DNF_EMPTY FAKE_OPTIONAL_DOWNLOAD_RC FAKE_DNF_DOWNLOADONLY_CHMOD \
     FAKE_CHMOD_RC FAKE_RPM_UNREADABLE \
     FAKE_VERSIONLOCK_CP_RC FAKE_VERSIONLOCK_TEE_RC FAKE_DNF_STAGE_STDERR
@@ -2169,6 +2170,83 @@ nvidia-open/620.70.06, $kernel, x86_64: installed"
   end_case
 }
 
+case_modinfo_version_uses_privileged_command() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=620.70.06 FAKE_RPM_INSTALLED=1
+  export FAKE_MODINFO_REQUIRES_ROOT=1
+  fake_gpu_install
+  local version
+  version="$(nvidia__modinfo_version)"
+
+  check "modinfo version: resolves through SUDO=fake-sudo" test "$version" = "620.70.06"
+  check "modinfo version: routes through the privileged command" \
+    has_call '^sudo modinfo -F version nvidia$'
+  end_case
+}
+
+case_pre_unload_modinfo_requires_root() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
+  export FAKE_RPM_INSTALLED=1 FAKE_MODINFO_REQUIRES_ROOT=1
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "pre-unload sudo modinfo: upgrade exits 0" test "$rc" -eq 0
+  check "pre-unload sudo modinfo: unloads the old module graph" \
+    has_call 'modprobe -r nvidia$'
+  check "pre-unload sudo modinfo: version probe precedes the unload" \
+    before 'sudo modinfo -k .* -F version nvidia' 'modprobe -r nvidia$'
+  check "pre-unload sudo modinfo: module file resolves via privileged modinfo -n" \
+    has_call 'sudo modinfo -k .* -n nvidia'
+  check "pre-unload sudo modinfo: loads the 620 module" has_call '^sudo modprobe nvidia$'
+  end_case
+}
+
+case_pre_unload_module_index_normalized() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
+  export FAKE_RPM_INSTALLED=1 FAKE_KERNEL_RELEASE=5.10.240-217.935.amzn2.x86_64
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local kernel="$("$(command -v uname)" -r)"
+  local index_dir="$NVIDIA_MODULES_ROOT/$kernel"
+  command mkdir -p "$index_dir"
+  : >"$index_dir/modules.dep"
+  : >"$index_dir/modules.dep.bin"
+  command chmod 0600 "$index_dir/modules.dep" "$index_dir/modules.dep.bin"
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "module index: upgrade exits 0" test "$rc" -eq 0
+  check "module index: chmods modules.dep after depmod" \
+    before 'depmod -a' 'chmod 0644 .*modules\.dep$'
+  check "module index: chmods modules.dep.bin after depmod" \
+    before 'depmod -a' 'chmod 0644 .*modules\.dep\.bin$'
+  check "module index: modules.dep is 0644" \
+    test "$(stat -c '%a' "$index_dir/modules.dep")" = "644"
+  check "module index: modules.dep.bin is 0644" \
+    test "$(stat -c '%a' "$index_dir/modules.dep.bin")" = "644"
+  end_case
+}
+
+case_pre_unload_missing_module_fails_closed() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
+  export FAKE_RPM_INSTALLED=1 FAKE_MODINFO_MISSING=1
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "missing 620 module: upgrade fails" test "$rc" -ne 0
+  check "missing 620 module: names [kernel-module]" \
+    bash -c 'grep -q "\[kernel-module\]" "$1"' _ "$err"
+  check "missing 620 module: does not unload the old graph" no_call 'modprobe -r nvidia$'
+  end_case
+}
+
 case_dkms_post_install_module_missing() {
   begin_case
   export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
@@ -3421,6 +3499,10 @@ case_run_managed_dkms_remove_failure
 case_kmod_host_no_dkms
 case_gsp_missing
 case_stale_dkms_removed_before_modinfo_gate
+case_modinfo_version_uses_privileged_command
+case_pre_unload_modinfo_requires_root
+case_pre_unload_module_index_normalized
+case_pre_unload_missing_module_fails_closed
 case_dkms_post_install_module_missing
 
 # Phase 2 (staging-dir permissions) -- stage access contract

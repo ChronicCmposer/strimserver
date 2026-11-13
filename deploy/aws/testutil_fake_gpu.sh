@@ -61,6 +61,9 @@
 #   FAKE_SMI_MISSING          1 -> do not install an nvidia-smi shim at all
 #   FAKE_RPM_INSTALLED        1 -> `rpm -q nvidia-open` succeeds
 #   FAKE_RUN_MANAGED          1 -> modinfo reports a version with no RPM
+#   FAKE_MODINFO_REQUIRES_ROOT 1 -> `modinfo` fails unless invoked through
+#                             fake-sudo (FAKE_SUDO_ACTIVE=1), modelling a
+#                             modules.dep index readable only by root
 #   FAKE_UNINSTALL_RC         rc for `nvidia-uninstall` (default 0)
 #   FAKE_MODPROBE_RC          rc for `modprobe` (default 0)
 #   FAKE_DNF_UPGRADES_DRIVER  0 -> offline install leaves the on-disk driver
@@ -907,6 +910,7 @@ SHIM
 #!/usr/bin/env bash
 printf 'modinfo %s\n' "$*" >>"${FAKE_GPU_CALLS:-/dev/null}"
 [[ "${FAKE_MODINFO_MISSING:-0}" == "1" ]] && exit 1
+[[ "${FAKE_MODINFO_REQUIRES_ROOT:-0}" == "1" && "${FAKE_SUDO_ACTIVE:-0}" != "1" ]] && exit 1
 installed="$(cat "$FAKE_GPU_STATE/rpm_installed" 2>/dev/null)"
 [[ "$installed" == "1" || "${FAKE_RUN_MANAGED:-0}" == "1" ]] || exit 1
 v="$(cat "$FAKE_GPU_STATE/driver_version" 2>/dev/null)"
