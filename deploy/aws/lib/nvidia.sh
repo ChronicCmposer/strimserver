@@ -147,6 +147,9 @@ NVIDIA_STAGE_DIR="${NVIDIA_STAGE_DIR:-/mnt/nvme/nvidia-rpm}"
 # Where a staged DKMS source tree is extracted/registered before the pre-install
 # build proof. The real DKMS tree lives in /usr/src; tests redirect it.
 NVIDIA_DKMS_SRC_ROOT="${NVIDIA_DKMS_SRC_ROOT:-/usr/src}"
+# The DKMS library tree that holds each registration's build/make.log. The real
+# tool writes /var/lib/dkms; tests redirect this into a temp dir.
+NVIDIA_DKMS_LIB_ROOT="${NVIDIA_DKMS_LIB_ROOT:-/var/lib/dkms}"
 NVIDIA_FIRMWARE_ROOT="${NVIDIA_FIRMWARE_ROOT:-/lib/firmware}"
 NVIDIA_RESUME_MARKER="${NVIDIA_RESUME_MARKER:-/var/lib/strimserver/driver-upgrade.state}"
 # Strict loaded-version source; tests point this at a fake file.
@@ -845,7 +848,7 @@ nvidia__register_dkms_source() {
   # `dkms status` here would run before the driver install and blur the
   # post-install verification ordering.
   if [[ "$extracted" == "1" ]]; then
-    if ! "$sudo_cmd" dkms add "$dkms_name/$dkms_version"; then
+    if ! "$sudo_cmd" dkms add "$dkms_name/$dkms_version" >&2; then
       nvidia__fail kernel-module "dkms add $dkms_name/$dkms_version failed (nothing was uninstalled)"
       return 1
     fi
@@ -859,17 +862,46 @@ nvidia__register_dkms_source() {
 # nvidia__register_dkms_source. A build failure means the old driver must stay
 # installed.
 nvidia__prove_dkms_build() {
-  local sudo_cmd="$1" dkms_token="$2" kernel
+  local sudo_cmd="$1" dkms_token="$2" kernel build_log make_log detail make_tail
 
   if [[ -z "$dkms_token" ]]; then
     nvidia__fail kernel-module "no DKMS package identity was derived from dkms.conf (nothing was uninstalled)"
     return 1
   fi
-  kernel="$(uname -r)"
-  if ! "$sudo_cmd" dkms build "$dkms_token" -k "$kernel" >/dev/null 2>&1; then
-    nvidia__fail kernel-module "staged DKMS source cannot build $dkms_token for $kernel (nothing was uninstalled)"
+  # Parse at the boundary: a registration token is exactly "<name>/<version>".
+  # A multi-line or otherwise malformed token (for example captured `dkms add`
+  # chatter) must never reach `dkms build`.
+  if [[ ! "$dkms_token" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    nvidia__fail kernel-module "refusing malformed DKMS token '$dkms_token' (nothing was uninstalled)"
     return 1
   fi
+  kernel="$(uname -r)"
+  if ! build_log="$(mktemp 2>/dev/null)"; then
+    nvidia__fail kernel-module "could not create a temp file to capture dkms build output (nothing was uninstalled)"
+    return 1
+  fi
+  if ! "$sudo_cmd" dkms build "$dkms_token" -k "$kernel" >"$build_log" 2>&1; then
+    detail="$(tail -n 20 "$build_log" 2>/dev/null || true)"
+    make_log="$NVIDIA_DKMS_LIB_ROOT/$dkms_token/build/make.log"
+    if [[ -f "$make_log" ]]; then
+      make_tail="$(tail -n 20 "$make_log" 2>/dev/null || true)"
+      if [[ -n "$make_tail" ]]; then
+        if [[ -n "$detail" ]]; then
+          detail="$detail"$'\n'"$make_tail"
+        else
+          detail="$make_tail"
+        fi
+      fi
+    fi
+    rm -f "$build_log"
+    if [[ -n "$detail" ]]; then
+      nvidia__fail kernel-module "staged DKMS source cannot build $dkms_token for $kernel: $detail (nothing was uninstalled)"
+    else
+      nvidia__fail kernel-module "staged DKMS source cannot build $dkms_token for $kernel (nothing was uninstalled)"
+    fi
+    return 1
+  fi
+  rm -f "$build_log"
   return 0
 }
 

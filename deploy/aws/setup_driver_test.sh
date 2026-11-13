@@ -54,6 +54,7 @@ begin_case() {
   export NVIDIA_PROC_VERSION_FILE="$case_tmp/proc-version"
   export NVIDIA_DEVICE_NODE="$case_tmp/nvidia0"
   export NVIDIA_DKMS_SRC_ROOT="$case_tmp/usr-src"
+  export NVIDIA_DKMS_LIB_ROOT="$case_tmp/lib-dkms"
   export SUDO=fake-sudo
 }
 
@@ -63,6 +64,7 @@ end_case() {
   command rm -rf "$case_tmp"
   unset NVIDIA_STAGE_DIR NVIDIA_FIRMWARE_ROOT NVIDIA_RESUME_MARKER \
     NVIDIA_PROC_VERSION_FILE NVIDIA_DEVICE_NODE NVIDIA_DKMS_SRC_ROOT SUDO \
+    NVIDIA_DKMS_LIB_ROOT \
     NVIDIA_DRAIN_TIMEOUT NVIDIA_VERSIONLOCK_FILE NVIDIA_STAGE_ONLY \
     FAKE_REPORTED_DRIVER FAKE_PROC_VERSION FAKE_PROC_VERSION_STUCK FAKE_RPM_INSTALLED \
     FAKE_RUN_MANAGED FAKE_UNINSTALL_RC FAKE_RMMOD_BUSY FAKE_DNF_RC \
@@ -83,6 +85,8 @@ end_case() {
     FAKE_DKMS_RPM FAKE_DKMS_PAYLOAD FAKE_DKMS_CONF_MISSING FAKE_DKMS_TOOL_MISSING \
     FAKE_DKMS_BUILD_RC FAKE_DKMS_SOURCE_LAYOUT FAKE_DKMS_PACKAGE_NAME \
     FAKE_DKMS_PACKAGE_VERSION FAKE_DKMS_CLEANUP_RC \
+    FAKE_DKMS_ADD_STDOUT FAKE_DKMS_BUILD_STDOUT FAKE_DKMS_BUILD_STDERR \
+    FAKE_DKMS_MAKE_LOG \
     FAKE_DKMS_EXTRACT_MODE FAKE_DKMS_CHMOD_RC \
     FAKE_STAGE_INCLUDE_DKMS FAKE_STAGE_INCLUDE_BUILD_PREREQS \
     FAKE_STAGE_INCLUDE_KERNEL_PREREQS FAKE_KERNEL_PREREQ_FLAVOR \
@@ -1564,6 +1568,9 @@ case_dkms_build_proof_fails() {
   begin_case
   export FAKE_REPORTED_DRIVER=610.0.0 FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
   export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1 FAKE_DKMS_BUILD_RC=1
+  export FAKE_DKMS_BUILD_STDOUT="make: *** [Makefile:42: modules] Error 2"
+  export FAKE_DKMS_BUILD_STDERR="Error! Bad return status for module build on kernel"
+  export FAKE_DKMS_MAKE_LOG="cc1: fatal error: nvidia-uvm.o: No such file or directory"
   export FAKE_FABRICMANAGER_UNIT=0 FAKE_PERSISTENCED_UNIT=0
   fake_gpu_install
   local out="$case_tmp/out" err="$case_tmp/err" rc
@@ -1572,8 +1579,84 @@ case_dkms_build_proof_fails() {
   check "dkms build proof fails: upgrade fails" test "$rc" -ne 0
   check "dkms build proof fails: a build was attempted" has_call '^dkms (build|install)'
   check "dkms build proof fails: names [kernel-module]" bash -c 'grep -q "\[kernel-module\]" "$1"' _ "$err"
+  check "dkms build proof fails: includes captured build stdout" \
+    bash -c 'grep -qF "make: *** [Makefile:42: modules] Error 2" "$1"' _ "$err"
+  check "dkms build proof fails: includes captured build stderr" \
+    bash -c 'grep -qF "Error! Bad return status for module build" "$1"' _ "$err"
+  check "dkms build proof fails: includes the make.log tail" \
+    bash -c 'grep -qF "cc1: fatal error: nvidia-uvm.o" "$1"' _ "$err"
   check "dkms build proof fails: no uninstall attempted" no_call 'nvidia-uninstall'
   check "dkms build proof fails: no offline install attempted" no_call '^dnf install .*--allowerasing'
+  check "dkms build proof fails: no marker left behind" \
+    bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+# Regression: `dkms add` prints "Creating symlink ..." on stdout. Because the
+# registration helper runs inside command substitution, that chatter must be
+# routed to stderr so the captured token is exactly "<name>/<version>" rather
+# than a multi-line blob that `dkms build` rejects.
+case_dkms_add_output_does_not_contaminate_token() {
+  begin_case
+  export FAKE_DKMS_PAYLOAD=1 FAKE_DKMS_SOURCE_LAYOUT=nvidia
+  fake_gpu_install
+  local dir="$case_tmp/dkmssrc" err="$case_tmp/err" token rc build_rc
+  command mkdir -p "$dir"
+  : >"$dir/kmod-nvidia-open-dkms-$NVIDIA_DRIVER_FLOOR.x86_64.rpm"
+  token="$(nvidia__register_dkms_source "$SUDO" "$dir" 2>"$err")"; rc=$?
+  nvidia__prove_dkms_build "$SUDO" "$token" >/dev/null 2>&1; build_rc=$?
+
+  check "dkms add output: registration exits 0" test "$rc" -eq 0
+  check "dkms add output: the fake emitted the real symlink line" \
+    bash -c 'grep -q "Creating symlink" "$1"' _ "$err"
+  check "dkms add output: the captured token is exactly nvidia/$NVIDIA_DRIVER_FLOOR" \
+    test "$token" = "nvidia/$NVIDIA_DRIVER_FLOOR"
+  check "dkms add output: the token carries no symlink chatter" \
+    bash -c '! grep -q "Creating symlink" <<<"$1"' _ "$token"
+  check "dkms add output: the proof build succeeds" test "$build_rc" -eq 0
+  check "dkms add output: dkms build is invoked with nvidia/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms build nvidia/$NVIDIA_DRIVER_FLOOR -k "
+  end_case
+}
+
+# The same stdout contract must keep the legacy nvidia-open identity working.
+case_dkms_add_output_legacy_token_clean() {
+  begin_case
+  export FAKE_DKMS_PAYLOAD=1 FAKE_DKMS_SOURCE_LAYOUT=nvidia-open
+  fake_gpu_install
+  local dir="$case_tmp/dkmssrc" err="$case_tmp/err" token rc build_rc
+  command mkdir -p "$dir"
+  : >"$dir/kmod-nvidia-open-dkms-$NVIDIA_DRIVER_FLOOR.x86_64.rpm"
+  token="$(nvidia__register_dkms_source "$SUDO" "$dir" 2>"$err")"; rc=$?
+  nvidia__prove_dkms_build "$SUDO" "$token" >/dev/null 2>&1; build_rc=$?
+
+  check "dkms add output legacy: registration exits 0" test "$rc" -eq 0
+  check "dkms add output legacy: the fake emitted the real symlink line" \
+    bash -c 'grep -q "Creating symlink" "$1"' _ "$err"
+  check "dkms add output legacy: the captured token is exactly nvidia-open/$NVIDIA_DRIVER_FLOOR" \
+    test "$token" = "nvidia-open/$NVIDIA_DRIVER_FLOOR"
+  check "dkms add output legacy: the proof build succeeds" test "$build_rc" -eq 0
+  check "dkms add output legacy: dkms build is invoked with nvidia-open/$NVIDIA_DRIVER_FLOOR" \
+    has_call "^dkms build nvidia-open/$NVIDIA_DRIVER_FLOOR -k "
+  end_case
+}
+
+# A malformed token must fail closed before any dkms call, naming the token.
+case_dkms_token_malformed_fails_closed() {
+  begin_case
+  fake_gpu_install
+  : >"$FAKE_GPU_CALLS"
+  local out rc
+  out="$(nvidia__prove_dkms_build "$SUDO" \
+    $'nvidia/620.70.06\nCreating symlink /var/lib/dkms/nvidia/620.70.06/source' 2>&1)"; rc=$?
+
+  check "dkms malformed token: the proof fails" test "$rc" -ne 0
+  check "dkms malformed token: names [kernel-module]" \
+    bash -c 'grep -q "\[kernel-module\]" <<<"$1"' _ "$out"
+  check "dkms malformed token: names the invalid token" \
+    bash -c 'grep -q "malformed DKMS token" <<<"$1" && grep -q "Creating symlink" <<<"$1"' _ "$out"
+  check "dkms malformed token: no dkms add call" no_call '^dkms add '
+  check "dkms malformed token: no dkms build call" no_call '^dkms build '
   end_case
 }
 
@@ -3320,6 +3403,9 @@ case_dkms_tool_missing
 case_dkms_tool_staged
 case_dkms_kernel_headers_missing
 case_dkms_build_proof_fails
+case_dkms_add_output_does_not_contaminate_token
+case_dkms_add_output_legacy_token_clean
+case_dkms_token_malformed_fails_closed
 case_dkms_source_registration_before_build
 case_dkms_source_nvidia_layout_registers
 case_dkms_source_legacy_layout_still_works

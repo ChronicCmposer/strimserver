@@ -101,6 +101,14 @@
 #   FAKE_DKMS_TOOL_MISSING    1 -> remove the `dkms` shim from PATH
 #   FAKE_DKMS_BUILD_RC        rc for `dkms build`/`dkms install` only (default
 #                             FAKE_DKMS_RC); models a source build that fails
+#   FAKE_DKMS_ADD_STDOUT      default 1 -> `dkms add` prints the real
+#                             "Creating symlink ..." line on stdout
+#   FAKE_DKMS_BUILD_STDOUT    text a failing `dkms build` emits on stdout
+#   FAKE_DKMS_BUILD_STDERR    text a failing `dkms build` emits on stderr
+#                             (default a generic "Build of ... failed" line)
+#   FAKE_DKMS_MAKE_LOG        text written to
+#                             $NVIDIA_DKMS_LIB_ROOT/<name>/<version>/build/make.log
+#                             by a `dkms build` invocation
 #   NVIDIA_DKMS_SRC_ROOT      root the fake `dkms` reads for a registered source
 #                             tree (tests redirect it into the case temp dir)
 #   FAKE_DKMS_SOURCE_LAYOUT   factory source layout materialised by
@@ -1077,6 +1085,14 @@ case "$1" in
     dkms_identity_ok "$src" "$mod" "$ver" || exit 1
     mkdir -p "$FAKE_GPU_STATE/dkms"
     : >"$FAKE_GPU_STATE/dkms/$mod-$ver"
+    # A real `dkms add` announces the source symlink on stdout. Modelling that
+    # here keeps every caller's stdout contract honest: a library that captures
+    # this output as the token will fail closed instead of building a blob.
+    if [[ "${FAKE_DKMS_ADD_STDOUT:-1}" == "1" ]]; then
+      printf 'Creating symlink %s/%s/%s/source -> %s/%s-%s\n' \
+        "${NVIDIA_DKMS_LIB_ROOT:-/var/lib/dkms}" "$mod" "$ver" \
+        "${NVIDIA_DKMS_SRC_ROOT:-/usr/src}" "$mod" "$ver"
+    fi
     exit 0
     ;;
   build|install)
@@ -1093,7 +1109,19 @@ case "$1" in
       exit 1
     fi
     dkms_identity_ok "$src" "$mod" "$ver" || exit 1
-    exit "${FAKE_DKMS_BUILD_RC:-${FAKE_DKMS_RC:-0}}"
+    build_rc="${FAKE_DKMS_BUILD_RC:-${FAKE_DKMS_RC:-0}}"
+    if [[ -n "${FAKE_DKMS_MAKE_LOG:-}" ]]; then
+      # The real dkms writes a per-module build/make.log beside the library
+      # registration; tests redirect NVIDIA_DKMS_LIB_ROOT into a temp dir.
+      make_dir="${NVIDIA_DKMS_LIB_ROOT:-/var/lib/dkms}/$mod/$ver/build"
+      "${FAKE_REAL_MKDIR:-mkdir}" -p "$make_dir"
+      printf '%s\n' "$FAKE_DKMS_MAKE_LOG" >"$make_dir/make.log"
+    fi
+    if [[ "$build_rc" != "0" ]]; then
+      [[ -n "${FAKE_DKMS_BUILD_STDOUT:-}" ]] && printf '%s\n' "$FAKE_DKMS_BUILD_STDOUT"
+      printf '%s\n' "${FAKE_DKMS_BUILD_STDERR:-Error! Build of $mod.ko failed for $ver}" >&2
+    fi
+    exit "$build_rc"
     ;;
   *)
     exit "${FAKE_DKMS_RC:-0}"
