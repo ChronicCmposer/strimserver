@@ -104,13 +104,13 @@ from the **actual working tree** (no invented values).
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | gazelle | 0.54.0 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | aspect_bazel_lib | 2.22.5 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_distroless | 0.9.4 | version | yes |
-| MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_oci | 2.3.0 | version | yes |
+| MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_oci | 2.3.5 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_pkg | 1.3.0 | version | yes |
-| MODULE.bazel:bazel_dep | `MODULE.bazel` | aspect_rules_js | 3.6.0 | version | yes |
+| MODULE.bazel:bazel_dep | `MODULE.bazel` | aspect_rules_js | 3.6.1 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | aspect_rules_ts | 3.10.1 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_nodejs | 6.7.7 | version | yes |
 | MODULE.bazel:single_version_override | `MODULE.bazel` | aspect_bazel_lib | 2.22.5 | version | yes |
-| MODULE.bazel:single_version_override | `MODULE.bazel` | bazel_lib | 3.7.2 | version | yes |
+| MODULE.bazel:single_version_override | `MODULE.bazel` | bazel_lib | 3.8.0 | version | yes |
 | MODULE.bazel:apt.sources_list | `MODULE.bazel` | debian | 20261104T000000Z | version | yes |
 | MODULE.bazel:apt.install | `MODULE.bazel` | dash | — | version | no |
 | MODULE.bazel:apt.install | `MODULE.bazel` | busybox-static | — | version | no |

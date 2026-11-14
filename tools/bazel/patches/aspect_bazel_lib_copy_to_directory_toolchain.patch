@@ -1,0 +1,19 @@
+# aspect_bazel_lib 2.22.5's copy_to_directory toolchain downloads the
+# v2.22.5 tool binary, which uses the legacy `copy_to_directory config_file`
+# interface. bazel_lib 3.8.0's copy_to_directory bin action (loaded by
+# aspect_bazel_lib's rule implementation) emits the newer flag-based CLI with
+# a response param file instead. Pull bazel_lib 3.8.0's prebuilt binary -- and
+# its integrity hashes -- so the toolchain matches the action it executes.
+--- a/lib/private/copy_to_directory_toolchain.bzl
++++ b/lib/private/copy_to_directory_toolchain.bzl
+@@ -1,8 +1,8 @@
+ "Setup copy_to_directory toolchain repositories and rules"
+ 
+ # https://github.com/bazel-contrib/bazel-lib/releases
+-load("//tools:integrity.bzl", "RELEASED_BINARY_INTEGRITY")
+-load("//tools:version.bzl", "VERSION")
++load("@bazel_lib//tools:integrity.bzl", "RELEASED_BINARY_INTEGRITY")
++load("@bazel_lib//tools:version.bzl", "VERSION")
+ 
+ # Platform names follow the platform naming convention in @aspect_bazel_lib//:lib/private/repo_utils.bzl
+ COPY_TO_DIRECTORY_PLATFORMS = {

@@ -53,7 +53,7 @@ var pins = []pin{
 	{
 		name:    "aspect_rules_js",
 		file:    "MODULE.bazel",
-		needles: []string{`bazel_dep(name = "aspect_rules_js", version = "3.6.0")`},
+		needles: []string{`bazel_dep(name = "aspect_rules_js", version = "3.6.1")`},
 	},
 	{
 		name:    "rules_cc",

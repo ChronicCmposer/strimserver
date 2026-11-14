@@ -34,9 +34,9 @@ jobs:
         with:
           go-version: 1.27.4
 
-      # Node version from tools/streamdeck-plugin/.nvmrc (Node 24.21.0).
-      # pnpm availability comes from Node 24 bundling corepack plus the
-      # package.json `packageManager` field auto-activating it (Node 24.21.0
+      # Node version from tools/streamdeck-plugin/.nvmrc (Node 26.13.1).
+      # pnpm availability comes from Node 26.13.1 bundling corepack plus the
+      # package.json `packageManager` field auto-activating it (Node 26.13.1
       # per .nvmrc), not from a setup-node input. `pnpm outdated` is one of
       # check-deps' native resolvers.
       - uses: actions/setup-node@v7.0.0

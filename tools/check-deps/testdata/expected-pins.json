@@ -83,14 +83,14 @@
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "gazelle", "version": "0.54.0", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "aspect_bazel_lib", "version": "2.22.5", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_distroless", "version": "0.9.4", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_oci", "version": "2.3.0", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_oci", "version": "2.3.5", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_pkg", "version": "1.3.0", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "aspect_rules_js", "version": "3.6.0", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "aspect_rules_js", "version": "3.6.1", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "aspect_rules_ts", "version": "3.10.1", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_nodejs", "version": "6.7.7", "kind": "version", "tracked_now": true},
 
     {"source": "MODULE.bazel:single_version_override", "file": "MODULE.bazel", "name": "aspect_bazel_lib", "version": "2.22.5", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:single_version_override", "file": "MODULE.bazel", "name": "bazel_lib", "version": "3.7.2", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:single_version_override", "file": "MODULE.bazel", "name": "bazel_lib", "version": "3.8.0", "kind": "version", "tracked_now": true},
 
     {"source": "MODULE.bazel:apt.sources_list", "file": "MODULE.bazel", "name": "debian", "version": "20261104T000000Z", "kind": "version", "tracked_now": true},
 
