@@ -465,10 +465,12 @@ Resources:
     Type: AWS::Events::Rule
     Properties:
       # Deterministic name: the operator policy scopes events:* to
-      # rule/${ProjectName}-baked-ami-publish. Without an explicit RuleName,
-      # CloudFormation auto-generates strimserver-BakedAmiPublishRule-<hash>,
-      # which never matches that scope (live denial on events:DescribeRule).
-      RuleName: !Sub "${ProjectName}-baked-ami-publish"
+      # rule/${ProjectName}-baked-ami-publish. AWS::Events::Rule has no settable
+      # RuleName property (that is only a GetAtt attribute); the valid property
+      # is Name. Without it, CloudFormation auto-generates
+      # strimserver-BakedAmiPublishRule-<hash>, which never matches that scope
+      # (live denial on events:DescribeRule).
+      Name: !Sub "${ProjectName}-baked-ami-publish"
       Description: Publish the baked AMI id when the Image Builder image is AVAILABLE
       EventPattern:
         source:

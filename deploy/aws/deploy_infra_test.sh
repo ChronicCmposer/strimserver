@@ -316,6 +316,31 @@ extract_template_resource() {
   ' "$infra_template"
 }
 
+# PyYAML is absent from the build image, so parse the resource's Properties
+# block structurally: only 6-space keys are direct children of Properties;
+# nested keys are deeper and therefore ignored. This is deliberately stricter
+# than grepping raw tokens (the old RuleName guard passed on an invalid
+# property that CFN silently ignored).
+properties_keys() {
+  awk '
+    /^    Properties:[[:space:]]*$/ { inprops=1; next }
+    inprops && /^    [^[:space:]]/ { inprops=0 }
+    inprops && /^      [A-Za-z0-9]+:/ { key=$1; sub(/:$/, "", key); print key }
+  ' <<<"$1"
+}
+
+property_value() { # property_value <resource-block> <key>
+  awk -v want="$2" '
+    /^    Properties:[[:space:]]*$/ { inprops=1; next }
+    inprops && /^    [^[:space:]]/ { inprops=0 }
+    inprops && index($0, "      " want ":") == 1 {
+      sub("^      " want ":[[:space:]]*", "")
+      print
+      exit
+    }
+  ' <<<"$1"
+}
+
 check "infra template exists" test -f "$infra_template"
 check "operator template exists" test -f "$operator_template"
 
@@ -391,13 +416,19 @@ check "pipeline documents the monthly-rebuild TODO" \
   bash -c 'grep -Fiq "monthly" "$1"' _ "$infra_template"
 check "InfrastructureConfiguration references the operator's instance profile name" \
   bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" <<<"$1"' _ "$infra_config_block"
-check "SSM publish document has a deterministic Name" \
-  bash -c 'grep -A6 "Type: AWS::SSM::Document" "$1" | grep -Fq "Name:"' _ "$infra_template"
+document_block="$(extract_template_resource BakedAmiPublishDocument)"
+check "SSM publish document sets Properties.Name (valid AWS::SSM::Document property)" \
+  test "$(property_value "$document_block" Name)" = '!Sub "${ProjectName}-baked-ami-publish"'
 
-check "BakedAmiPublishRule has the deterministic ProjectName-derived RuleName" \
-  bash -c 'grep -Fq "RuleName: !Sub \"\${ProjectName}-baked-ami-publish\"" <<<"$1"' _ "$publish_rule_block"
-check "publish RuleName matches the operator policy's events rule scope" \
-  bash -c 'grep -Fq "RuleName: !Sub \"\${ProjectName}-baked-ami-publish\"" <<<"$1" && grep -Fq "rule/\${ProjectName}-baked-ami-publish" "$2"' _ "$publish_rule_block" "$operator_template"
+publish_rule_name="$(property_value "$publish_rule_block" Name)"
+publish_rule_keys="$(properties_keys "$publish_rule_block")"
+
+check "BakedAmiPublishRule sets Properties.Name to the deterministic ProjectName-derived name" \
+  test "$publish_rule_name" = '!Sub "${ProjectName}-baked-ami-publish"'
+check "BakedAmiPublishRule has no invalid RuleName property (Events Rule property is Name)" \
+  bash -c '! grep -Fxq "RuleName" <<<"$1"' _ "$publish_rule_keys"
+check "publish Name matches the operator policy's events rule scope" \
+  bash -c 'grep -Fq "rule/\${ProjectName}-baked-ami-publish" "$1"' _ "$operator_template"
 
 check "infra declares DeploymentBucketName" \
   bash -c 'grep -Eq "^  DeploymentBucketName:" "$1"' _ "$infra_template"
