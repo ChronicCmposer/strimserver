@@ -66,11 +66,11 @@ new_home() { # new_home <dir>: a fixture HOME with a pre-existing [default] prof
 }
 
 # ---------------------------------------------------------------------------
-# Case 1 -- first create: profile identity, no key rotation, template defaults
+# Case 1 -- first create: profile identity, no key rotation, live VPC passthrough
 # ---------------------------------------------------------------------------
 h1="$work/h1"; new_home "$h1"; mkdir -p "$work/s1"
 creds_before="$(cat "$h1/.aws/credentials")"
-EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32 S3_BUCKET_NAME=bucket-1)
+EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32 S3_BUCKET_NAME=bucket-1 VPC_ID=vpc-abc123)
 run_deploy "$work/s1" "$work/c1" "$h1" >"$work/o1" 2>&1
 rc=$?
 EXTRA_ENV=()
@@ -99,6 +99,50 @@ check "post-deploy reads the stack status as CREATE_COMPLETE" \
   bash -c 'grep -Fq "cloudformation describe-stacks" "$1" && grep -Fq "CREATE_COMPLETE" "$2"' _ "$work/c1" "$work/o1"
 check "post-deploy lists Image Builder pipelines" \
   bash -c 'grep -Fq "imagebuilder list-image-pipelines" "$1"' _ "$work/c1"
+
+# ---------------------------------------------------------------------------
+# Case 1b -- first create in existing-VPC mode: VPC_ID -> VpcId
+# ---------------------------------------------------------------------------
+h1b="$work/h1b"; new_home "$h1b"; mkdir -p "$work/s1b"
+EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32 VPC_ID=vpc-deadbeef)
+run_deploy "$work/s1b" "$work/c1b" "$h1b" >"$work/o1b" 2>&1
+rc=$?
+EXTRA_ENV=()
+check "first create with VPC_ID exits 0" test "$rc" -eq 0
+deploy1b="$(grep -m1 'cloudformation deploy' "$work/c1b" || true)"
+check "first create passes VPC_ID as VpcId" \
+  bash -c '[[ "$1" == *VpcId=vpc-deadbeef* ]]' _ "$deploy1b"
+check "first create does not force CreateNetwork when VPC_ID is supplied" \
+  bash -c '[[ "$1" != *"CreateNetwork="* ]]' _ "$deploy1b"
+
+# ---------------------------------------------------------------------------
+# Case 1c -- first create in created-network mode: CREATE_NETWORK=true, no VPC_ID
+# ---------------------------------------------------------------------------
+h1c="$work/h1c"; new_home "$h1c"; mkdir -p "$work/s1c"
+EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32 CREATE_NETWORK=true)
+run_deploy "$work/s1c" "$work/c1c" "$h1c" >"$work/o1c" 2>&1
+rc=$?
+EXTRA_ENV=()
+check "first create with CREATE_NETWORK=true exits 0" test "$rc" -eq 0
+deploy1c="$(grep -m1 'cloudformation deploy' "$work/c1c" || true)"
+check "first create passes CreateNetwork=true" \
+  bash -c '[[ "$1" == *CreateNetwork=true* ]]' _ "$deploy1c"
+check "first create passes no VpcId when CREATE_NETWORK=true" \
+  bash -c '[[ "$1" != *"VpcId="* ]]' _ "$deploy1c"
+
+# ---------------------------------------------------------------------------
+# Case 1d -- first create with neither: fail fast before any AWS deploy call
+# ---------------------------------------------------------------------------
+h1d="$work/h1d"; new_home "$h1d"; mkdir -p "$work/s1d"
+EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32)
+run_deploy "$work/s1d" "$work/c1d" "$h1d" >"$work/o1d" 2>&1
+rc=$?
+EXTRA_ENV=()
+check "first create with neither CreateNetwork nor VpcId exits non-zero" test "$rc" -ne 0
+check "fail-fast remediation names CREATE_NETWORK=true" grep -Fq 'CREATE_NETWORK=true' "$work/o1d"
+check "fail-fast remediation names VPC_ID" grep -Fq 'VPC_ID' "$work/o1d"
+check "fail-fast makes NO cloudformation deploy call" \
+  bash -c '! grep -Fq "cloudformation deploy" "$1"' _ "$work/c1d"
 
 # ---------------------------------------------------------------------------
 # Case 2 -- a non-strimserver identity is rejected before deploying
@@ -180,6 +224,20 @@ check "CREATE_NETWORK overrides the live CreateNetwork" \
   bash -c '[[ "$1" == *CreateNetwork=true* ]]' _ "$deploy4"
 check "un-overridden live parameters survive the update" \
   bash -c '[[ "$1" == *ControllerPort=4100* && "$1" == *VpcId=vpc-abc123* && "$1" == *EnableExperimentalSsh=true* ]]' _ "$deploy4"
+
+# ---------------------------------------------------------------------------
+# Case 4b -- explicit VPC_ID overrides the live VpcId on update
+# ---------------------------------------------------------------------------
+h4b="$work/h4b"; new_home "$h4b"; mkdir -p "$work/s4b"
+write_live_stack "$work/s4b" "$nvidia_floor"
+EXTRA_ENV=(VPC_ID=vpc-override999)
+run_deploy "$work/s4b" "$work/c4b" "$h4b" >"$work/o4b" 2>&1
+rc=$?
+EXTRA_ENV=()
+check "update with VPC_ID override exits 0" test "$rc" -eq 0
+deploy4b="$(grep -m1 'cloudformation deploy' "$work/c4b" || true)"
+check "VPC_ID overrides the live VpcId" \
+  bash -c '[[ "$1" == *VpcId=vpc-override999* && "$1" != *VpcId=vpc-abc123* ]]' _ "$deploy4b"
 
 # ---------------------------------------------------------------------------
 # Case 5 -- NvidiaDriverFloor drift from lib/nvidia.sh fails loud

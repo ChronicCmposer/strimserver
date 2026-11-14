@@ -22,11 +22,18 @@
 #   applying only explicit overrides:
 #     OPERATOR_CIDR        -> OperatorCidr + IngestCidr
 #     S3_BUCKET_NAME       -> DeploymentBucketName
+#     VPC_ID               -> VpcId (existing-VPC deployment mode)
 #     NVIDIA_DRIVER_FLOOR  -> NvidiaDriverFloor (must match lib/nvidia.sh)
 #     CREATE_NETWORK       -> CreateNetwork (explicit only; defaults to the live value)
 #     ENABLE_EXPERIMENTAL_SSH -> EnableExperimentalSsh (explicit only; defaults to live)
 #   On first create (no stack) it passes the env values and otherwise lets the
 #   template defaults apply (NvidiaDriverFloor is always pinned to lib/nvidia.sh).
+#
+# FIRST-CREATE VPC GUARD
+#   The template defaults CreateNetwork=false and its rule requires a VpcId in
+#   that mode. We mirror that rule client-side and fail BEFORE calling AWS, so a
+#   bad first create can never leave a ROLLBACK_COMPLETE stack: set
+#   CREATE_NETWORK=true to have the stack create a VPC, or export VPC_ID=<vpc>.
 #
 # POST-DEPLOY CONTRACT
 #   * Stack status must be CREATE_COMPLETE or UPDATE_COMPLETE.
@@ -58,6 +65,7 @@ REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-2}}"
 PROFILE="${AWS_PROFILE:-strimserver}"
 OPERATOR_CIDR="${OPERATOR_CIDR:-}"
 S3_BUCKET_NAME="${S3_BUCKET_NAME:-}"
+VPC_ID="${VPC_ID:-}"
 # Explicit network overlays are honored only when set; otherwise the live value
 # (or, on first create, the template default) is used.
 CREATE_NETWORK="${CREATE_NETWORK-}"
@@ -80,9 +88,13 @@ Options:
   --profile P      AWS profile (default: $AWS_PROFILE, else strimserver)
   -h, --help       show this help
 
-Overrides (environment): OPERATOR_CIDR, S3_BUCKET_NAME, NVIDIA_DRIVER_FLOOR,
-CREATE_NETWORK, ENABLE_EXPERIMENTAL_SSH. Existing stack parameters are otherwise
-preserved verbatim.
+Overrides (environment): OPERATOR_CIDR, S3_BUCKET_NAME, VPC_ID,
+NVIDIA_DRIVER_FLOOR, CREATE_NETWORK, ENABLE_EXPERIMENTAL_SSH. Existing stack
+parameters are otherwise preserved verbatim.
+
+First create requires a usable network: either set CREATE_NETWORK=true (the
+stack creates a VPC) or export VPC_ID=<existing vpc>. This is checked before
+any AWS call, so an invalid first create cannot leave a ROLLBACK_COMPLETE stack.
 EOF
 }
 
@@ -179,6 +191,22 @@ build_parameters() {
   if [ -n "$ENABLE_EXPERIMENTAL_SSH" ]; then
     validate_bool ENABLE_EXPERIMENTAL_SSH "$ENABLE_EXPERIMENTAL_SSH"
     params[EnableExperimentalSsh]="$ENABLE_EXPERIMENTAL_SSH"
+  fi
+
+  # Existing-VPC deployment mode: an explicit VPC_ID overrides the live VpcId.
+  if [ -n "$VPC_ID" ]; then
+    params[VpcId]="$VPC_ID"
+  fi
+
+  # Mirror the template's RequireVpcWhenNotCreating rule before touching AWS, so
+  # a first create that cannot satisfy it dies here instead of leaving a
+  # ROLLBACK_COMPLETE stack. On first create a VpcId can only come from VPC_ID.
+  if [ "$STACK_EXISTS" -eq 0 ]; then
+    local effective_create_network="${params[CreateNetwork]:-false}"
+    local effective_vpc_id="${params[VpcId]:-}"
+    if [ "$effective_create_network" != "true" ] && [ -z "$effective_vpc_id" ]; then
+      die "CreateNetwork=false requires a VpcId on first create. Set CREATE_NETWORK=true to have the stack create a VPC, or export VPC_ID=<existing vpc>."
+    fi
   fi
 
   PARAM_ARGS=()
