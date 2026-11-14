@@ -353,38 +353,96 @@ request) for arm64, and diffs `-print-env-example`, `-print-ts-types`, and
 
 ## 3. Infrastructure (CloudFormation)
 
-`deploy/aws/strimserver-infra.yaml` provisions the durable pieces once: the
-security group, IAM instance profile, optional VPC/subnet/networking, and the
-`strimserver` IAM service account. A single project-scoped `strimserver-operator`
-policy is attached to that account — a single managed policy because
-CloudFormation cannot reliably manage two `AWS::IAM::ManagedPolicy` resources
-attached to the same user. It grants only the inventoried operator surface: S3
-read/write and object-ACL on the deployment bucket, EC2 describe (including
-`DescribeImages` for the check-deps DLAMI metadata resolver)/run/terminate plus
-`CreateTags`, `cloudformation:DescribeStacks` on `stack/strimserver/*`
-(read-only — the stack lifecycle is admin-run), both DLAMI SSM parameters
+The CloudFormation surface is split in two, mirroring the movienight
+operator/infra convention:
+
+* **`deploy/aws/strimserver-operator.yaml`** — account-global identity, created
+  once per account by `provision-account` with admin credentials. It owns the
+  `strimserver` IAM user, the single project-scoped `strimserver-operator`
+  managed policy, the EC2 instance role/profile launched instances assume, and
+  every Image Builder role (build instance role/profile, service execution
+  role, AMI-publish role). IAM lives here so the operator policy can
+  `iam:PassRole` those roles without a circular dependency.
+* **`deploy/aws/strimserver-infra.yaml`** — regional resources, deployed by
+  `deploy-infra` as the `[strimserver]` identity: the security group, optional
+  VPC/subnet/networking, the baked-AMI Image Builder component/recipe/
+  infrastructure/distribution/pipeline, and the EventBridge→SSM automation that
+  publishes the baked AMI id. It creates no IAM and references the operator's
+  roles/profile by deterministic `${ProjectName}-…` names.
+
+The operator policy is a single managed policy because CloudFormation cannot
+reliably manage two `AWS::IAM::ManagedPolicy` resources attached to the same
+user. It grants only the inventoried operator surface: S3 read/write and
+object-ACL on the deployment bucket (when `DeploymentBucketName` is set), EC2
+describe (including `DescribeImages` for the check-deps DLAMI metadata
+resolver)/run/terminate plus `CreateTags`, the scoped CloudFormation deploy
+lifecycle and reads on `stack/strimserver/*`, both DLAMI SSM parameters
 (`ssm:GetParameter` on the x86_64 and arm64 families, so the check-deps AMI
 resolver can float the arm64 AMI in any region where it exists), self access-key
-rotation, and `iam:PassRole` on `role/strimserver*` conditioned on
-`iam:PassedToService` = `ec2.amazonaws.com`. It carries no account-wide IAM
-administration and no DNS-zone access.
+rotation, the Image Builder pipeline trigger + reads, and `iam:PassRole` on the
+operator-owned roles. It carries no account-wide IAM administration and no
+DNS-zone access.
 
-Deploy (or update) the stack with admin credentials. `deploy-infra` is
-admin-run: it deploys the stack (the operator policy cannot manage the stack —
-it only calls `cloudformation:DescribeStacks`), then rotates the service
-account's access key into the local `[strimserver]` profile (never
-`[default]`), backing up
-`~/.aws/credentials` first with a timestamp, writes `[profile strimserver]`
-with the resolved region into `~/.aws/config` (backed up, other sections
-preserved), and asserts the fresh key authenticates as
-`arn:...:user/strimserver` before reporting success:
+Deploy in two steps. `provision-account` is the only admin-run script: it
+deploys the operator stack, mints the service account's access key into the
+local `[strimserver]` profile (backing up `~/.aws/credentials` and
+`~/.aws/config` first, other sections preserved), and asserts the fresh key
+authenticates as `arn:...:user/strimserver`. `deploy-infra` then runs as that
+identity; it never rotates a key:
 
 ```sh
-# CreateNetwork=true, EnableExperimentalSsh=true, IngestCidr=OperatorCidr
+# 1. Once, as an AWS administrator (ambient credentials, no --profile):
+deploy/aws/provision-account --yes
+
+# 2. As [strimserver]: CreateNetwork=true, EnableExperimentalSsh=true,
+#    IngestCidr=OperatorCidr.
 OPERATOR_CIDR="203.0.113.4/32" \
 S3_BUCKET_NAME="" \
 deploy/aws/deploy-infra
 ```
+
+### Migrating an existing single-template `strimserver` stack
+
+Earlier deploys created ONE stack named `strimserver` from the old combined
+template. Because the split moves the IAM user into `strimserver-operator`,
+that existing stack cannot simply be updated in place: CloudFormation would
+delete the `strimserver` user (and its access key) as part of the update. Move
+to the split with this one-time sequence:
+
+1. **Handle running instances first.** Terminate any instance that still uses
+   the old stack's security group / VPC (or migration), or the network
+   deletion below will fail (an in-use security group cannot be deleted).
+   `deploy/aws/terminate` is the normal path.
+2. **Delete the old stack.** With admin credentials:
+
+   ```sh
+   aws cloudformation delete-stack --stack-name strimserver --region us-east-2
+   aws cloudformation wait stack-delete-complete --stack-name strimserver --region us-east-2
+   ```
+
+   **Caveat:** this deletes the `strimserver` IAM user and its access key, so
+   the local `[strimserver]` profile stops working, and it deletes the old
+   security group / managed VPC. It does **not** delete
+   `/strimserver/ami/baked/latest` or the DLAMI SSM parameters — those are
+   outside the stacks and survive.
+3. **Recreate the identity surface** (admin credentials). This recreates the
+   user, mints a new access key, and rewrites the `[strimserver]` profile:
+
+   ```sh
+   deploy/aws/provision-account --yes
+   ```
+
+   If the operator policy needs the bucket-scoped S3 grants, update the
+   operator stack with `DeploymentBucketName=<bucket>` afterwards.
+4. **Recreate the regional stack** as `[strimserver]`:
+
+   ```sh
+   OPERATOR_CIDR="203.0.113.4/32" \
+   S3_BUCKET_NAME="" \
+   deploy/aws/deploy-infra
+   ```
+
+   This recreates the network/security group and the Image Builder pipeline.
 
 | Parameter | Default | Notes |
 |---|---|---|

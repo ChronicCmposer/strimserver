@@ -76,16 +76,21 @@ run_provision "$c1/state" "$calls" "$creds" "$config" --yes --region us-east-2 >
 
 deploy_line="$(grep -m1 '^cloudformation deploy' "$calls" || true)"
 [ -n "$deploy_line" ] || fail "no cloudformation deploy recorded; calls:\n$(cat "$calls")"
-[[ "$deploy_line" == *"--template-file $script_dir/strimserver-infra.yaml"* ]] \
-  || fail "deploy missing template: $deploy_line"
-[[ "$deploy_line" == *"--stack-name strimserver"* ]] || fail "deploy missing stack name: $deploy_line"
+# The admin bootstrap now deploys ONLY the account-identity (operator) template
+# to its own stack. The regional infra template is deploy-infra's job.
+[[ "$deploy_line" == *"--template-file $script_dir/strimserver-operator.yaml"* ]] \
+  || fail "deploy missing the operator template: $deploy_line"
+[[ "$deploy_line" == *"--stack-name strimserver-operator"* ]] \
+  || fail "deploy missing the operator stack name: $deploy_line"
 [[ "$deploy_line" == *"--capabilities CAPABILITY_NAMED_IAM"* ]] || fail "deploy missing capabilities: $deploy_line"
 [[ "$deploy_line" == *"--region us-east-2"* ]] || fail "deploy missing region: $deploy_line"
-for param in CreateNetwork=true OperatorCidr=203.0.113.4/32 IngestCidr=203.0.113.4/32 \
-             EnableExperimentalSsh=true DeploymentBucketName=strimserver-deploy; do
-  [[ "$deploy_line" == *"$param"* ]] || fail "deploy missing parameter $param: $deploy_line"
+[[ "$deploy_line" == *"ProjectName=strimserver"* ]] || fail "deploy missing ProjectName: $deploy_line"
+# The old network/bucket env parameters belong to deploy-infra now; the operator
+# stack must not receive them.
+for stale in CreateNetwork= OperatorCidr= IngestCidr= EnableExperimentalSsh= DeploymentBucketName=; do
+  [[ "$deploy_line" != *"$stale"* ]] || fail "operator deploy received stale parameter $stale: $deploy_line"
 done
-ok "deploy carries the frozen template/stack/flags and env-driven parameters"
+ok "deploy targets the operator template/stack with only ProjectName"
 
 # The admin gate must run with the ambient identity, never a profile.
 admin_sts="$(grep '^sts get-caller-identity ' "$calls" | grep -v -- '--profile' | head -n1 || true)"
@@ -133,9 +138,11 @@ grep -q 'operator user  : arn:aws:iam::183438553939:user/strimserver' "$c1/out" 
 grep -q "profile        : strimserver ($creds)" "$c1/out" \
   || fail "summary missing profile path:\n$(cat "$c1/out")"
 grep -q 'region         : us-east-2' "$c1/out" || fail "summary missing region:\n$(cat "$c1/out")"
-grep -q 'stack          : strimserver' "$c1/out" || fail "summary missing stack:\n$(cat "$c1/out")"
+grep -q 'stack          : strimserver-operator' "$c1/out" || fail "summary missing operator stack:\n$(cat "$c1/out")"
 grep -q 'next           : run deploy/aws/deploy-infra' "$c1/out" \
   || fail "summary missing the next-step hint:\n$(cat "$c1/out")"
+grep -q 'infra stack' "$c1/out" \
+  || fail "next-step hint does not point at the infra stack:\n$(cat "$c1/out")"
 ok "identity is asserted, the secret is not echoed, and the summary is complete"
 
 # ---------------------------------------------------------------------------

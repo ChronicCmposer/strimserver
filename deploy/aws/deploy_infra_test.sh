@@ -210,6 +210,7 @@ check "missing-pipeline message names BakedImagePipeline" grep -Fq 'BakedImagePi
 # Structural baked-AMI assertions (retained from the old suite)
 # ---------------------------------------------------------------------------
 infra_template="$script_dir/strimserver-infra.yaml"
+operator_template="$script_dir/strimserver-operator.yaml"
 
 extract_template_resource() {
   awk -v name="$1" '
@@ -220,6 +221,25 @@ extract_template_resource() {
 }
 
 check "infra template exists" test -f "$infra_template"
+check "operator template exists" test -f "$operator_template"
+
+# --- split boundary ---------------------------------------------------------
+check "infra template creates NO IAM resources (identity lives in the operator template)" \
+  bash -c '! grep -Fq "AWS::IAM::" "$1"' _ "$infra_template"
+check "infra template does not create the strimserver user or operator policy" \
+  bash -c '! grep -Fq "StrimserverServiceUser" "$1" && ! grep -Fq "StrimserverOperatorPolicy" "$1"' _ "$infra_template"
+check "operator template owns the IAM user/policy" \
+  bash -c 'grep -Fq "StrimserverServiceUser:" "$1" && grep -Fq "StrimserverOperatorPolicy:" "$1"' _ "$operator_template"
+check "infra references the operator's Image Builder instance profile by fixed name" \
+  bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" "$1"' _ "$infra_template"
+check "infra references the operator's AMI-publish role by fixed name" \
+  bash -c 'grep -Fq -- "-baked-publish-role" "$1"' _ "$infra_template"
+check "every infra ImportValue has a matching operator Export" \
+  bash -c '
+    imports="$(grep -oE "!ImportValue[[:space:]]+[A-Za-z0-9_.:-]+" "$1" | awk "{print \$2}" || true)"
+    for name in $imports; do grep -Fq "Name: ${name}" "$2" || exit 1; done
+  ' _ "$infra_template" "$operator_template"
+
 check "NvidiaDriverFloor parameter default equals the repo floor" \
   bash -c 'grep -A4 "^  NvidiaDriverFloor:" "$1" | grep -Fq "Default: \"$2\""' _ "$infra_template" "$nvidia_floor"
 
@@ -270,6 +290,24 @@ check "pipeline has NO schedule (manual trigger only)" \
   bash -c '! grep -Fq "Schedule:" <<<"$1"' _ "$pipeline_block"
 check "pipeline documents the monthly-rebuild TODO" \
   bash -c 'grep -Fiq "monthly" "$1"' _ "$infra_template"
+# The build instance profile is created by the operator template; the infra
+# InfrastructureConfiguration must reference it by the same fixed name rather
+# than trying to create IAM.
+check "InfrastructureConfiguration references the operator's instance profile name" \
+  bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" <<<"$1"' _ "$infra_config_block"
+# The SSM document must have a deterministic Name because the AMI-publish ROLE
+# (which lives in the operator template) scopes ssm:StartAutomationExecution to
+# that same ARN without being able to !Ref a document in another stack.
+check "SSM publish document has a deterministic Name" \
+  bash -c 'grep -A6 "Type: AWS::SSM::Document" "$1" | grep -Fq "Name:"' _ "$infra_template"
+
+# Parameters retained only for deploy-infra's live-parameter passthrough (the
+# resources that consumed them now live in the operator stack). They must stay
+# declared or `cloudformation deploy` rejects the re-passed live values.
+check "infra keeps DeploymentBucketName declared for passthrough" \
+  bash -c 'grep -Eq "^  DeploymentBucketName:" "$1"' _ "$infra_template"
+check "infra keeps EnableSessionManager declared for passthrough" \
+  bash -c 'grep -Eq "^  EnableSessionManager:" "$1"' _ "$infra_template"
 
 check "produced AMI id is published to /strimserver/ami/baked/latest" \
   bash -c 'grep -Fq "/strimserver/ami/baked/latest" "$1"' _ "$infra_template"

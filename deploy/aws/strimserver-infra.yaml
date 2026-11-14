@@ -1,13 +1,17 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >
-  strimserver durable infrastructure: a security group, an IAM instance profile
-  for ephemeral GPU streaming instances, and the strimserver IAM service
-  account (read-only SSM access for the check-deps AMI resolver), with an
-  OPTIONAL self-contained networking layer (VPC + public subnet + internet
-  gateway). Instances are created and terminated imperatively by
-  deploy/aws/launch and deploy/aws/terminate, which read this stack's outputs.
-  No EC2 launch template is created or required.
+  strimserver regional infrastructure: an OPTIONAL self-contained networking
+  layer (VPC + public subnet + internet gateway), the security group for
+  ephemeral GPU streaming instances, and the baked-AMI Image Builder pipeline
+  (component/recipe/infra/distribution/pipeline) plus the EventBridge->SSM
+  automation that publishes the baked AMI id. Instances are created and
+  terminated imperatively by deploy/aws/launch and deploy/aws/terminate, which
+  read this stack's outputs. The IAM user, operator policy, EC2 instance
+  role/profile and Image Builder roles live in the account-global
+  strimserver-operator stack (deployed first by provision-account); this
+  regional stack references them by deterministic names. No EC2 launch template
+  is created or required.
 
 Parameters:
   ProjectName:
@@ -85,18 +89,19 @@ Parameters:
     Type: String
     Default: ""
     Description: >
-      Optional S3 bucket name (no s3:// prefix) holding
-      the deployment tars (e.g. strimserver-deployment-go-amd64.tar). If set,
-      the instance role is granted read access. Leave empty when deploying via
-      an https:// release asset or a local file (see DEPLOYMENT_SRC).
+      Optional S3 bucket name (no s3:// prefix) holding the deployment tars.
+      Retained on this stack only because deploy-infra re-passes every live
+      parameter verbatim; the bucket-scoped IAM now lives in the
+      strimserver-operator stack (set it there to enable the grants).
 
   EnableSessionManager:
     Type: String
     Default: "true"
     AllowedValues: ["true", "false"]
     Description: >
-      Attach AmazonSSMManagedInstanceCore so the instance is reachable through
-      SSM Session Manager as a fallback if SSH is misconfigured.
+      Retained on this stack only because deploy-infra re-passes every live
+      parameter verbatim. The instance role that consumes it (attaching
+      AmazonSSMManagedInstanceCore) is owned by the strimserver-operator stack.
 
   EnableExperimentalSsh:
     Type: String
@@ -159,8 +164,6 @@ Rules:
 
 Conditions:
   CreateNet: !Equals [!Ref CreateNetwork, "true"]
-  HasBucket: !Not [!Equals [!Ref DeploymentBucketName, ""]]
-  UseSsm: !Equals [!Ref EnableSessionManager, "true"]
   EnableExpSsh: !Equals [!Ref EnableExperimentalSsh, "true"]
 
 Resources:
@@ -274,322 +277,6 @@ Resources:
         - Key: Name
           Value: !Sub "${ProjectName}-sg"
 
-  # ----------------------------------------------------------------------------
-  # IAM instance profile (always)
-  # ----------------------------------------------------------------------------
-  InstanceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        !If
-          - UseSsm
-          - - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-          - !Ref AWS::NoValue
-      Policies:
-        # The baked-AMI SSM parameter is the one piece of state the instance
-        # role may read: deploy/aws/launch resolves it before the DLAMI
-        # fallback. Scope to the single parameter, never a wildcard.
-        - PolicyName: SsmBakedAmiRead
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/strimserver/ami/baked/latest"
-        - !If
-          - HasBucket
-          - PolicyName: DeploymentBucketRead
-            PolicyDocument:
-              Version: "2012-10-17"
-              Statement:
-                - Effect: Allow
-                  Action: ["s3:GetObject"]
-                  Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}/*"
-                - Effect: Allow
-                  Action: ["s3:ListBucket"]
-                  Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}"
-          - !Ref AWS::NoValue
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  InstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Roles: [!Ref InstanceRole]
-
-  # ----------------------------------------------------------------------------
-  # IAM service account (always) - strimserver check-deps AMI resolver
-  # ----------------------------------------------------------------------------
-  StrimserverServiceUser:
-    Type: AWS::IAM::User
-    Properties:
-      UserName: strimserver
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # Project-scoped operator policy (decision 11b): the service user is also the
-  # project operator, so the operator surface its own tooling (deploy/aws/launch,
-  # deploy/aws/terminate, and the scripts/tools publish helpers) actually calls
-  # is attached here. The durable stack itself is bootstrapped ONCE by
-  # deploy/aws/provision-account with admin credentials; thereafter
-  # deploy/aws/deploy-infra runs as THIS identity, so the policy covers the
-  # scoped CloudFormation deploy lifecycle and the Image Builder rebuild surface
-  # below without granting account-wide IAM administration. It also serves the
-  # check-deps DLAMI resolver via the SsmDlamiLookup + Ec2Describe grants.
-  # This is the SINGLE managed policy attached to the user (CloudFormation cannot
-  # reliably manage two AWS::IAM::ManagedPolicy resources attached to one user).
-  StrimserverOperatorPolicy:
-    Type: AWS::IAM::ManagedPolicy
-    Properties:
-      ManagedPolicyName: strimserver-operator
-      Description: >-
-        Least-privilege operator surface for the strimserver account: publish
-        artifacts to the deployment bucket, deploy this stack, read its outputs,
-        resolve the DLAMI, launch/terminate tagged GPU instances, rebuild the
-        baked AMI, hand the template's roles only to their services, and rotate
-        its own access key. No account-wide IAM administration and no DNS-zone
-        management is granted: this project owns no hosted zone.
-      Users:
-        - !Ref StrimserverServiceUser
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          # Bucket-level config used by scripts/bucket-cidr-policy.sh
-          # (get-bucket-location / get- / put-bucket-policy) and by the publish
-          # helpers' list-objects-v2. Scoped to the one deployment bucket the
-          # stack is parameterised with (S3_BUCKET_NAME); omitted entirely when
-          # no bucket is configured, mirroring the InstanceRole's
-          # DeploymentBucketRead policy (an empty bucket name would otherwise
-          # yield a malformed ARN).
-          - !If
-            - HasBucket
-            - Sid: S3BucketConfig
-              Effect: Allow
-              Action:
-                - s3:ListBucket
-                - s3:GetBucketLocation
-                - s3:GetBucketPolicy
-                - s3:PutBucketPolicy
-              Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}"
-            - !Ref AWS::NoValue
-          # Object uploads from the publish helpers (`aws s3 cp`) plus the
-          # object-ACL flip that scripts/bucket-cidr-policy.sh performs under
-          # MAKE_PRIVATE=1 (`s3api put-object-acl --acl private`). Scoped to the
-          # deployment bucket's objects.
-          - !If
-            - HasBucket
-            - Sid: S3Objects
-              Effect: Allow
-              Action:
-                - s3:GetObject
-                - s3:PutObject
-                - s3:PutObjectAcl
-                - s3:DeleteObject
-              Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}/*"
-            - !Ref AWS::NoValue
-          # M2: split the EC2 lifecycle so the operator can only touch instances
-          # it launched. RunInstances is itself split in two: the instance
-          # statement is gated by the Project request tag (the tag launch applies
-          # via --tag-specifications) plus an instance-type allowlist, while the
-          # referenced dependencies (volume/ENI/key-pair/SG/subnet/image) carry
-          # their own unconditioned grant; TerminateInstances by the Project
-          # resource tag; CreateTags (required for tag-on-create) by the same
-          # request tag on instance ARNs. Describe* stay Resource:"*" WITHOUT
-          # conditions: EC2 Describe actions do not support resource-level
-          # permissions, so a ResourceTag condition would evaluate false and deny
-          # them, breaking terminate's instance lookup.
-          - Sid: Ec2Describe
-            Effect: Allow
-            Action:
-              - ec2:DescribeInstances
-              - ec2:DescribeSecurityGroups
-              - ec2:DescribeSubnets
-              # ec2:DescribeImages also backs the check-deps DLAMI metadata
-              # resolver, which reads Images[0].[Name,CreationDate].
-              - ec2:DescribeImages
-            Resource: "*"
-          # ec2:RunInstances is authorized against EVERY resource the request
-          # references (the instance, its root volume, the network interface, the
-          # key pair, the security group, the subnet and the AMI), not just the
-          # instance. The RequestTag/Project condition can only hold for the
-          # instance: launch applies --tag-specifications to the instance alone,
-          # so a single tag-gated statement on Resource:"*" fails authorization on
-          # the key-pair (and on the SG/subnet/image/volume/ENI). The grant is
-          # therefore split: the instance keeps the RequestTag + instance-type
-          # gates, and the referenced resources get their own unconditioned grant.
-          #
-          # The dependency grant is intentionally unconditioned: ec2:InstanceType
-          # is absent from the authorization context for the referenced resources,
-          # so any StringLike gate there would never match and would leave
-          # ec2:RunInstances denied. Safety comes from the gated instance
-          # statement, which IAM still requires for the instance ARN. Public AMIs
-          # live in the empty-account ARN namespace, so image/* must NOT carry
-          # ${AWS::AccountId}.
-          - Sid: Ec2RunInstances
-            Effect: Allow
-            Action:
-              - ec2:RunInstances
-            Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
-            Condition:
-              StringEquals:
-                "aws:RequestTag/Project": !Ref ProjectName
-              StringLike:
-                "ec2:InstanceType":
-                  - "g4dn.*"
-                  - "g5g.*"
-                  - "g6.*"
-          - Sid: Ec2RunInstancesDependencies
-            Effect: Allow
-            Action:
-              - ec2:RunInstances
-            Resource:
-              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
-              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*"
-              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:key-pair/*"
-              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
-              - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*"
-              - !Sub "arn:aws:ec2:${AWS::Region}::image/*"
-          # Tag-on-create (--tag-specifications) requires ec2:CreateTags; scope
-          # it to instance ARNs, the Project request tag, and an aws:TagKeys
-          # allowlist so the operator can only apply the Project/Name keys launch
-          # sets -- not an arbitrary key that could later gate TerminateInstances.
-          #
-          # No aws:ResourceTag condition here: tag-on-create (RunInstances
-          # --tag-specifications) is authorized before the instance exists, so a
-          # ResourceTag condition would DENY every launch.
-          #
-          # Residual (cannot be closed in IAM): a standalone CreateTags API call
-          # and the implicit tag-on-create authorization are indistinguishable,
-          # so a determined operator could still call CreateTags on a foreign
-          # instance with Project=<name> (both keys are allowlisted) and then
-          # terminate it. The allowlist still blocks every other tag key.
-          - Sid: Ec2CreateTags
-            Effect: Allow
-            Action:
-              - ec2:CreateTags
-            Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
-            Condition:
-              StringEquals:
-                "aws:RequestTag/Project": !Ref ProjectName
-              ForAllValues:StringEquals:
-                "aws:TagKeys":
-                  - Project
-                  - Name
-          - Sid: Ec2TerminateInstances
-            Effect: Allow
-            Action:
-              - ec2:TerminateInstances
-            Resource: "*"
-            Condition:
-              StringEquals:
-                "aws:ResourceTag/Project": !Ref ProjectName
-          # launch/terminate read the stack outputs; deploy-infra additionally
-          # reads the live parameters and stack events, and fetches the template
-          # for a diff. Scoped to this stack.
-          - Sid: CloudFormationReadStack
-            Effect: Allow
-            Action:
-              - cloudformation:DescribeStacks
-              - cloudformation:DescribeStackEvents
-              - cloudformation:GetTemplate
-            Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/strimserver/*"
-          # ValidateTemplate has no resource-level permissions, so it must be
-          # Resource:"*"; aws cloudformation deploy calls it before mutating.
-          - Sid: CloudFormationValidateTemplate
-            Effect: Allow
-            Action:
-              - cloudformation:ValidateTemplate
-            Resource: "*"
-          # deploy-infra runs `aws cloudformation deploy` as this identity. The
-          # CLI implements deploy with a change set, so the change-set lifecycle
-          # is required alongside CreateStack/UpdateStack. DeleteStack is NOT
-          # granted: deploy never needs to destroy the durable stack.
-          - Sid: CloudFormationDeployStack
-            Effect: Allow
-            Action:
-              - cloudformation:CreateStack
-              - cloudformation:UpdateStack
-              - cloudformation:CreateChangeSet
-              - cloudformation:DescribeChangeSet
-              - cloudformation:ExecuteChangeSet
-              - cloudformation:DeleteChangeSet
-            Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/strimserver/*"
-          - Sid: SsmDlamiLookup
-            Effect: Allow
-            Action: ssm:GetParameter
-            Resource:
-              - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
-              - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
-              # launch reads the baked-AMI parameter before the DLAMI fallback;
-              # the operator identity is the only one that runs launch.
-              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/strimserver/ami/baked/latest"
-          - Sid: SelfKeyRotation
-            Effect: Allow
-            Action:
-              - iam:ListAccessKeys
-              - iam:CreateAccessKey
-              - iam:DeleteAccessKey
-            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:user/strimserver"
-          # launch passes the stack's instance role to run-instances; constrain
-          # it to EC2 so the role can never be handed to another principal that
-          # could escalate by assuming it.
-          - Sid: PassStrimserverRole
-            Effect: Allow
-            Action: iam:PassRole
-            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/strimserver*"
-            Condition:
-              StringEquals:
-                "iam:PassedToService": ec2.amazonaws.com
-          # deploy-infra re-deploys this template, which wires these roles into
-          # Image Builder, the instance profile and the EventBridge target.
-          # CloudFormation must therefore be able to pass exactly those roles
-          # (never an arbitrary role) to their services.
-          - Sid: PassImageBuilderRoles
-            Effect: Allow
-            Action: iam:PassRole
-            Resource:
-              - !GetAtt BakedImageBuilderInstanceRole.Arn
-              - !GetAtt BakedImageBuilderExecutionRole.Arn
-              - !GetAtt BakedAmiPublishRole.Arn
-            Condition:
-              StringEquals:
-                "iam:PassedToService":
-                  - ec2.amazonaws.com
-                  - imagebuilder.amazonaws.com
-                  - events.amazonaws.com
-                  - ssm.amazonaws.com
-          # Manual baked-AMI rebuild: trigger the one pipeline this stack owns.
-          - Sid: ImageBuilderRebuild
-            Effect: Allow
-            Action:
-              - imagebuilder:StartPipelineExecution
-            Resource: !Sub "arn:aws:imagebuilder:${AWS::Region}:${AWS::AccountId}:image-pipeline/strimserver-baked"
-          # Read/watch surface for a rebuild. Image Builder list actions do not
-          # support resource-level permissions, so those stay Resource:"*".
-          - Sid: ImageBuilderRead
-            Effect: Allow
-            Action:
-              - imagebuilder:GetImagePipeline
-              - imagebuilder:GetImage
-              - imagebuilder:GetImageRecipe
-              - imagebuilder:ListImagePipelines
-              - imagebuilder:ListImages
-              - imagebuilder:ListImageBuildVersions
-            Resource: "*"
-
-  # Optional: experimental OpenSSH port (separate sshd, see tools/openssh).
-  # Added as a standalone ingress rule so it is cleanly conditional and does
-  # not collide with the inline rules on the security group above.
   ExperimentalSshIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Condition: EnableExpSsh
@@ -688,100 +375,14 @@ Resources:
         Project: !Ref ProjectName
         "strimserver:nvidia-driver": !Ref NvidiaDriverFloor
 
-  # Build-instance role/profile: the service launches this profile and runs the
-  # component steps on the build host.
-  BakedImageBuilderInstanceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder
-        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-
-  BakedImageBuilderInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Roles: [!Ref BakedImageBuilderInstanceRole]
-
-  # Service execution role assumed by imagebuilder.amazonaws.com. Least
-  # privilege: imagebuilder reads its own resources, EC2 lifecycle + tagging for
-  # the throwaway build instance, iam:PassRole constrained to EC2, and
-  # ssm:PutParameter on the single baked-AMI parameter (plus build logs).
-  BakedImageBuilderExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: imagebuilder.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: ImageBuilderAccess
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: ImageBuilderResources
-                Effect: Allow
-                Action:
-                  - imagebuilder:GetComponent
-                  - imagebuilder:GetImageRecipe
-                  - imagebuilder:GetInfrastructureConfiguration
-                  - imagebuilder:GetDistributionConfiguration
-                  - imagebuilder:GetImagePipeline
-                  - imagebuilder:GetImage
-                  - imagebuilder:ListImageBuildVersions
-                  - imagebuilder:CreateImage
-                  - imagebuilder:StartImagePipelineExecution
-                Resource: !Sub "arn:aws:imagebuilder:${AWS::Region}:${AWS::AccountId}:*"
-              - Sid: BuildInstanceLifecycle
-                Effect: Allow
-                Action:
-                  - ec2:CreateTags
-                  - ec2:RunInstances
-                  - ec2:TerminateInstances
-                  - ec2:DescribeInstances
-                  - ec2:DescribeImages
-                  - ec2:DescribeInstanceStatus
-                  - ec2:DescribeInstanceTypes
-                  - ec2:DescribeSubnets
-                  - ec2:DescribeSecurityGroups
-                  - ec2:DescribeVpcs
-                Resource: "*"
-              - Sid: PassImageBuilderInstanceRole
-                Effect: Allow
-                Action: iam:PassRole
-                Resource: !GetAtt BakedImageBuilderInstanceRole.Arn
-                Condition:
-                  StringEquals:
-                    "iam:PassedToService": ec2.amazonaws.com
-              - Sid: PublishBakedAmiId
-                Effect: Allow
-                Action: ssm:PutParameter
-                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/strimserver/ami/baked/latest"
-              - Sid: BuildLogs
-                Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/imagebuilder/*"
-
+  # The build-instance profile is owned by the operator stack; reference it by
+  # the same deterministic name (no cross-stack ImportValue, matching the
+  # movienight split convention).
   BakedInfrastructureConfiguration:
     Type: AWS::ImageBuilder::InfrastructureConfiguration
     Properties:
       Name: strimserver-baked-infra
-      InstanceProfileName: !Ref BakedImageBuilderInstanceProfile
+      InstanceProfileName: !Sub "${ProjectName}-baked-imagebuilder-instance-profile"
       InstanceTypes:
         - g4dn.xlarge
       TerminateInstanceOnFailure: true
@@ -821,6 +422,10 @@ Resources:
   BakedAmiPublishDocument:
     Type: AWS::SSM::Document
     Properties:
+      # Deterministic name: the AMI-publish ROLE lives in the operator stack and
+      # scopes ssm:StartAutomationExecution to this ARN without a cross-stack
+      # !Ref, so the name must be stable and ProjectName-derived.
+      Name: !Sub "${ProjectName}-baked-ami-publish"
       DocumentType: Automation
       Content:
         schemaVersion: "0.3"
@@ -840,32 +445,6 @@ Resources:
               Type: String
               Overwrite: true
 
-  BakedAmiPublishRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - events.amazonaws.com
-                - ssm.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: PublishBakedAmi
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: StartBakedAmiAutomation
-                Effect: Allow
-                Action: ssm:StartAutomationExecution
-                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${BakedAmiPublishDocument}:*"
-              - Sid: WriteBakedAmiParameter
-                Effect: Allow
-                Action: ssm:PutParameter
-                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/strimserver/ami/baked/latest"
-
   BakedAmiPublishRule:
     Type: AWS::Events::Rule
     Properties:
@@ -881,8 +460,9 @@ Resources:
               - AVAILABLE
       Targets:
         - Id: PublishBakedAmiParameter
-          Arn: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${BakedAmiPublishDocument}:$DEFAULT"
-          RoleArn: !GetAtt BakedAmiPublishRole.Arn
+          Arn: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${ProjectName}-baked-ami-publish:$DEFAULT"
+          # The role is created by the operator stack; use its deterministic ARN.
+          RoleArn: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-baked-publish-role"
           InputTransformer:
             InputPathsMap:
               ami: "$.detail.outputResources.amis[0].image"
@@ -896,14 +476,18 @@ Outputs:
       Name: !Sub "${AWS::StackName}-SecurityGroupId"
 
   InstanceProfileName:
-    Description: Pass to run-instances as --iam-instance-profile Name=<this> (read automatically).
-    Value: !Ref InstanceProfile
+    Description: >
+      Name of the operator-owned EC2 instance profile; launch passes it to
+      run-instances. The profile itself lives in the strimserver-operator stack.
+    Value: !Sub "${ProjectName}-instance-profile"
     Export:
       Name: !Sub "${AWS::StackName}-InstanceProfileName"
 
   InstanceRoleArn:
-    Description: Informational - the IAM role backing the instance profile.
-    Value: !GetAtt InstanceRole.Arn
+    Description: >
+      ARN of the operator-owned EC2 instance role (informational; the role lives
+      in the strimserver-operator stack).
+    Value: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-instance-role"
     Export:
       Name: !Sub "${AWS::StackName}-InstanceRoleArn"
 
@@ -928,9 +512,18 @@ Outputs:
     Export:
       Name: !Sub "${AWS::StackName}-SubnetId"
 
-  StrimserverServiceUserArn:
+  DeploymentBucketName:
     Description: >
-      ARN of the strimserver IAM service account used by the check-deps AMI
-      resolver (read-only ssm:GetParameter on the DLAMI parameter). This user
-      has no console/SSO access; programmatic access keys only.
-    Value: !GetAtt StrimserverServiceUser.Arn
+      Retained for deploy-infra's live-parameter passthrough. The bucket-scoped
+      IAM that consumes it lives in the strimserver-operator stack.
+    Value: !Ref DeploymentBucketName
+    Export:
+      Name: !Sub "${AWS::StackName}-DeploymentBucketName"
+
+  EnableSessionManager:
+    Description: >
+      Retained for deploy-infra's live-parameter passthrough. The instance role
+      that consumes it lives in the strimserver-operator stack.
+    Value: !Ref EnableSessionManager
+    Export:
+      Name: !Sub "${AWS::StackName}-EnableSessionManager"

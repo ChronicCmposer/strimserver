@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
-# operator_template_test.sh -- structural assertions on
-# deploy/aws/strimserver-infra.yaml (decision 11b).
+# operator_template_test.sh -- structural assertions on the template split.
 #
-# The durable stack must KEEP the read-only service user and carry a SINGLE
-# project-scoped operator managed policy `strimserver-operator` (attached to that
-# user) covering only the inventoried AWS surface, including the DLAMI read
-# grants the check-deps resolver uses. This test enshrines
-# LEAST PRIVILEGE: the operator policy must grant exactly the actions the
-# strimserver tooling actually calls (derived from the `aws` CLI calls in
-# deploy/aws/launch, deploy/aws/terminate and the publish/bucket scripts), must
-# NOT carry account-wide IAM administration, must scope S3 to the deployment
-# bucket and iam:PassRole to ec2, and must not mention route53.
+# The durable identity surface lives in strimserver-operator.yaml (deployed once
+# by provision-account with ADMIN credentials); the regional resources live in
+# strimserver-infra.yaml (deployed by deploy-infra as [strimserver]). This test
+# enshrines the split AND the operator policy's LEAST PRIVILEGE:
+#
+#   * the operator template owns the read-only service user, the single
+#     project-scoped operator managed policy, the EC2 instance role/profile and
+#     every Image Builder role the policy passes to its services;
+#   * the infra template owns only regional resources and creates NO IAM;
+#   * the operator policy grants exactly the actions the strimserver tooling
+#     actually calls (derived from the `aws` CLI calls in deploy/aws/launch,
+#     deploy/aws/terminate and the publish/bucket scripts), must NOT carry
+#     account-wide IAM administration, must scope S3 to the deployment bucket,
+#     and must not mention route53;
+#   * every cross-template reference resolves (ImportValue -> Export) and the
+#     fixed-name role/profile references match the operator's names.
 #
 # PyYAML is not available in the build image, so this test uses a structural
 # extractor (awk) + grep, matching the sibling repo's fallback style.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# The template path is overridable so the mutation check below can re-run this
-# test against a throwaway copy; it defaults to the sibling template (Bazel
-# runfiles keep the template adjacent to the test).
-template="${STRIMSERVER_INFRA_TEMPLATE:-$script_dir/strimserver-infra.yaml}"
+# The paths are overridable so the mutation check below can re-run this test
+# against a throwaway copy; they default to the sibling templates (Bazel
+# runfiles keep the templates adjacent to the test).
+operator_template="${STRIMSERVER_OPERATOR_TEMPLATE:-$script_dir/strimserver-operator.yaml}"
+infra_template="${STRIMSERVER_INFRA_TEMPLATE:-$script_dir/strimserver-infra.yaml}"
 
 failures=0
 check() {
@@ -34,19 +41,21 @@ check() {
   fi
 }
 
-[[ -f "$template" ]] || { echo "FAIL: template not found: $template" >&2; exit 1; }
+[[ -f "$operator_template" ]] || { echo "FAIL: operator template not found: $operator_template" >&2; exit 1; }
+[[ -f "$infra_template" ]] || { echo "FAIL: infra template not found: $infra_template" >&2; exit 1; }
 
-# extract_resource <Name>: print the YAML block for a top-level (2-space) resource.
+# extract_resource <file> <Name>: print the YAML block for a top-level (2-space)
+# resource.
 extract_resource() {
-  awk -v name="$1" '
+  awk -v name="$2" '
     $0 ~ "^  " name ":" {p=1; print; next}
     p && /^  [A-Za-z0-9]+:/ {p=0}
     p {print}
-  ' "$template"
+  ' "$1"
 }
 
-service_user="$(extract_resource StrimserverServiceUser)"
-operator_policy="$(extract_resource StrimserverOperatorPolicy)"
+service_user="$(extract_resource "$operator_template" StrimserverServiceUser)"
+operator_policy="$(extract_resource "$operator_template" StrimserverOperatorPolicy)"
 
 # extract_statement <Sid>: the `- Sid: <Sid>` block within the operator policy,
 # up to the next `- Sid:` (or the end of the policy).
@@ -60,13 +69,55 @@ extract_statement() {
 
 contains() { grep -Fq -- "$2" <<<"$1"; }
 
-# --- preserved resources ------------------------------------------------------
-check "service user exists (AWS::IAM::User, UserName strimserver)" \
-  bash -c 'grep -Fq "StrimserverServiceUser:" "$1" && grep -Fq "Type: AWS::IAM::User" <<<"$2" && grep -Fq "UserName: strimserver" <<<"$2"' _ "$template" "$service_user"
+# --- split boundary -----------------------------------------------------------
+check "operator template owns the service user (AWS::IAM::User, UserName strimserver)" \
+  bash -c 'grep -Fq "Type: AWS::IAM::User" "$1" && grep -Fq "UserName: strimserver" <<<"$2"' _ "$operator_template" "$service_user"
+check "operator template owns the EC2 instance role + profile" \
+  bash -c 'grep -Fq "InstanceRole:" "$1" && grep -Fq "InstanceProfile:" "$1"' _ "$operator_template"
+check "operator template owns the Image Builder roles" \
+  bash -c 'for r in BakedImageBuilderInstanceRole BakedImageBuilderInstanceProfile BakedImageBuilderExecutionRole BakedAmiPublishRole; do grep -Fq "$r:" "$1" || exit 1; done' _ "$operator_template"
+check "operator template is account identity only (no VPC/subnet/security group)" \
+  bash -c '! grep -Eq "AWS::EC2::(VPC|Subnet|SecurityGroup|InternetGateway|RouteTable|Route)" "$1"' _ "$operator_template"
+check "operator template has no Image Builder build resources" \
+  bash -c '! grep -Fq "AWS::ImageBuilder::" "$1"' _ "$operator_template"
+check "operator template has no SSM automation document" \
+  bash -c '! grep -Fq "AWS::SSM::Document" "$1"' _ "$operator_template"
+check "operator template has no EventBridge rule" \
+  bash -c '! grep -Fq "AWS::Events::Rule" "$1"' _ "$operator_template"
+
+check "infra template creates NO IAM resources" \
+  bash -c '! grep -Fq "AWS::IAM::" "$1"' _ "$infra_template"
+check "infra template does not create the strimserver user or operator policy" \
+  bash -c '! grep -Fq "StrimserverServiceUser" "$1" && ! grep -Fq "StrimserverOperatorPolicy" "$1"' _ "$infra_template"
+check "infra template owns the network security group" \
+  bash -c 'grep -Fq "AWS::EC2::SecurityGroup" "$1"' _ "$infra_template"
+check "infra template owns the Image Builder pipeline" \
+  bash -c 'grep -Fq "AWS::ImageBuilder::ImagePipeline" "$1"' _ "$infra_template"
+
+# The infra stack references the operator-owned identity by deterministic names
+# (movienight convention: no cross-stack ImportValue for IAM).
+check "infra references the operator's Image Builder instance profile by fixed name" \
+  bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" "$1"' _ "$infra_template"
+check "infra references the operator's AMI-publish role by fixed name" \
+  bash -c 'grep -Fq -- "-baked-publish-role" "$1"' _ "$infra_template"
+check "operator declares the same Image Builder instance profile name" \
+  bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" "$1"' _ "$operator_template"
+check "operator declares the same AMI-publish role name" \
+  bash -c 'grep -Fq -- "-baked-publish-role" "$1"' _ "$operator_template"
+# Any ImportValue the infra template ever grows must resolve to an operator
+# Export; today the split uses fixed names, so this is the guard for a future
+# cross-stack reference.
+check "every infra ImportValue has a matching operator Export" \
+  bash -c '
+    imports="$(grep -oE "!ImportValue[[:space:]]+[A-Za-z0-9_.:-]+" "$1" | awk "{print \$2}" || true)"
+    for name in $imports; do grep -Fq "Name: ${name}" "$2" || exit 1; done
+  ' _ "$infra_template" "$operator_template"
+
+# --- preserved policy/code invariants ----------------------------------------
 check "standalone DLAMI read policy name is gone (strimserver-ssm-dlami-readonly)" \
-  bash -c '! grep -Fq "strimserver-ssm-dlami-readonly" "$1"' _ "$template"
+  bash -c '! grep -Fq "strimserver-ssm-dlami-readonly" "$1"' _ "$operator_template"
 check "standalone DLAMI read policy resource is gone (StrimserverDlamiReadPolicy)" \
-  bash -c '! grep -Fq "StrimserverDlamiReadPolicy:" "$1"' _ "$template"
+  bash -c '! grep -Fq "StrimserverDlamiReadPolicy:" "$1"' _ "$operator_template"
 check "operator policy covers both x86_64 + arm64 DLAMI SSM params" \
   bash -c 'grep -Fq "deeplearning/ami/x86_64/" <<<"$1" && grep -Fq "deeplearning/ami/arm64/" <<<"$1"' _ "$operator_policy"
 check "operator policy grants ec2:DescribeImages (check-deps DLAMI metadata)" \
@@ -78,7 +129,7 @@ check "operator policy grants ec2:DescribeImages (check-deps DLAMI metadata)" \
 check "operator policy covers the baked-AMI SSM parameter /strimserver/ami/baked/latest" \
   bash -c 'grep -Fq "/strimserver/ami/baked/latest" <<<"$1"' _ "$operator_policy"
 check "exactly ONE managed policy attaches to the user (Users: appears once)" \
-  bash -c '[ "$(grep -c "Users:" "$1")" -eq 1 ]' _ "$template"
+  bash -c '[ "$(grep -c "Users:" "$1")" -eq 1 ]' _ "$operator_template"
 
 # --- operator policy identity -------------------------------------------------
 check "operator policy exists (AWS::IAM::ManagedPolicy)" \
@@ -147,8 +198,14 @@ check "CloudFormation read statement covers DescribeStacks/DescribeStackEvents/G
 check "the operator policy grants no DeleteStack (deploy does not need it)" \
   bash -c '! grep -Fq "cloudformation:DeleteStack" <<<"$1"' _ "$operator_policy"
 
+# The Image Builder roles live in the SAME operator template now, so the policy
+# names them with deterministic fixed-name ARNs (no cross-stack dependency).
 check "iam:PassRole covers both Image Builder roles" \
-  bash -c 'grep -Fq "iam:PassRole" <<<"$1" && grep -Fq "BakedImageBuilderInstanceRole" <<<"$1" && grep -Fq "BakedImageBuilderExecutionRole" <<<"$1"' _ "$pass_ib_stmt"
+  bash -c 'grep -Fq "iam:PassRole" <<<"$1" && grep -Fq "baked-imagebuilder-instance-role" <<<"$1" && grep -Fq "baked-imagebuilder-execution-role" <<<"$1"' _ "$pass_ib_stmt"
+check "iam:PassRole covers the AMI-publish role" \
+  bash -c 'grep -Fq "baked-publish-role" <<<"$1"' _ "$pass_ib_stmt"
+check "iam:PassRole uses deterministic !Sub role ARNs" \
+  bash -c 'grep -Fq "arn:\${AWS::Partition}:iam::\${AWS::AccountId}:role/" <<<"$1"' _ "$pass_ib_stmt"
 check "ImageBuilder rebuild statement triggers the BakedImagePipeline" \
   bash -c 'grep -Fq "imagebuilder:StartPipelineExecution" <<<"$1"' _ "$ib_rebuild_stmt"
 check "ImageBuilder rebuild is scoped to the pipeline ARN" \
@@ -248,7 +305,7 @@ check "Describe statement stays Resource \"*\" and unconditioned" \
   bash -c 'grep -Fq "Resource: \"*\"" <<<"$1" && ! grep -Fq "aws:RequestTag" <<<"$1" && ! grep -Fq "aws:ResourceTag" <<<"$1"' _ "$describe_stmt"
 
 check "the old unscoped Ec2LaunchTerminate statement is gone" \
-  bash -c '! grep -Fq "Ec2LaunchTerminate" "$1"' _ "$template"
+  bash -c '! grep -Fq "Ec2LaunchTerminate" "$1"' _ "$operator_template"
 check "RunInstances and TerminateInstances are separate statements" \
   bash -c '! grep -Fq "ec2:TerminateInstances" <<<"$1"' _ "$run_stmt"
 
@@ -275,24 +332,20 @@ check "iam:PassRole carries the ec2.amazonaws.com condition" \
 
 check "CloudFormation scoped to stack/strimserver/*" \
   bash -c 'grep -Fq "stack/strimserver/*" <<<"$1"' _ "$operator_policy"
-check "no route53 anywhere in the template" \
-  bash -c '! grep -qi "route53" "$1"' _ "$template"
-
-# --- regression: instance plumbing still present ------------------------------
-check "InstanceRole still present" bash -c 'grep -Fq "InstanceRole:" "$1"' _ "$template"
-check "InstanceProfile still present" bash -c 'grep -Fq "InstanceProfile:" "$1"' _ "$template"
+check "no route53 anywhere in the operator template" \
+  bash -c '! grep -qi "route53" "$1"' _ "$operator_template"
 
 # --- baked-AMI read grant on the instance role -------------------------------
 # The instance role already carries only scoped grants; the baked-AMI lookup
 # must stay scoped to the single parameter, never a wildcard ssm:GetParameter.
-instance_role="$(extract_resource InstanceRole)"
+instance_role="$(extract_resource "$operator_template" InstanceRole)"
 check "instance role can read the baked-AMI SSM parameter" \
   bash -c 'grep -Fq "/strimserver/ami/baked/latest" <<<"$1"' _ "$instance_role"
 check "instance role baked-AMI read is scoped (no parameter/* wildcard)" \
   bash -c '! grep -Fq "parameter/*" <<<"$1"' _ "$instance_role"
 
 # --- baked-AMI Image Builder execution role (least privilege) ----------------
-execution_role="$(extract_resource BakedImageBuilderExecutionRole)"
+execution_role="$(extract_resource "$operator_template" BakedImageBuilderExecutionRole)"
 check "baked-AMI pipeline execution role exists (AWS::IAM::Role)" \
   bash -c 'grep -Fq "Type: AWS::IAM::Role" <<<"$1"' _ "$execution_role"
 check "pipeline execution role is assumable by imagebuilder.amazonaws.com" \
@@ -309,12 +362,14 @@ check "pipeline execution role passes only the Image Builder instance role" \
 # --- no hardcoded AMI ids beyond the recipe base + launch fallback -----------
 # The ImageRecipe base and launch's DEFAULT_AMI_ID are the only two places the
 # pinned DLAMI id may appear. Any other literal would be a stale bake target.
+# The operator template is identity-only and must carry none.
 pinned_ami="ami-0198b63ccfac121e8"
-check "template hardcodes only the pinned recipe-base AMI id" \
-  bash -c 'ids="$(grep -o "ami-[0-9a-f]\{8,\}" "$1" | sort -u)"; [ "$ids" = "$2" ]' _ "$template" "$pinned_ami"
+check "infra template hardcodes only the pinned recipe-base AMI id" \
+  bash -c 'ids="$(grep -o "ami-[0-9a-f]\{8,\}" "$1" | sort -u)"; [ "$ids" = "$2" ]' _ "$infra_template" "$pinned_ami"
+check "operator template hardcodes no AMI id" \
+  bash -c '! grep -q "ami-[0-9a-f]\{8,\}" "$1"' _ "$operator_template"
 check "launch keeps only the pinned fallback AMI constant" \
   bash -c 'ids="$(grep -o "ami-[0-9a-f]\{8,\}" "$1" | sort -u)"; [ "$ids" = "$2" ]' _ "$script_dir/launch" "$pinned_ami"
-
 
 # --- mutation check: CreateTags without aws:TagKeys must FAIL ------------------
 # Guard against the fix3 assertion silently rotting: strip the
@@ -329,8 +384,8 @@ if [[ -z "${STRIMSERVER_OPERATOR_TEST_MUTATED_RUN:-}" ]]; then
     drop && /^                / { next }
     drop { drop=0 }
     { print }
-  ' "$template" > "$mutation_dir/strimserver-infra.yaml"
-  if STRIMSERVER_INFRA_TEMPLATE="$mutation_dir/strimserver-infra.yaml" \
+  ' "$operator_template" > "$mutation_dir/strimserver-operator.yaml"
+  if STRIMSERVER_OPERATOR_TEMPLATE="$mutation_dir/strimserver-operator.yaml" \
       STRIMSERVER_OPERATOR_TEST_MUTATED_RUN=1 \
       bash "$0" >/dev/null 2>&1; then
     echo "FAIL: mutation check: CreateTags without aws:TagKeys passed" >&2

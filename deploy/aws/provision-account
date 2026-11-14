@@ -13,12 +13,12 @@
 #      --profile): an exported AWS_PROFILE / AWS_DEFAULT_PROFILE is ignored
 #      (env -u), so the gate can never silently switch to the operator. Unless
 #      --yes, it asks for confirmation before mutating anything.
-#   2. Deploy the strimserver durable stack (idempotent) with those admin
-#      credentials. The stack creates the IAM user and its operator policy, so
-#      the [strimserver] profile cannot deploy it. Parameters come from the
-#      environment (OPERATOR_CIDR -> OperatorCidr + IngestCidr,
-#      S3_BUCKET_NAME -> DeploymentBucketName, CreateNetwork=true,
-#      EnableExperimentalSsh=true): an admin bootstrap legitimately resets them.
+#   2. Deploy the strimserver OPERATOR stack (idempotent) with those admin
+#      credentials. The stack creates the IAM user, its operator policy, the
+#      instance role/profile and the Image Builder roles, so the [strimserver]
+#      profile cannot deploy it. The regional network/Image Builder stack is
+#      NOT deployed here: deploy-infra owns it (and its OPERATOR_CIDR /
+#      S3_BUCKET_NAME / CreateNetwork / EnableExperimentalSsh inputs).
 #   3. Ensure IAM user `strimserver` has exactly ONE access key. Without
 #      --rotate a still-valid key already referenced by the profile is reused, so
 #      a re-run is a no-op; with --rotate the new key is created FIRST, the
@@ -48,14 +48,13 @@ set -euo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEMPLATE="${SCRIPT_DIR}/strimserver-infra.yaml"
+TEMPLATE="${SCRIPT_DIR}/strimserver-operator.yaml"
 
 IAM_USER="strimserver"
-STACK_NAME="${CFN_STACK_NAME:-strimserver}"
+STACK_NAME="${CFN_STACK_NAME:-strimserver-operator}"
+PROJECT_NAME="${PROJECT_NAME:-strimserver}"
 REGION="${AWS_REGION:-us-east-2}"
 PROFILE="${AWS_PROFILE:-strimserver}"
-OPERATOR_CIDR="${OPERATOR_CIDR:-}"
-S3_BUCKET_NAME="${S3_BUCKET_NAME:-}"
 ROTATE=0
 ASSUME_YES=0
 
@@ -80,7 +79,7 @@ credentials. Idempotent: a second run reuses the existing access key and leaves
 the profile untouched.
 
 Options:
-  --stack-name S   CloudFormation stack name (default: strimserver)
+  --stack-name S   CloudFormation stack name (default: strimserver-operator)
   --region R       AWS region (default: us-east-2)
   --profile P      AWS profile to install (default: strimserver)
   --rotate         mint a new access key, update the profile, then delete the
@@ -88,8 +87,11 @@ Options:
   --yes            skip the admin-identity confirmation prompt
   -h, --help       show this help
 
-Parameters (environment): OPERATOR_CIDR, S3_BUCKET_NAME. The stack is deployed
-with CreateNetwork=true and EnableExperimentalSsh=true.
+Deploys ONLY the account-global operator template (IAM user, operator policy,
+instance role/profile and Image Builder roles). The regional network/Image
+Builder stack is deployed afterwards by deploy/aws/deploy-infra as the
+[strimserver] profile; its OPERATOR_CIDR / S3_BUCKET_NAME / CreateNetwork /
+EnableExperimentalSsh environment inputs do NOT apply here.
 EOF
 }
 
@@ -156,18 +158,13 @@ gate_admin_identity() {
 }
 
 deploy_stack() {
-  log "deploying stack '${STACK_NAME}' in ${REGION}"
+  log "deploying operator stack '${STACK_NAME}' in ${REGION}"
   aws_admin cloudformation deploy \
     --template-file "$TEMPLATE" \
     --stack-name "$STACK_NAME" \
     --region "$REGION" \
     --capabilities CAPABILITY_NAMED_IAM \
-    --parameter-overrides \
-      CreateNetwork=true \
-      "OperatorCidr=${OPERATOR_CIDR}" \
-      "IngestCidr=${OPERATOR_CIDR}" \
-      EnableExperimentalSsh=true \
-      "DeploymentBucketName=${S3_BUCKET_NAME}" \
+    --parameter-overrides "ProjectName=${PROJECT_NAME}" \
     || die "cloudformation deploy failed for stack '${STACK_NAME}'"
 }
 
@@ -382,6 +379,7 @@ print_summary() {
   printf '  region         : %s\n' "$REGION"
   printf '  stack          : %s\n' "$STACK_NAME"
   printf '  next           : run deploy/aws/deploy-infra without admin credentials (AWS_PROFILE=%s)\n' "$PROFILE"
+  printf '                   it deploys the regional infra stack (network + Image Builder)\n'
 }
 
 main() {

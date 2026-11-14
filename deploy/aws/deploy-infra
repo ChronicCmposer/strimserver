@@ -6,10 +6,12 @@
 # RUN MODEL
 #   Once, with an AWS administrator's ambient credentials:
 #     deploy/aws/provision-account
-#   It creates the stack, the scoped operator policy and the [strimserver]
-#   access key. Afterwards every operation -- this script and the launch tooling
-#   -- runs as that profile. deploy-infra NO LONGER uses admin credentials and
-#   NEVER rotates an access key (that lives in provision-account).
+#   It creates the account-global operator stack (IAM user, operator policy,
+#   instance role/profile and Image Builder roles) and the [strimserver]
+#   access key. Afterwards every operation -- this script (which deploys the
+#   REGIONAL infra template) and the launch tooling -- runs as that profile.
+#   deploy-infra NO LONGER uses admin credentials and NEVER rotates an access
+#   key (that lives in provision-account).
 #
 # WHY LIVE PARAMETERS ARE RE-PASSED
 #   `aws cloudformation deploy` treats any parameter omitted from
