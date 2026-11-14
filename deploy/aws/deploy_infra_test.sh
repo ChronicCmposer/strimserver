@@ -416,6 +416,13 @@ check "pipeline documents the monthly-rebuild TODO" \
   bash -c 'grep -Fiq "monthly" "$1"' _ "$infra_template"
 check "InfrastructureConfiguration references the operator's instance profile name" \
   bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" <<<"$1"' _ "$infra_config_block"
+# The account has no default VPC, so an InfrastructureConfiguration without a
+# subnet fails at LaunchBuildInstance (VPCIdNotSpecified). The build instance
+# must launch into the stack-managed public subnet with the stack SG.
+check "InfrastructureConfiguration launches into the stack-managed subnet" \
+  bash -c 'grep -Fq "SubnetId: !Ref ManagedSubnet" <<<"$1"' _ "$infra_config_block"
+check "InfrastructureConfiguration attaches the stack instance security group" \
+  bash -c 'grep -Fq "SecurityGroupIds: [!Ref InstanceSecurityGroup]" <<<"$1"' _ "$infra_config_block"
 document_block="$(extract_template_resource BakedAmiPublishDocument)"
 check "SSM publish document sets Properties.Name (valid AWS::SSM::Document property)" \
   test "$(property_value "$document_block" Name)" = '!Sub "${ProjectName}-baked-ami-publish"'

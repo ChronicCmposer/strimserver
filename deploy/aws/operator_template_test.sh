@@ -681,6 +681,13 @@ check "infra declares the HasAvailabilityZone condition" \
   bash -c 'grep -Fq "HasAvailabilityZone:" "$1"' _ "$infra_template"
 check "subnet AZ honours the parameter with an AZ fallback" \
   bash -c 'grep -Fq "HasAvailabilityZone" <<<"$1" && grep -Fq "!GetAZs" <<<"$1"' _ "$(extract_resource "$infra_template" ManagedSubnet)"
+# No default VPC exists in the account; the bake must launch into the stack's
+# public subnet (MapPublicIpOnLaunch=true) with the stack SG (open egress).
+infra_config="$(extract_resource "$infra_template" BakedInfrastructureConfiguration)"
+check "build instance launches into the stack-managed subnet" \
+  bash -c 'grep -Fq "SubnetId: !Ref ManagedSubnet" <<<"$1"' _ "$infra_config"
+check "build instance attaches the stack instance security group" \
+  bash -c 'grep -Fq "SecurityGroupIds: [!Ref InstanceSecurityGroup]" <<<"$1"' _ "$infra_config"
 
 # --- no hardcoded AMI ids beyond the recipe base + launch fallback -----------
 pinned_ami="ami-0198b63ccfac121e8"

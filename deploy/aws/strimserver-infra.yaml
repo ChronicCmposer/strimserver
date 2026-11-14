@@ -395,6 +395,13 @@ Resources:
     Properties:
       Name: strimserver-baked-infra
       InstanceProfileName: !Sub "${ProjectName}-baked-imagebuilder-instance-profile"
+      # The account has no default VPC, so Image Builder cannot infer a
+      # network. Launch the build instance into the stack-managed public
+      # subnet (MapPublicIpOnLaunch=true, route via the IGW) with the stack
+      # security group (all-protocol egress) so the bake can fetch
+      # NvidiaFloorMachineryUrl and the CUDA repos.
+      SubnetId: !Ref ManagedSubnet
+      SecurityGroupIds: [!Ref InstanceSecurityGroup]
       InstanceTypes:
         - g4dn.xlarge
       TerminateInstanceOnFailure: true
