@@ -1,39 +1,49 @@
 #!/usr/bin/env bash
 #
 # deploy/aws/deploy-infra -- deploy the strimserver durable CloudFormation stack
-# as the project-scoped [strimserver] service account.
+# as the project-scoped operator identity.
 #
 # RUN MODEL
 #   Once, with an AWS administrator's ambient credentials:
 #     deploy/aws/provision-account
 #   It creates the account-global operator stack (IAM user, operator policy,
-#   instance role/profile and Image Builder roles) and the [strimserver]
-#   access key. Afterwards every operation -- this script (which deploys the
-#   REGIONAL infra template) and the launch tooling -- runs as that profile.
-#   deploy-infra NO LONGER uses admin credentials and NEVER rotates an access
-#   key (that lives in provision-account).
+#   instance role/profile, permissions boundary and Image Builder roles) and
+#   the operator access key. Afterwards every operation -- this script (which
+#   deploys the REGIONAL infra template) and the launch tooling -- runs as that
+#   profile. deploy-infra NO LONGER uses admin credentials and NEVER rotates an
+#   access key (that lives in provision-account).
 #
-# WHY LIVE PARAMETERS ARE RE-PASSED
-#   `aws cloudformation deploy` treats any parameter omitted from
-#   --parameter-overrides as "reset to the template default". An update that only
-#   wanted to bump one value would silently clear VpcId, ports, the bucket, the
-#   Image Builder URLs, etc. When the stack already exists this script therefore
-#   reads every live parameter from describe-stacks and re-passes it verbatim,
-#   applying only explicit overrides:
-#     OPERATOR_CIDR        -> OperatorCidr + IngestCidr
-#     S3_BUCKET_NAME       -> DeploymentBucketName
-#     VPC_ID               -> VpcId (existing-VPC deployment mode)
-#     NVIDIA_DRIVER_FLOOR  -> NvidiaDriverFloor (must match lib/nvidia.sh)
-#     CREATE_NETWORK       -> CreateNetwork (explicit only; defaults to the live value)
-#     ENABLE_EXPERIMENTAL_SSH -> EnableExperimentalSsh (explicit only; defaults to live)
-#   On first create (no stack) it passes the env values and otherwise lets the
-#   template defaults apply (NvidiaDriverFloor is always pinned to lib/nvidia.sh).
+# PARAMETER PHILOSOPHY (movienight item 205)
+#   The template's Default is authoritative. This script passes ONLY the
+#   parameters the operator explicitly set (via environment overrides) plus the
+#   ProjectName constant:
+#     OPERATOR_CIDR            -> OperatorCidr + IngestCidr
+#     S3_BUCKET_NAME           -> DeploymentBucketName
+#     VPC_ID                   -> VpcId (existing-VPC deployment mode)
+#     NVIDIA_DRIVER_FLOOR      -> NvidiaDriverFloor (must match lib/nvidia.sh)
+#     CREATE_NETWORK           -> CreateNetwork
+#     ENABLE_EXPERIMENTAL_SSH  -> EnableExperimentalSsh
+#   Everything else is omitted, so CloudFormation keeps the template Default (or,
+#   on an update, the CLI's previous-value handling). There is NO
+#   describe-stacks live-parameter read / re-pass machinery: it would make the
+#   template Defaults meaningless and silently pin stale values.
 #
-# FIRST-CREATE VPC GUARD
-#   The template defaults CreateNetwork=false and its rule requires a VpcId in
-#   that mode. We mirror that rule client-side and fail BEFORE calling AWS, so a
-#   bad first create can never leave a ROLLBACK_COMPLETE stack: set
-#   CREATE_NETWORK=true to have the stack create a VPC, or export VPC_ID=<vpc>.
+# FIRST-CREATE GUARDS
+#   * OPERATOR_CIDR has no template Default (SSH/controller ingress must be
+#     explicit), so it is required on first create.
+#   * The template defaults CreateNetwork=false and its rule requires a VpcId in
+#     that mode. We mirror that rule client-side and fail BEFORE calling AWS, so
+#     a bad first create can never leave a ROLLBACK_COMPLETE stack: set
+#     CREATE_NETWORK=true to have the stack create a VPC, or export VPC_ID=<vpc>.
+#
+# STACK == PROJECT
+#   The operator policy scopes its CloudFormation stack and IAM ARNs to
+#   ${ProjectName}. The infra stack is named after the project, so a mismatched
+#   --stack-name would be denied authorization; it is rejected up front.
+#
+# DEPLOY TIMEOUT
+#   `cloudformation deploy` runs under a bounded `timeout` (CFN_DEPLOY_TIMEOUT,
+#   default 900s) so a hung stack operation fails loud instead of blocking.
 #
 # POST-DEPLOY CONTRACT
 #   * Stack status must be CREATE_COMPLETE or UPDATE_COMPLETE.
@@ -60,17 +70,20 @@ NVIDIA_DRIVER_FLOOR_OVERRIDE="${NVIDIA_DRIVER_FLOOR:-}"
 source "${SCRIPT_DIR}/lib/nvidia.sh"
 EXPECTED_FLOOR="$NVIDIA_DRIVER_FLOOR"
 
+PROJECT_NAME="${PROJECT_NAME:-strimserver}"
 STACK_NAME="${CFN_STACK_NAME:-strimserver}"
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-2}}"
 PROFILE="${AWS_PROFILE:-strimserver}"
 OPERATOR_CIDR="${OPERATOR_CIDR:-}"
 S3_BUCKET_NAME="${S3_BUCKET_NAME:-}"
 VPC_ID="${VPC_ID:-}"
-# Explicit network overlays are honored only when set; otherwise the live value
-# (or, on first create, the template default) is used.
+# Explicit overlays are honored only when set; otherwise the template Default
+# (or, on update, the CLI's previous value) applies.
 CREATE_NETWORK="${CREATE_NETWORK-}"
 ENABLE_EXPERIMENTAL_SSH="${ENABLE_EXPERIMENTAL_SSH-}"
-PIPELINE_NAME="strimserver-baked"
+# Bounded deploy time; override only for unusually large stack operations.
+CFN_DEPLOY_TIMEOUT="${CFN_DEPLOY_TIMEOUT:-900}"
+PIPELINE_NAME="${PROJECT_NAME}-baked"
 
 log() { printf 'deploy-infra: %s\n' "$*" >&2; }
 die() { printf 'deploy-infra: ERROR: %s\n' "$*" >&2; exit 1; }
@@ -79,22 +92,32 @@ usage() {
   cat <<'EOF'
 Usage: deploy/aws/deploy-infra [options]
 
-Deploys the strimserver stack as the [strimserver] service account. Run
+Deploys the strimserver stack as the operator service account. Run
 deploy/aws/provision-account once (with admin credentials) first.
 
+The template Defaults are authoritative: this script passes ONLY the parameters
+you explicitly set through the environment (below) plus ProjectName. Unset
+parameters are omitted, not re-passed from the live stack.
+
 Options:
-  --stack-name S   CloudFormation stack name (default: strimserver)
+  --stack-name S   CloudFormation stack name (default: strimserver; MUST equal
+                   the project name)
   --region R       AWS region (default: us-east-2)
   --profile P      AWS profile (default: $AWS_PROFILE, else strimserver)
   -h, --help       show this help
 
-Overrides (environment): OPERATOR_CIDR, S3_BUCKET_NAME, VPC_ID,
-NVIDIA_DRIVER_FLOOR, CREATE_NETWORK, ENABLE_EXPERIMENTAL_SSH. Existing stack
-parameters are otherwise preserved verbatim.
+Environment overrides (all optional except OPERATOR_CIDR on first create):
+  OPERATOR_CIDR            CIDR for SSH/controller ingress (also sets IngestCidr)
+  S3_BUCKET_NAME           deployment bucket name (DeploymentBucketName)
+  VPC_ID                   existing VPC id (VpcId; CreateNetwork=false mode)
+  NVIDIA_DRIVER_FLOOR      must match deploy/aws/lib/nvidia.sh
+  CREATE_NETWORK           true to create a dedicated VPC
+  ENABLE_EXPERIMENTAL_SSH  true to open the experimental OpenSSH port
 
 First create requires a usable network: either set CREATE_NETWORK=true (the
 stack creates a VPC) or export VPC_ID=<existing vpc>. This is checked before
-any AWS call, so an invalid first create cannot leave a ROLLBACK_COMPLETE stack.
+the deploy call, so an invalid first create cannot leave a ROLLBACK_COMPLETE
+stack.
 EOF
 }
 
@@ -130,18 +153,31 @@ aws_run() {
   aws --profile "$PROFILE" --region "$REGION" "$@"
 }
 
+# require_project_stack_match: the operator policy scopes its CloudFormation
+# stack and IAM ARNs to ${ProjectName}. The infra stack, its IAM role and its
+# instance profile are all named after the project, so the stack name MUST equal
+# the project name or the operator would be denied on its own stack.
+require_project_stack_match() {
+  [ "$STACK_NAME" = "$PROJECT_NAME" ] \
+    || die "--stack-name '${STACK_NAME}' must equal the project name '${PROJECT_NAME}': the operator policy scopes its CloudFormation stack and IAM ARNs to the project name, so a differing stack name would be denied authorization"
+}
+
 require_strimserver_identity() {
   local arn
   arn="$(aws_run sts get-caller-identity --query 'Arn' --output text)" \
     || die "not authenticated for profile '$PROFILE'; run deploy/aws/provision-account first"
   case "$arn" in
-    *:user/strimserver) log "operator identity: ${arn}" ;;
-    *) die "profile '$PROFILE' authenticated as '$arn', expected ...:user/strimserver. Run deploy/aws/provision-account (with admin credentials) first." ;;
+    *:user/"${PROJECT_NAME}") log "operator identity: ${arn}" ;;
+    *) die "profile '$PROFILE' authenticated as '$arn', expected ...:user/${PROJECT_NAME}. Run deploy/aws/provision-account (with admin credentials) first." ;;
   esac
 }
 
-# describe_parameters: one `Key<TAB>Value` line per live parameter. A missing
-# stack is not an error here -- it selects the first-create path.
+stack_exists() {
+  aws_run cloudformation describe-stacks --stack-name "$STACK_NAME" >/dev/null 2>&1
+}
+
+# describe_parameters: one `Key<TAB>Value` line per live parameter. Used ONLY by
+# the post-deploy verification; it never feeds the deploy line.
 describe_parameters() {
   aws_run cloudformation describe-stacks \
     --stack-name "$STACK_NAME" \
@@ -156,79 +192,61 @@ validate_bool() { # validate_bool <name> <value>
   esac
 }
 
-# build_parameters: sets PARAM_ARGS to the complete --parameter-overrides list.
-# STACK_EXISTS is 0 on first create, 1 when live parameters were loaded.
+# build_parameters: sets PARAM_ARGS to the explicit-only --parameter-overrides.
+# Nothing is read from the live stack: unset inputs are omitted so the template
+# Default remains authoritative (movienight item 205).
 build_parameters() {
-  local live key value
-  local -a keys=()
-  declare -A params=()
-
-  STACK_EXISTS=0
-  if live="$(describe_parameters)"; then
-    STACK_EXISTS=1
-    while IFS=$'\t' read -r key value; do
-      [ -n "$key" ] && params["$key"]="$value"
-    done <<<"$live"
-  fi
+  PARAM_ARGS=("ProjectName=${PROJECT_NAME}")
 
   if [ -n "$OPERATOR_CIDR" ]; then
-    params[OperatorCidr]="$OPERATOR_CIDR"
-    params[IngestCidr]="$OPERATOR_CIDR"
-  elif [ "$STACK_EXISTS" -eq 0 ]; then
-    die "OPERATOR_CIDR is required on first create (it becomes OperatorCidr and IngestCidr)"
+    PARAM_ARGS+=("OperatorCidr=${OPERATOR_CIDR}" "IngestCidr=${OPERATOR_CIDR}")
   fi
-
   if [ -n "$S3_BUCKET_NAME" ]; then
-    params[DeploymentBucketName]="$S3_BUCKET_NAME"
+    PARAM_ARGS+=("DeploymentBucketName=${S3_BUCKET_NAME}")
   fi
-
-  params[NvidiaDriverFloor]="${NVIDIA_DRIVER_FLOOR_OVERRIDE:-$EXPECTED_FLOOR}"
-
+  if [ -n "$VPC_ID" ]; then
+    PARAM_ARGS+=("VpcId=${VPC_ID}")
+  fi
+  if [ -n "$NVIDIA_DRIVER_FLOOR_OVERRIDE" ]; then
+    PARAM_ARGS+=("NvidiaDriverFloor=${NVIDIA_DRIVER_FLOOR_OVERRIDE}")
+  fi
   if [ -n "$CREATE_NETWORK" ]; then
     validate_bool CREATE_NETWORK "$CREATE_NETWORK"
-    params[CreateNetwork]="$CREATE_NETWORK"
+    PARAM_ARGS+=("CreateNetwork=${CREATE_NETWORK}")
   fi
   if [ -n "$ENABLE_EXPERIMENTAL_SSH" ]; then
     validate_bool ENABLE_EXPERIMENTAL_SSH "$ENABLE_EXPERIMENTAL_SSH"
-    params[EnableExperimentalSsh]="$ENABLE_EXPERIMENTAL_SSH"
+    PARAM_ARGS+=("EnableExperimentalSsh=${ENABLE_EXPERIMENTAL_SSH}")
   fi
+}
 
-  # Existing-VPC deployment mode: an explicit VPC_ID overrides the live VpcId.
-  if [ -n "$VPC_ID" ]; then
-    params[VpcId]="$VPC_ID"
-  fi
+# first_create_guards: fail BEFORE calling AWS when the first create cannot
+# succeed. OPERATOR_CIDR has no template Default and the template's rule needs a
+# VpcId when CreateNetwork=false; mirroring both here avoids a
+# ROLLBACK_COMPLETE stack.
+first_create_guards() {
+  stack_exists && return 0
 
-  # Mirror the template's RequireVpcWhenNotCreating rule before touching AWS, so
-  # a first create that cannot satisfy it dies here instead of leaving a
-  # ROLLBACK_COMPLETE stack. On first create a VpcId can only come from VPC_ID.
-  if [ "$STACK_EXISTS" -eq 0 ]; then
-    local effective_create_network="${params[CreateNetwork]:-false}"
-    local effective_vpc_id="${params[VpcId]:-}"
-    if [ "$effective_create_network" != "true" ] && [ -z "$effective_vpc_id" ]; then
-      die "CreateNetwork=false requires a VpcId on first create. Set CREATE_NETWORK=true to have the stack create a VPC, or export VPC_ID=<existing vpc>."
-    fi
-  fi
-
-  PARAM_ARGS=()
-  for key in "${!params[@]}"; do
-    keys+=("$key")
-  done
-  # Stable order makes logs/diffs readable and the deploy reproducible.
-  while IFS= read -r key; do
-    PARAM_ARGS+=("${key}=${params[$key]}")
-  done < <(printf '%s\n' ${keys[@]+"${keys[@]}"} | sort)
+  [ -n "$OPERATOR_CIDR" ] \
+    || die "OPERATOR_CIDR is required on first create (it becomes OperatorCidr and IngestCidr)"
+  [ "${CREATE_NETWORK:-false}" = "true" ] || [ -n "$VPC_ID" ] \
+    || die "CreateNetwork=false requires a VpcId on first create. Set CREATE_NETWORK=true to have the stack create a VPC, or export VPC_ID=<existing vpc>."
 }
 
 deploy_stack() {
-  local mode="first create"
-  [ "$STACK_EXISTS" -eq 1 ] && mode="existing stack"
-  log "deploying stack '${STACK_NAME}' in ${REGION} as profile '${PROFILE}' (${mode})"
-  aws_run cloudformation deploy \
+  log "deploying stack '${STACK_NAME}' in ${REGION} as profile '${PROFILE}'"
+  local rc=0
+  timeout "$CFN_DEPLOY_TIMEOUT" \
+    aws --profile "$PROFILE" --region "$REGION" cloudformation deploy \
     --template-file "$TEMPLATE" \
     --stack-name "$STACK_NAME" \
     --capabilities CAPABILITY_NAMED_IAM \
     --parameter-overrides "${PARAM_ARGS[@]}" \
-    || die "cloudformation deploy failed for stack '${STACK_NAME}'"
+    || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    die "cloudformation deploy for stack '${STACK_NAME}' timed out after ${CFN_DEPLOY_TIMEOUT}s"
+  fi
+  [ "$rc" -eq 0 ] || die "cloudformation deploy failed for stack '${STACK_NAME}' (exit ${rc})"
 }
 
 verify_stack_status() {
@@ -268,8 +286,10 @@ verify_image_pipeline() {
 main() {
   parse_args "$@"
   require_cmd aws
+  require_project_stack_match
   require_strimserver_identity
   build_parameters
+  first_create_guards
   deploy_stack
   verify_stack_status
   verify_nvidia_floor

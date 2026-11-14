@@ -55,8 +55,6 @@ run_provision() {
       PATH="$PATH" HOME="$work/home" \
       AWS_SHARED_CREDENTIALS_FILE="$creds" \
       AWS_CONFIG_FILE="$config" \
-      OPERATOR_CIDR="203.0.113.4/32" \
-      S3_BUCKET_NAME="strimserver-deploy" \
       FAKE_AWS_STATE="$state" \
       FAKE_AWS_CALLS="$calls" \
       "${EXTRA_ENV[@]}" \
@@ -91,8 +89,10 @@ deploy_line="$(grep -m1 '^cloudformation deploy' "$calls" || true)"
 [[ "$deploy_line" == *"--region us-east-2"* ]] || fail "deploy missing region: $deploy_line"
 [[ "$deploy_line" == *"ProjectName=strimserver"* ]] || fail "deploy missing ProjectName: $deploy_line"
 # The old network/bucket env parameters belong to deploy-infra now; the operator
-# stack must not receive them.
-for stale in CreateNetwork= OperatorCidr= IngestCidr= EnableExperimentalSsh= DeploymentBucketName=; do
+# stack must not receive them. With no S3_BUCKET_NAME/ENABLE_SESSION_MANAGER set,
+# the optional passthrough parameters are absent (template Defaults apply).
+for stale in CreateNetwork= OperatorCidr= IngestCidr= EnableExperimentalSsh= \
+  DeploymentBucketName= EnableSessionManager=; do
   [[ "$deploy_line" != *"$stale"* ]] || fail "operator deploy received stale parameter $stale: $deploy_line"
 done
 ok "deploy targets the operator template/stack with only ProjectName"
@@ -344,5 +344,42 @@ if [ -f "$c12b/calls" ] && grep -q '^cloudformation deploy' "$c12b/calls"; then
   fail "flag tripwire deployed instead of dying"
 fi
 ok "an operator stack named like the infra stack dies loud without deploying"
+
+# ---------------------------------------------------------------------------
+# Case 13 -- optional S3_BUCKET_NAME -> DeploymentBucketName (set -> passed)
+# ---------------------------------------------------------------------------
+c13="$work/c13"; mkdir -p "$c13/state" "$c13/.aws"
+EXTRA_ENV=(S3_BUCKET_NAME=deploy-bucket-1)
+run_provision "$c13/state" "$c13/calls" "$c13/.aws/credentials" "$c13/.aws/config" \
+  --yes >"$c13/out" 2>&1 \
+  || fail "S3_BUCKET_NAME passthrough must succeed; output:\n$(cat "$c13/out")"
+EXTRA_ENV=()
+deploy13="$(grep -m1 '^cloudformation deploy' "$c13/calls" || true)"
+[[ "$deploy13" == *"DeploymentBucketName=deploy-bucket-1"* ]] \
+  || fail "S3_BUCKET_NAME did not become DeploymentBucketName: $deploy13"
+ok "S3_BUCKET_NAME is passed as DeploymentBucketName"
+
+# ---------------------------------------------------------------------------
+# Case 14 -- optional ENABLE_SESSION_MANAGER -> EnableSessionManager
+# ---------------------------------------------------------------------------
+c14="$work/c14"; mkdir -p "$c14/state" "$c14/.aws"
+EXTRA_ENV=(ENABLE_SESSION_MANAGER=false)
+run_provision "$c14/state" "$c14/calls" "$c14/.aws/credentials" "$c14/.aws/config" \
+  --yes >"$c14/out" 2>&1 \
+  || fail "ENABLE_SESSION_MANAGER passthrough must succeed; output:\n$(cat "$c14/out")"
+EXTRA_ENV=()
+deploy14="$(grep -m1 '^cloudformation deploy' "$c14/calls" || true)"
+[[ "$deploy14" == *"EnableSessionManager=false"* ]] \
+  || fail "ENABLE_SESSION_MANAGER did not become EnableSessionManager: $deploy14"
+ok "ENABLE_SESSION_MANAGER is passed as EnableSessionManager when set"
+
+c14b="$work/c14b"; mkdir -p "$c14b/state" "$c14b/.aws"
+run_provision "$c14b/state" "$c14b/calls" "$c14b/.aws/credentials" "$c14b/.aws/config" \
+  --yes >"$c14b/out" 2>&1 \
+  || fail "an unset ENABLE_SESSION_MANAGER must succeed; output:\n$(cat "$c14b/out")"
+deploy14b="$(grep -m1 '^cloudformation deploy' "$c14b/calls" || true)"
+[[ "$deploy14b" != *"EnableSessionManager="* ]] \
+  || fail "an unset ENABLE_SESSION_MANAGER must be absent (template default): $deploy14b"
+ok "an unset ENABLE_SESSION_MANAGER is omitted so the template default applies"
 
 printf 'PASS: provision_account_test\n'

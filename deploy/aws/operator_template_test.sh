@@ -3,20 +3,24 @@
 #
 # The durable identity surface lives in strimserver-operator.yaml (deployed once
 # by provision-account with ADMIN credentials); the regional resources live in
-# strimserver-infra.yaml (deployed by deploy-infra as [strimserver]). This test
+# strimserver-infra.yaml (deployed by deploy-infra as the operator). This test
 # enshrines the split AND the operator policy's LEAST PRIVILEGE:
 #
-#   * the operator template owns the read-only service user, the single
-#     project-scoped operator managed policy, the EC2 instance role/profile and
-#     every Image Builder role the policy passes to its services;
-#   * the infra template owns only regional resources and creates NO IAM;
+#   * the operator template owns the service user, the single project-scoped
+#     operator managed policy, the EC2 instance role/profile and every Image
+#     Builder role the policy passes to its services;
 #   * the operator policy grants exactly the actions the strimserver tooling
 #     actually calls (derived from the `aws` CLI calls in deploy/aws/launch,
-#     deploy/aws/terminate and the publish/bucket scripts), must NOT carry
-#     account-wide IAM administration, must scope S3 to the deployment bucket,
-#     and must not mention route53;
-#   * every cross-template reference resolves (ImportValue -> Export) and the
-#     fixed-name role/profile references match the operator's names.
+#     deploy/aws/terminate, deploy-infra and the publish/bucket scripts), must
+#     NOT carry account-wide IAM administration, must scope S3 to the deployment
+#     bucket, and must not mention route53;
+#   * every ARN and resource name derives from ${ProjectName}; no policy ARN
+#     hardcodes "strimserver" or pins ${AWS::Region};
+#   * the account-global InstanceRole carries the <ProjectName>-boundary
+#     permissions boundary;
+#   * the infra template owns only regional resources and creates NO IAM, wires
+#     the Image Builder execution role into the pipeline, and supports an
+#     optional AvailabilityZone.
 #
 # PyYAML is not available in the build image, so this test uses a structural
 # extractor (awk) + grep, matching the sibling repo's fallback style.
@@ -56,6 +60,8 @@ extract_resource() {
 
 service_user="$(extract_resource "$operator_template" StrimserverServiceUser)"
 operator_policy="$(extract_resource "$operator_template" StrimserverOperatorPolicy)"
+instance_role="$(extract_resource "$operator_template" InstanceRole)"
+boundary_policy="$(extract_resource "$operator_template" StrimserverOperatorBoundary)"
 
 # extract_statement <Sid>: the `- Sid: <Sid>` block within the operator policy,
 # up to the next `- Sid:` (or the end of the policy).
@@ -70,8 +76,8 @@ extract_statement() {
 contains() { grep -Fq -- "$2" <<<"$1"; }
 
 # --- split boundary -----------------------------------------------------------
-check "operator template owns the service user (AWS::IAM::User, UserName strimserver)" \
-  bash -c 'grep -Fq "Type: AWS::IAM::User" "$1" && grep -Fq "UserName: strimserver" <<<"$2"' _ "$operator_template" "$service_user"
+check "operator template owns the service user named after ProjectName" \
+  bash -c 'grep -Fq "Type: AWS::IAM::User" "$1" && grep -Fq "UserName: !Ref ProjectName" <<<"$2"' _ "$operator_template" "$service_user"
 check "operator template owns the EC2 instance role + profile" \
   bash -c 'grep -Fq "InstanceRole:" "$1" && grep -Fq "InstanceProfile:" "$1"' _ "$operator_template"
 check "operator template owns the Image Builder roles" \
@@ -87,7 +93,7 @@ check "operator template has no EventBridge rule" \
 
 check "infra template creates NO IAM resources" \
   bash -c '! grep -Fq "AWS::IAM::" "$1"' _ "$infra_template"
-check "infra template does not create the strimserver user or operator policy" \
+check "infra template does not create the service user or operator policy" \
   bash -c '! grep -Fq "StrimserverServiceUser" "$1" && ! grep -Fq "StrimserverOperatorPolicy" "$1"' _ "$infra_template"
 check "infra template owns the network security group" \
   bash -c 'grep -Fq "AWS::EC2::SecurityGroup" "$1"' _ "$infra_template"
@@ -104,9 +110,6 @@ check "operator declares the same Image Builder instance profile name" \
   bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" "$1"' _ "$operator_template"
 check "operator declares the same AMI-publish role name" \
   bash -c 'grep -Fq -- "-baked-publish-role" "$1"' _ "$operator_template"
-# Any ImportValue the infra template ever grows must resolve to an operator
-# Export; today the split uses fixed names, so this is the guard for a future
-# cross-stack reference.
 check "every infra ImportValue has a matching operator Export" \
   bash -c '
     imports="$(grep -oE "!ImportValue[[:space:]]+[A-Za-z0-9_.:-]+" "$1" | awk "{print \$2}" || true)"
@@ -122,20 +125,16 @@ check "operator policy covers both x86_64 + arm64 DLAMI SSM params" \
   bash -c 'grep -Fq "deeplearning/ami/x86_64/" <<<"$1" && grep -Fq "deeplearning/ami/arm64/" <<<"$1"' _ "$operator_policy"
 check "operator policy grants ec2:DescribeImages (check-deps DLAMI metadata)" \
   bash -c 'grep -Fq "ec2:DescribeImages" <<<"$1"' _ "$operator_policy"
-# launch reads the baked-AMI SSM parameter BEFORE falling back to the DLAMI, so
-# the operator identity (the only identity that runs launch) must be granted
-# ssm:GetParameter on it or the lookup returns AccessDenied and the baked image
-# is never used.
-check "operator policy covers the baked-AMI SSM parameter /strimserver/ami/baked/latest" \
-  bash -c 'grep -Fq "/strimserver/ami/baked/latest" <<<"$1"' _ "$operator_policy"
+check "operator policy covers the ProjectName-derived baked-AMI SSM parameter" \
+  bash -c 'grep -Fq "parameter/\${ProjectName}/ami/baked/latest" <<<"$1"' _ "$operator_policy"
 check "exactly ONE managed policy attaches to the user (Users: appears once)" \
   bash -c '[ "$(grep -c "Users:" "$1")" -eq 1 ]' _ "$operator_template"
 
 # --- operator policy identity -------------------------------------------------
 check "operator policy exists (AWS::IAM::ManagedPolicy)" \
   bash -c 'grep -Fq "Type: AWS::IAM::ManagedPolicy" <<<"$1"' _ "$operator_policy"
-check "operator policy has fixed name strimserver-operator" \
-  bash -c 'grep -Fq "ManagedPolicyName: strimserver-operator" <<<"$1"' _ "$operator_policy"
+check "operator policy name derives from ProjectName" \
+  bash -c 'grep -Fq "ManagedPolicyName: !Sub \"\${ProjectName}-operator\"" <<<"$1"' _ "$operator_policy"
 check "operator policy attached to the service user" \
   bash -c 'grep -Fq "StrimserverServiceUser" <<<"$1"' _ "$operator_policy"
 
@@ -151,14 +150,6 @@ check "operator policy has no bare clip-chomping '>' Description" \
   bash -c '! grep -Eq "^[[:space:]]*Description: >[[:space:]]*$" <<<"$1"' _ "$operator_policy"
 
 # --- required (minimal) surface: exactly what the tooling calls --------------
-# Derived from the `aws` CLI calls in deploy/aws/launch, deploy/aws/terminate,
-# scripts/*.sh and tools/*/publish*.sh:
-#   launch/terminate : ec2 run/terminate/describe-*, cloudformation describe-stacks
-#   publish + bucket : s3 cp (PutObject), s3api get-bucket-location / get- /
-#                      put-bucket-policy / list-objects-v2
-#   launch           : iam:PassRole (--iam-instance-profile), ssm:GetParameter
-#                      (--image-id resolve:ssm:...)
-#   deploy-infra     : self key rotation (iam *AccessKey on user/strimserver)
 for action in \
   s3:ListBucket s3:GetBucketLocation s3:GetBucketPolicy s3:PutBucketPolicy \
   s3:GetObject s3:PutObject s3:PutObjectAcl s3:DeleteObject \
@@ -172,34 +163,35 @@ for action in \
     bash -c 'grep -Fq -- "$2" <<<"$1"' _ "$operator_policy" "$action"
 done
 
-# --- deploy-infra + AMI-rebuild surface the operator now owns -----------------
-# deploy-infra is no longer admin-run: the same [strimserver] operator runs the
-# stack deploy and watches an Image Builder rebuild, so the policy must cover
-# the CloudFormation deploy lifecycle (scoped to this stack), iam:PassRole for
-# the roles the template wires, the Image Builder pipeline trigger + reads, and
-# ec2:DescribeImages (already covered above for the check-deps drift gate).
+# --- deploy-infra + AMI-rebuild surface the operator owns ---------------------
 cfn_deploy_stmt="$(extract_statement CloudFormationDeployStack)"
-cfn_validate_stmt="$(extract_statement CloudFormationValidateTemplate)"
+cfn_gtm_stmt="$(extract_statement CloudFormationGetTemplateSummary)"
 cfn_read_stmt="$(extract_statement CloudFormationReadStack)"
 pass_ib_stmt="$(extract_statement PassImageBuilderRoles)"
 ib_rebuild_stmt="$(extract_statement ImageBuilderRebuild)"
 ib_read_stmt="$(extract_statement ImageBuilderRead)"
+vpc_stmt="$(extract_statement Ec2VpcLifecycle)"
+ib_lifecycle_stmt="$(extract_statement ImageBuilderLifecycle)"
+events_stmt="$(extract_statement BakedAmiEventsLifecycle)"
+ssm_doc_stmt="$(extract_statement SsmDocumentLifecycle)"
 
 check "CloudFormation deploy statement exists" \
   bash -c 'grep -Fq "cloudformation:CreateStack" <<<"$1" && grep -Fq "cloudformation:UpdateStack" <<<"$1"' _ "$cfn_deploy_stmt"
-check "CloudFormation deploy is scoped to stack/strimserver/*" \
-  bash -c 'grep -Fq "stack/strimserver/*" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$cfn_deploy_stmt"
+check "CloudFormation deploy is scoped to stack/\${ProjectName}/*" \
+  bash -c 'grep -Fq "stack/\${ProjectName}/*" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$cfn_deploy_stmt"
 check "CloudFormation deploy carries the change-set actions aws deploy needs" \
   bash -c 'for a in CreateChangeSet DescribeChangeSet ExecuteChangeSet DeleteChangeSet; do grep -Fq "cloudformation:$a" <<<"$1" || exit 1; done' _ "$cfn_deploy_stmt"
-check "CloudFormation ValidateTemplate is granted on Resource \"*\"" \
-  bash -c 'grep -Fq "cloudformation:ValidateTemplate" <<<"$1" && grep -Fq "Resource: \"*\"" <<<"$1"' _ "$cfn_validate_stmt"
+check "CloudFormation deploy grants DeleteStack on the project stack only" \
+  bash -c 'grep -Fq "cloudformation:DeleteStack" <<<"$1" && grep -Fq "stack/\${ProjectName}/*" <<<"$1"' _ "$cfn_deploy_stmt"
+check "CloudFormation deploy uses a region wildcard" \
+  bash -c 'grep -Fq "cloudformation:*:\${AWS::AccountId}:stack/" <<<"$1"' _ "$cfn_deploy_stmt"
+check "GetTemplateSummary is granted on Resource \"*\"" \
+  bash -c 'grep -Fq "cloudformation:GetTemplateSummary" <<<"$1" && grep -Fq "Resource: \"*\"" <<<"$1"' _ "$cfn_gtm_stmt"
+check "the unused ValidateTemplate grant is gone" \
+  bash -c '! grep -Fq "cloudformation:ValidateTemplate" <<<"$1"' _ "$operator_policy"
 check "CloudFormation read statement covers DescribeStacks/DescribeStackEvents/GetTemplate" \
   bash -c 'for a in DescribeStacks DescribeStackEvents GetTemplate; do grep -Fq "cloudformation:$a" <<<"$1" || exit 1; done' _ "$cfn_read_stmt"
-check "the operator policy grants no DeleteStack (deploy does not need it)" \
-  bash -c '! grep -Fq "cloudformation:DeleteStack" <<<"$1"' _ "$operator_policy"
 
-# The Image Builder roles live in the SAME operator template now, so the policy
-# names them with deterministic fixed-name ARNs (no cross-stack dependency).
 check "iam:PassRole covers both Image Builder roles" \
   bash -c 'grep -Fq "iam:PassRole" <<<"$1" && grep -Fq "baked-imagebuilder-instance-role" <<<"$1" && grep -Fq "baked-imagebuilder-execution-role" <<<"$1"' _ "$pass_ib_stmt"
 check "iam:PassRole covers the AMI-publish role" \
@@ -207,15 +199,33 @@ check "iam:PassRole covers the AMI-publish role" \
 check "iam:PassRole uses deterministic !Sub role ARNs" \
   bash -c 'grep -Fq "arn:\${AWS::Partition}:iam::\${AWS::AccountId}:role/" <<<"$1"' _ "$pass_ib_stmt"
 check "ImageBuilder rebuild statement triggers the BakedImagePipeline" \
-  bash -c 'grep -Fq "imagebuilder:StartPipelineExecution" <<<"$1"' _ "$ib_rebuild_stmt"
-check "ImageBuilder rebuild is scoped to the pipeline ARN" \
-  bash -c 'grep -Fq "image-pipeline/strimserver-baked" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$ib_rebuild_stmt"
+  bash -c 'grep -Fq "imagebuilder:StartImagePipelineExecution" <<<"$1"' _ "$ib_rebuild_stmt"
+check "ImageBuilder rebuild is scoped to the ProjectName pipeline ARN" \
+  bash -c 'grep -Fq "image-pipeline/\${ProjectName}-baked" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$ib_rebuild_stmt"
 check "ImageBuilder read statement covers the rebuild-watch surface" \
   bash -c 'for a in GetImagePipeline ListImagePipelines GetImage ListImages GetImageRecipe; do grep -Fq "imagebuilder:$a" <<<"$1" || exit 1; done' _ "$ib_read_stmt"
 
+# --- D.3: Image Builder / Events / SSM document lifecycle --------------------
+check "Image Builder lifecycle statement covers Component CRUD" \
+  bash -c 'for a in CreateComponent DeleteComponent; do grep -Fq "imagebuilder:$a" <<<"$1" || exit 1; done' _ "$ib_lifecycle_stmt"
+check "Image Builder lifecycle statement covers the other resource types" \
+  bash -c 'for a in CreateImageRecipe DeleteImageRecipe CreateInfrastructureConfiguration CreateDistributionConfiguration CreateImagePipeline UpdateImagePipeline DeleteImagePipeline; do grep -Fq "imagebuilder:$a" <<<"$1" || exit 1; done' _ "$ib_lifecycle_stmt"
+check "Image Builder lifecycle is scoped to the account's imagebuilder resources" \
+  bash -c 'grep -Fq "arn:aws:imagebuilder:*:\${AWS::AccountId}:" <<<"$1"' _ "$ib_lifecycle_stmt"
+check "Events lifecycle is scoped to the baked-AMI publish rule" \
+  bash -c 'for a in PutRule PutTargets RemoveTargets DeleteRule DescribeRule ListTargetsByRule EnableRule DisableRule; do grep -Fq "events:$a" <<<"$1" || exit 1; done; grep -Fq "rule/\${ProjectName}-baked-ami-publish" <<<"$1"' _ "$events_stmt"
+check "SSM document lifecycle is granted (CreateDocument has no resource scope)" \
+  bash -c 'for a in CreateDocument UpdateDocument DeleteDocument DescribeDocument GetDocument; do grep -Fq "ssm:$a" <<<"$1" || exit 1; done; grep -Fq "Resource: \"*\"" <<<"$1"' _ "$ssm_doc_stmt"
+
+# --- EC2 network lifecycle (the infra stack creates the VPC) ------------------
+check "VPC lifecycle statement grants the full self-contained network action set" \
+  bash -c 'for a in CreateVpc DeleteVpc ModifyVpcAttribute CreateSubnet DeleteSubnet ModifySubnetAttribute CreateInternetGateway DeleteInternetGateway AttachInternetGateway DetachInternetGateway CreateRouteTable DeleteRouteTable AssociateRouteTable DisassociateRouteTable CreateRoute DeleteRoute CreateSecurityGroup DeleteSecurityGroup AuthorizeSecurityGroupIngress RevokeSecurityGroupIngress CreateTags DeleteTags; do grep -Fq "ec2:$a" <<<"$1" || exit 1; done' _ "$vpc_stmt"
+check "VPC lifecycle scopes the network resource types with a region wildcard" \
+  bash -c 'for r in "vpc/*" "subnet/*" "internet-gateway/*" "route-table/*" "security-group/*"; do grep -Fq "$r" <<<"$1" || exit 1; done; grep -Fq "arn:aws:ec2:*:\${AWS::AccountId}:" <<<"$1"' _ "$vpc_stmt"
+check "VPC lifecycle CreateTags/DeleteTags stay UNCONDITIONED (CFN reserved keys)" \
+  bash -c '! grep -Fq "aws:TagKeys" <<<"$1" && ! grep -Fq "ec2:CreateAction" <<<"$1"' _ "$vpc_stmt"
+
 # --- least privilege: no unused admin grants ---------------------------------
-# StackIamManagement (C1) granted account-wide IAM administration the operator
-# never uses (deploy-infra is admin-run). None of these may reappear.
 for action in \
   iam:AttachUserPolicy iam:DetachUserPolicy iam:CreatePolicy \
   iam:CreatePolicyVersion iam:CreateUser iam:CreateRole iam:PutRolePolicy \
@@ -225,29 +235,12 @@ for action in \
   check "operator policy does NOT grant admin $action" \
     bash -c '! grep -Fq -- "$2" <<<"$1"' _ "$operator_policy" "$action"
 done
-# scripts/bucket-cidr-policy.sh (MAKE_PRIVATE=1) calls `s3api put-object-acl`
-# to flip pre-existing public-read objects private, so the operator legitimately
-# needs s3:PutObjectAcl -- but ONLY on the deployment bucket's objects, never
-# account-wide. S3Objects is separately asserted scoped/not Resource "*" below.
 check "s3:PutObjectAcl is scoped to the deployment bucket objects statement" \
   bash -c 'grep -Fq "s3:PutObjectAcl" <<<"$1"' _ "$(extract_statement S3Objects)"
 check "no account-wide s3:PutObjectAcl (Describe Ec2 statement is clean)" \
   bash -c '! grep -Fq "s3:PutObjectAcl" <<<"$1"' _ "$(extract_statement Ec2Describe)"
 
 # --- M2: EC2 lifecycle statements are split and gated by tag/type ------------
-# The former single Ec2LaunchTerminate statement granted RunInstances /
-# TerminateInstances / CreateTags on Resource "*" with NO conditions, so the
-# operator could terminate ANY instance in the account. Mirror movienight:
-#   - Run    : gated by aws:RequestTag/Project + an ec2:InstanceType allowlist,
-#     scoped to instance/* (the referenced key-pair/SG/subnet/image/volume/ENI
-#     get their own unconditioned RunInstancesDependencies grant)
-#   - Term   : gated by aws:ResourceTag/Project
-#   - Tags   : gated by aws:RequestTag/Project, scoped to instance ARNs
-#   - Describe* : MUST stay WITHOUT conditions. EC2 Describe actions do not
-#     support resource-level permissions, so a ResourceTag condition would
-#     evaluate false and DENY the call, breaking terminate's lookup. AWS:
-#     "the Describe actions do not support resource-level permissions, so you
-#     must specify them in a separate statement without conditions."
 run_stmt="$(extract_statement Ec2RunInstances)"
 run_deps_stmt="$(extract_statement Ec2RunInstancesDependencies)"
 terminate_stmt="$(extract_statement Ec2TerminateInstances)"
@@ -262,18 +255,16 @@ check "RunInstances condition uses the ProjectName parameter" \
   bash -c 'grep -Fq "!Ref ProjectName" <<<"$1"' _ "$run_stmt"
 check "RunInstances restricts ec2:InstanceType to the documented GPU families" \
   bash -c 'grep -Fq "ec2:InstanceType" <<<"$1" && grep -Fq "g4dn.*" <<<"$1" && grep -Fq "g6.*" <<<"$1" && grep -Fq "g5g.*" <<<"$1"' _ "$run_stmt"
-# RunInstances is authorized against EVERY resource the request references, but
-# only the instance carries the RequestTag/InstanceType gates (launch tags the
-# instance alone). The statement must therefore be scoped to instance/* rather
-# than Resource:"*", with the referenced resources in a separate statement.
 check "RunInstances instance statement is scoped to instance/* (not Resource \"*\")" \
   bash -c 'grep -Fq "instance/*" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$run_stmt"
+check "RunInstances instance ARN uses a region wildcard" \
+  bash -c 'grep -Fq "arn:aws:ec2:*:\${AWS::AccountId}:instance/*" <<<"$1"' _ "$run_stmt"
 check "RunInstancesDependencies statement exists and grants ec2:RunInstances" \
   bash -c 'grep -Fq "ec2:RunInstances" <<<"$1"' _ "$run_deps_stmt"
 check "RunInstancesDependencies covers volume/ENI/key-pair/SG/subnet" \
   bash -c 'for r in "volume/*" "network-interface/*" "key-pair/*" "security-group/*" "subnet/*"; do grep -Fq "$r" <<<"$1" || exit 1; done' _ "$run_deps_stmt"
-check "RunInstancesDependencies covers the empty-account public image ARN" \
-  bash -c 'grep -Fq "arn:aws:ec2:\${AWS::Region}::image/*" <<<"$1"' _ "$run_deps_stmt"
+check "RunInstancesDependencies covers the empty-account public image ARN (region wildcard)" \
+  bash -c 'grep -Fq "arn:aws:ec2:*::image/*" <<<"$1"' _ "$run_deps_stmt"
 check "RunInstancesDependencies is UNCONDITIONED (no RequestTag / InstanceType)" \
   bash -c '! grep -Fq "aws:RequestTag" <<<"$1" && ! grep -Fq "ec2:InstanceType" <<<"$1"' _ "$run_deps_stmt"
 
@@ -286,14 +277,12 @@ check "TerminateInstances condition uses the ProjectName parameter" \
 
 check "CreateTags statement exists" \
   bash -c 'grep -Fq "ec2:CreateTags" <<<"$1"' _ "$tags_stmt"
-check "CreateTags is gated by aws:RequestTag/Project" \
-  bash -c 'grep -Fq "aws:RequestTag/Project" <<<"$1"' _ "$tags_stmt"
+check "CreateTags also grants ec2:DeleteTags on instance ARNs" \
+  bash -c 'grep -Fq "ec2:DeleteTags" <<<"$1" && grep -Fq "instance/*" <<<"$1"' _ "$tags_stmt"
+check "CreateTags is bound to tag-on-create via ec2:CreateAction = RunInstances" \
+  bash -c 'grep -Fq "ec2:CreateAction" <<<"$1" && grep -Fq "RunInstances" <<<"$1"' _ "$tags_stmt"
 check "CreateTags is scoped to instance ARNs (not Resource \"*\")" \
   bash -c '! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$tags_stmt"
-# fix3: an aws:TagKeys allowlist stops the operator stamping an arbitrary key
-# (e.g. a future terminate-gating tag) onto a foreign instance. It must keep
-# ForAllValues:StringEquals and exactly the keys launch applies via
-# --tag-specifications (Project, Name). The RequestTag/Project condition stays.
 check "CreateTags carries an aws:TagKeys allowlist (ForAllValues:StringEquals)" \
   bash -c 'grep -Fq "ForAllValues:StringEquals" <<<"$1" && grep -Fq "aws:TagKeys" <<<"$1"' _ "$tags_stmt"
 check "CreateTags aws:TagKeys allowlist is exactly the launch keys (Project, Name)" \
@@ -301,6 +290,8 @@ check "CreateTags aws:TagKeys allowlist is exactly the launch keys (Project, Nam
 
 check "Describe statement exists" \
   bash -c 'grep -Fq "ec2:DescribeInstances" <<<"$1"' _ "$describe_stmt"
+check "Describe statement includes the VPC network lookup actions" \
+  bash -c 'for a in DescribeVpcs DescribeInternetGateways DescribeRouteTables; do grep -Fq "ec2:$a" <<<"$1" || exit 1; done' _ "$describe_stmt"
 check "Describe statement stays Resource \"*\" and unconditioned" \
   bash -c 'grep -Fq "Resource: \"*\"" <<<"$1" && ! grep -Fq "aws:RequestTag" <<<"$1" && ! grep -Fq "aws:ResourceTag" <<<"$1"' _ "$describe_stmt"
 
@@ -320,29 +311,57 @@ check "S3 bucket statement scoped to the deployment bucket" \
   bash -c 'grep -Fq "arn:aws:s3:::\${DeploymentBucketName}" <<<"$1"' _ "$(extract_statement S3BucketConfig)"
 check "S3 object statement scoped to the deployment bucket prefix" \
   bash -c 'grep -Fq "arn:aws:s3:::\${DeploymentBucketName}/*" <<<"$1"' _ "$(extract_statement S3Objects)"
-check "SelfKeyRotation scoped to user/strimserver" \
-  bash -c 'grep -Fq "user/strimserver" <<<"$1"' _ "$(extract_statement SelfKeyRotation)"
+check "SelfKeyRotation scoped to user/\${ProjectName}" \
+  bash -c 'grep -Fq "user/\${ProjectName}" <<<"$1"' _ "$(extract_statement SelfKeyRotation)"
 
 # --- C2: iam:PassRole constrained to EC2 -------------------------------------
 pass_role="$(extract_statement PassStrimserverRole)"
-check "iam:PassRole scoped to role/strimserver*" \
-  bash -c 'grep -Fq "role/strimserver*" <<<"$1"' _ "$pass_role"
+check "iam:PassRole scoped to the ProjectName instance role" \
+  bash -c 'grep -Fq "role/\${ProjectName}-instance-role" <<<"$1"' _ "$pass_role"
 check "iam:PassRole carries the ec2.amazonaws.com condition" \
   bash -c 'grep -Fq "iam:PassedToService" <<<"$1" && grep -Fq "ec2.amazonaws.com" <<<"$1"' _ "$pass_role"
 
-check "CloudFormation scoped to stack/strimserver/*" \
-  bash -c 'grep -Fq "stack/strimserver/*" <<<"$1"' _ "$operator_policy"
+check "CloudFormation scoped to stack/\${ProjectName}/*" \
+  bash -c 'grep -Fq "stack/\${ProjectName}/*" <<<"$1"' _ "$operator_policy"
 check "no route53 anywhere in the operator template" \
   bash -c '! grep -qi "route53" "$1"' _ "$operator_template"
 
+# --- ProjectName parameterization + region wildcards -------------------------
+arn_lines="$(grep -E 'arn:' <<<"$operator_policy" || true)"
+check "no operator-policy ARN hardcodes the project literal 'strimserver'" \
+  bash -c '! grep -qi "strimserver" <<<"$1"' _ "$arn_lines"
+check "the operator policy carries no \${AWS::Region} region pin" \
+  bash -c '! grep -Fq "\${AWS::Region}" <<<"$1"' _ "$operator_policy"
+check "the operator template carries no \${AWS::Region} region pin" \
+  bash -c '! grep -Fq "\${AWS::Region}" "$1"' _ "$operator_template"
+
+# --- CI identity must NOT exist (explicit user decision) --------------------
+check "no CI user is created" \
+  bash -c '! grep -Eq "CiUser|ArtifactReader" "$1"' _ "$operator_template"
+check "no artifact-reader policy is created" \
+  bash -c '! grep -Fq -- "artifact-reader" "$1"' _ "$operator_template"
+
 # --- baked-AMI read grant on the instance role -------------------------------
-# The instance role already carries only scoped grants; the baked-AMI lookup
-# must stay scoped to the single parameter, never a wildcard ssm:GetParameter.
-instance_role="$(extract_resource "$operator_template" InstanceRole)"
 check "instance role can read the baked-AMI SSM parameter" \
-  bash -c 'grep -Fq "/strimserver/ami/baked/latest" <<<"$1"' _ "$instance_role"
+  bash -c 'grep -Fq "parameter/\${ProjectName}/ami/baked/latest" <<<"$1"' _ "$instance_role"
 check "instance role baked-AMI read is scoped (no parameter/* wildcard)" \
   bash -c '! grep -Fq "parameter/*" <<<"$1"' _ "$instance_role"
+
+# --- permissions boundary ----------------------------------------------------
+check "boundary policy exists (AWS::IAM::ManagedPolicy)" \
+  bash -c 'grep -Fq "Type: AWS::IAM::ManagedPolicy" <<<"$1"' _ "$boundary_policy"
+check "boundary policy name derives from ProjectName" \
+  bash -c 'grep -Fq "ManagedPolicyName: !Sub \"\${ProjectName}-boundary\"" <<<"$1"' _ "$boundary_policy"
+check "boundary grants the SSM agent action set (no wildcard ssm)" \
+  bash -c 'grep -Fq "ssmmessages:OpenDataChannel" <<<"$1" && grep -Fq "ec2messages:GetMessages" <<<"$1" && ! grep -Fq "ssm:\*" <<<"$1"' _ "$boundary_policy"
+check "boundary scopes parameter reads to the project namespace" \
+  bash -c 'grep -Fq "parameter/\${ProjectName}/*" <<<"$1"' _ "$boundary_policy"
+check "boundary is never attached to the operator user (no Users:)" \
+  bash -c '! grep -Fq "Users:" <<<"$1"' _ "$boundary_policy"
+check "InstanceRole carries the boundary" \
+  bash -c 'grep -Fq "PermissionsBoundary: !Sub \"arn:\${AWS::Partition}:iam::\${AWS::AccountId}:policy/\${ProjectName}-boundary\"" <<<"$1"' _ "$instance_role"
+check "InstanceRole depends on the boundary resource" \
+  bash -c 'grep -Fq "DependsOn: StrimserverOperatorBoundary" <<<"$1"' _ "$instance_role"
 
 # --- baked-AMI Image Builder execution role (least privilege) ----------------
 execution_role="$(extract_resource "$operator_template" BakedImageBuilderExecutionRole)"
@@ -353,16 +372,24 @@ check "pipeline execution role is assumable by imagebuilder.amazonaws.com" \
 check "pipeline execution role grants imagebuilder actions" \
   bash -c 'grep -Fq "imagebuilder:" <<<"$1"' _ "$execution_role"
 check "pipeline execution role grants ssm:PutParameter on the baked AMI parameter" \
-  bash -c 'grep -Fq "ssm:PutParameter" <<<"$1" && grep -Fq "/strimserver/ami/baked/latest" <<<"$1"' _ "$execution_role"
+  bash -c 'grep -Fq "ssm:PutParameter" <<<"$1" && grep -Fq "parameter/\${ProjectName}/ami/baked/latest" <<<"$1"' _ "$execution_role"
 check "pipeline execution role grants ec2:CreateTags (AMI tagging)" \
   bash -c 'grep -Fq "ec2:CreateTags" <<<"$1"' _ "$execution_role"
 check "pipeline execution role passes only the Image Builder instance role" \
   bash -c 'grep -Fq "iam:PassRole" <<<"$1" && grep -Fq "ec2.amazonaws.com" <<<"$1"' _ "$execution_role"
 
+# --- infra template: ExecutionRole wiring + AvailabilityZone -----------------
+pipeline_block="$(extract_resource "$infra_template" BakedImagePipeline)"
+check "ImagePipeline wires the Image Builder execution role" \
+  bash -c 'grep -Fq "ExecutionRole:" <<<"$1" && grep -Fq -- "-baked-imagebuilder-execution-role" <<<"$1"' _ "$pipeline_block"
+check "infra declares the AvailabilityZone parameter" \
+  bash -c 'grep -Eq "^  AvailabilityZone:" "$1"' _ "$infra_template"
+check "infra declares the HasAvailabilityZone condition" \
+  bash -c 'grep -Fq "HasAvailabilityZone:" "$1"' _ "$infra_template"
+check "subnet AZ honours the parameter with an AZ fallback" \
+  bash -c 'grep -Fq "HasAvailabilityZone" <<<"$1" && grep -Fq "!GetAZs" <<<"$1"' _ "$(extract_resource "$infra_template" ManagedSubnet)"
+
 # --- no hardcoded AMI ids beyond the recipe base + launch fallback -----------
-# The ImageRecipe base and launch's DEFAULT_AMI_ID are the only two places the
-# pinned DLAMI id may appear. Any other literal would be a stale bake target.
-# The operator template is identity-only and must carry none.
 pinned_ami="ami-0198b63ccfac121e8"
 check "infra template hardcodes only the pinned recipe-base AMI id" \
   bash -c 'ids="$(grep -o "ami-[0-9a-f]\{8,\}" "$1" | sort -u)"; [ "$ids" = "$2" ]' _ "$infra_template" "$pinned_ami"
@@ -372,7 +399,7 @@ check "launch keeps only the pinned fallback AMI constant" \
   bash -c 'ids="$(grep -o "ami-[0-9a-f]\{8,\}" "$1" | sort -u)"; [ "$ids" = "$2" ]' _ "$script_dir/launch" "$pinned_ami"
 
 # --- mutation check: CreateTags without aws:TagKeys must FAIL ------------------
-# Guard against the fix3 assertion silently rotting: strip the
+# Guard against the allowlist assertion silently rotting: strip the
 # ForAllValues:StringEquals aws:TagKeys block from a throwaway copy and confirm
 # this very test rejects it. Skipped during the re-invoked (mutated) run.
 if [[ -z "${STRIMSERVER_OPERATOR_TEST_MUTATED_RUN:-}" ]]; then

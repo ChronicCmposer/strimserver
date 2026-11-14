@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # deploy_infra_test.sh -- drive deploy/aws/deploy-infra against the fake aws.
 #
-# deploy-infra is now the PROFILE-RUN stack deploy (provision-account owns the
-# admin bootstrap and key rotation). These assertions pin:
-#   * it requires the [strimserver] identity (default AWS_PROFILE=strimserver,
-#     --profile override) and never rotates an access key;
-#   * an existing stack's live parameters are re-passed verbatim, so a
-#     `cloudformation deploy` cannot silently reset an unspecified parameter to
-#     its template default;
-#   * explicit OPERATOR_CIDR / S3_BUCKET_NAME / NVIDIA_DRIVER_FLOOR overrides win;
-#   * a first create uses env values / template defaults;
-#   * post-deploy NvidiaDriverFloor must equal lib/nvidia.sh's floor (fail loud
-#     on drift) and the BakedImagePipeline must exist.
+# deploy-infra is the PROFILE-RUN stack deploy (provision-account owns the admin
+# bootstrap and key rotation). These assertions pin the movienight parameter
+# philosophy:
+#   * only parameters the operator explicitly set are passed
+#     (OPERATOR_CIDR, S3_BUCKET_NAME, VPC_ID, NVIDIA_DRIVER_FLOOR,
+#     CREATE_NETWORK, ENABLE_EXPERIMENTAL_SSH), plus the ProjectName constant;
+#   * unset parameters are ABSENT from the deploy line, so the template's
+#     Default stays authoritative -- the describe-stacks live re-pass machinery
+#     is gone;
+#   * the stack name must equal ProjectName (the policy ARNs depend on it);
+#   * the deploy runs under a bounded `timeout`;
+#   * the identity gate, the first-create OPERATOR_CIDR requirement, the
+#     client-side VPC guard, and the post-deploy verification (status, floor,
+#     pipeline) all survive.
 #
 # The structural baked-AMI assertions at the bottom are retained from the old
 # suite.
@@ -54,6 +57,7 @@ run_deploy() {
       AWS_CONFIG_FILE="$home/.aws/config" \
       FAKE_AWS_STATE="$state" \
       FAKE_AWS_CALLS="$calls" \
+      FAKE_AWS_TEMPLATE_FLOOR="$nvidia_floor" \
       "${EXTRA_ENV[@]}" \
       bash "$deploy_infra" "$@" )
 }
@@ -66,11 +70,11 @@ new_home() { # new_home <dir>: a fixture HOME with a pre-existing [default] prof
 }
 
 # ---------------------------------------------------------------------------
-# Case 1 -- first create: profile identity, no key rotation, live VPC passthrough
+# Case 1 -- first create: identity, explicit params only, no re-pass machinery
 # ---------------------------------------------------------------------------
 h1="$work/h1"; new_home "$h1"; mkdir -p "$work/s1"
 creds_before="$(cat "$h1/.aws/credentials")"
-EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32 S3_BUCKET_NAME=bucket-1 VPC_ID=vpc-abc123)
+EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32 S3_BUCKET_NAME=bucket-1 VPC_ID=vpc-abc123 NVIDIA_DRIVER_FLOOR="$nvidia_floor")
 run_deploy "$work/s1" "$work/c1" "$h1" >"$work/o1" 2>&1
 rc=$?
 EXTRA_ENV=()
@@ -81,14 +85,21 @@ check "deploy runs as --profile strimserver" \
   bash -c '[[ "$1" == *"--profile strimserver"* ]]' _ "$deploy_line"
 check "deploy uses the strimserver stack and named-IAM capability" \
   bash -c '[[ "$1" == *"--stack-name strimserver"* && "$1" == *"--capabilities CAPABILITY_NAMED_IAM"* ]]' _ "$deploy_line"
+check "deploy always passes the ProjectName constant" \
+  bash -c '[[ "$1" == *ProjectName=strimserver* ]]' _ "$deploy_line"
 check "deploy passes the env operator CIDR to OperatorCidr and IngestCidr" \
   bash -c '[[ "$1" == *OperatorCidr=203.0.113.4/32* && "$1" == *IngestCidr=203.0.113.4/32* ]]' _ "$deploy_line"
-check "deploy passes DeploymentBucketName" \
+check "deploy passes DeploymentBucketName when S3_BUCKET_NAME is set" \
   bash -c '[[ "$1" == *DeploymentBucketName=bucket-1* ]]' _ "$deploy_line"
-check "deploy always passes the lib floor as NvidiaDriverFloor" \
+check "deploy passes VpcId when VPC_ID is set" \
+  bash -c '[[ "$1" == *VpcId=vpc-abc123* ]]' _ "$deploy_line"
+check "deploy passes the explicit NvidiaDriverFloor override" \
   bash -c '[[ "$1" == *"NvidiaDriverFloor=$2"* ]]' _ "$deploy_line" "$nvidia_floor"
-check "first create does not force CreateNetwork/EnableExperimentalSsh" \
-  bash -c '[[ "$1" != *"CreateNetwork="* && "$1" != *"EnableExperimentalSsh="* ]]' _ "$deploy_line"
+for absent in CreateNetwork= EnableExperimentalSsh= EnableSessionManager= \
+  ControllerPort= SrtPort= ExperimentalSshPort= VpcCidr= SubnetCidr=; do
+  check "unset parameter is omitted from the deploy line: $absent" \
+    bash -c '[[ "$1" != *"$2"* ]]' _ "$deploy_line" "$absent"
+done
 check "no access key is created or deleted (rotation owns that)" \
   bash -c '! grep -Eq "iam (create|delete)-access-key" "$1"' _ "$work/c1"
 check "the pre-existing credentials file is untouched" \
@@ -101,7 +112,7 @@ check "post-deploy lists Image Builder pipelines" \
   bash -c 'grep -Fq "imagebuilder list-image-pipelines" "$1"' _ "$work/c1"
 
 # ---------------------------------------------------------------------------
-# Case 1b -- first create in existing-VPC mode: VPC_ID -> VpcId
+# Case 1b -- first create in existing-VPC mode: VPC_ID -> VpcId, no floor pass
 # ---------------------------------------------------------------------------
 h1b="$work/h1b"; new_home "$h1b"; mkdir -p "$work/s1b"
 EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32 VPC_ID=vpc-deadbeef)
@@ -112,6 +123,8 @@ check "first create with VPC_ID exits 0" test "$rc" -eq 0
 deploy1b="$(grep -m1 'cloudformation deploy' "$work/c1b" || true)"
 check "first create passes VPC_ID as VpcId" \
   bash -c '[[ "$1" == *VpcId=vpc-deadbeef* ]]' _ "$deploy1b"
+check "an unset NvidiaDriverFloor is NOT passed (template default authoritative)" \
+  bash -c '[[ "$1" != *"NvidiaDriverFloor="* ]]' _ "$deploy1b"
 check "first create does not force CreateNetwork when VPC_ID is supplied" \
   bash -c '[[ "$1" != *"CreateNetwork="* ]]' _ "$deploy1b"
 
@@ -145,7 +158,18 @@ check "fail-fast makes NO cloudformation deploy call" \
   bash -c '! grep -Fq "cloudformation deploy" "$1"' _ "$work/c1d"
 
 # ---------------------------------------------------------------------------
-# Case 2 -- a non-strimserver identity is rejected before deploying
+# Case 1e -- first create without OPERATOR_CIDR dies before AWS
+# ---------------------------------------------------------------------------
+h1e="$work/h1e"; new_home "$h1e"; mkdir -p "$work/s1e"
+run_deploy "$work/s1e" "$work/c1e" "$h1e" >"$work/o1e" 2>&1
+rc=$?
+check "first create without OPERATOR_CIDR exits non-zero" test "$rc" -ne 0
+check "first-create error names OPERATOR_CIDR" grep -Fq 'OPERATOR_CIDR' "$work/o1e"
+check "first-create OPERATOR_CIDR failure makes NO deploy call" \
+  bash -c '! grep -Fq "cloudformation deploy" "$1"' _ "$work/c1e"
+
+# ---------------------------------------------------------------------------
+# Case 2 -- a non-operator identity is rejected before deploying
 # ---------------------------------------------------------------------------
 h2="$work/h2"; new_home "$h2"; mkdir -p "$work/s2"
 EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32 FAKE_AWS_STRIM_ARN=arn:aws:iam::183438553939:user/admin)
@@ -158,7 +182,7 @@ check "no deploy runs under a wrong identity" \
   bash -c '! grep -Fq "cloudformation deploy" "$1"' _ "$work/c2"
 
 # ---------------------------------------------------------------------------
-# Live-parameter fixture: an existing stack with non-default values.
+# Live-stack fixture: an existing stack with non-default values.
 # ---------------------------------------------------------------------------
 write_live_stack() { # write_live_stack <state> <floor>
   mkdir -p "$1"
@@ -176,14 +200,12 @@ SrtPort=9100
 DeploymentBucketName=live-bucket
 ExperimentalSshPort=2200
 NvidiaDriverFloor=$2
-NvidiaFloorMachineryUrl=https://example.test/nvidia.sh
-OpensshExperimentalRpmUrl=https://example.test/openssh.rpm
 EOF
   printf 'UPDATE_COMPLETE' >"$1/stack-status"
 }
 
 # ---------------------------------------------------------------------------
-# Case 3 -- live parameters are re-passed verbatim (not reset to defaults)
+# Case 3 -- an update does NOT re-pass live parameters (defaults authoritative)
 # ---------------------------------------------------------------------------
 h3="$work/h3"; new_home "$h3"; mkdir -p "$work/s3"
 write_live_stack "$work/s3" "$nvidia_floor"
@@ -191,22 +213,18 @@ run_deploy "$work/s3" "$work/c3" "$h3" >"$work/o3" 2>&1
 rc=$?
 check "live-stack update exits 0" test "$rc" -eq 0
 deploy3="$(grep -m1 'cloudformation deploy' "$work/c3" || true)"
-for expected in \
-  CreateNetwork=false OperatorCidr=198.51.100.7/32 IngestCidr=0.0.0.0/0 \
-  EnableExperimentalSsh=true EnableSessionManager=false VpcId=vpc-abc123 \
-  VpcCidr=10.9.0.0/16 SubnetCidr=10.9.1.0/24 ControllerPort=4100 SrtPort=9100 \
-  DeploymentBucketName=live-bucket ExperimentalSshPort=2200 \
-  NvidiaFloorMachineryUrl=https://example.test/nvidia.sh \
-  OpensshExperimentalRpmUrl=https://example.test/openssh.rpm; do
-  check "live parameter is re-passed: $expected" \
-    bash -c '[[ "$1" == *"$2"* ]]' _ "$deploy3" "$expected"
+for absent in CreateNetwork= EnableExperimentalSsh= EnableSessionManager= \
+  VpcId= VpcCidr= SubnetCidr= ControllerPort= SrtPort= \
+  DeploymentBucketName= ExperimentalSshPort= NvidiaDriverFloor=; do
+  check "live parameter is NOT re-passed: $absent" \
+    bash -c '[[ "$1" != *"$2"* ]]' _ "$deploy3" "$absent"
 done
-check "a live non-default port is not reset to the template default (4100 != 4000)" \
-  bash -c '[[ "$1" == *"ControllerPort=4100"* && "$1" != *"ControllerPort=4000"* ]]' _ "$deploy3"
+check "only ProjectName is passed on a no-override update" \
+  bash -c '[[ "$1" == *ProjectName=strimserver* ]]' _ "$deploy3"
 check "post-deploy sees UPDATE_COMPLETE" grep -Fq 'UPDATE_COMPLETE' "$work/o3"
 
 # ---------------------------------------------------------------------------
-# Case 4 -- explicit overrides win; everything else stays live
+# Case 4 -- explicit env overrides win, unset values stay unpassed
 # ---------------------------------------------------------------------------
 h4="$work/h4"; new_home "$h4"; mkdir -p "$work/s4"
 write_live_stack "$work/s4" "$nvidia_floor"
@@ -216,17 +234,17 @@ rc=$?
 EXTRA_ENV=()
 check "override run exits 0" test "$rc" -eq 0
 deploy4="$(grep -m1 'cloudformation deploy' "$work/c4" || true)"
-check "OPERATOR_CIDR overrides both CIDR parameters" \
+check "OPERATOR_CIDR maps to both CIDR parameters" \
   bash -c '[[ "$1" == *OperatorCidr=203.0.113.9/32* && "$1" == *IngestCidr=203.0.113.9/32* ]]' _ "$deploy4"
-check "S3_BUCKET_NAME overrides DeploymentBucketName" \
+check "S3_BUCKET_NAME maps to DeploymentBucketName" \
   bash -c '[[ "$1" == *DeploymentBucketName=new-bucket* ]]' _ "$deploy4"
-check "CREATE_NETWORK overrides the live CreateNetwork" \
+check "CREATE_NETWORK maps to CreateNetwork" \
   bash -c '[[ "$1" == *CreateNetwork=true* ]]' _ "$deploy4"
-check "un-overridden live parameters survive the update" \
-  bash -c '[[ "$1" == *ControllerPort=4100* && "$1" == *VpcId=vpc-abc123* && "$1" == *EnableExperimentalSsh=true* ]]' _ "$deploy4"
+check "un-overridden live parameters are NOT force-fed" \
+  bash -c '[[ "$1" != *ControllerPort=* && "$1" != *VpcId=* ]]' _ "$deploy4"
 
 # ---------------------------------------------------------------------------
-# Case 4b -- explicit VPC_ID overrides the live VpcId on update
+# Case 4b -- explicit VPC_ID is passed on update
 # ---------------------------------------------------------------------------
 h4b="$work/h4b"; new_home "$h4b"; mkdir -p "$work/s4b"
 write_live_stack "$work/s4b" "$nvidia_floor"
@@ -236,33 +254,53 @@ rc=$?
 EXTRA_ENV=()
 check "update with VPC_ID override exits 0" test "$rc" -eq 0
 deploy4b="$(grep -m1 'cloudformation deploy' "$work/c4b" || true)"
-check "VPC_ID overrides the live VpcId" \
-  bash -c '[[ "$1" == *VpcId=vpc-override999* && "$1" != *VpcId=vpc-abc123* ]]' _ "$deploy4b"
+check "VPC_ID maps to VpcId" \
+  bash -c '[[ "$1" == *VpcId=vpc-override999* ]]' _ "$deploy4b"
 
 # ---------------------------------------------------------------------------
-# Case 5 -- NvidiaDriverFloor drift from lib/nvidia.sh fails loud
+# Case 5 -- stack name must equal ProjectName (policy ARNs depend on it)
 # ---------------------------------------------------------------------------
 h5="$work/h5"; new_home "$h5"; mkdir -p "$work/s5"
-write_live_stack "$work/s5" "$nvidia_floor"
+run_deploy "$work/s5" "$work/c5" "$h5" --stack-name other-stack >"$work/o5" 2>&1
+rc=$?
+check "a stack name differing from the project exits non-zero" test "$rc" -ne 0
+check "stack/project mismatch explains the ARN scoping" \
+  bash -c 'grep -Fqi "must equal" "$1" && grep -Fqi "project" "$1"' _ "$work/o5"
+check "stack/project mismatch makes NO deploy call" \
+  bash -c '! grep -Fq "cloudformation deploy" "$1"' _ "$work/c5"
+
+# ---------------------------------------------------------------------------
+# Case 6 -- the deploy runs under a bounded timeout wrapper
+# ---------------------------------------------------------------------------
+check "deploy-infra defines a bounded deploy timeout (default 900s)" \
+  bash -c 'grep -Fq "CFN_DEPLOY_TIMEOUT:-900" "$1"' _ "$deploy_infra"
+check "deploy-infra wraps cloudformation deploy in timeout" \
+  bash -c 'grep -Eq "timeout[[:space:]]+\"?\\\$\\{?CFN_DEPLOY_TIMEOUT" "$1"' _ "$deploy_infra"
+
+# ---------------------------------------------------------------------------
+# Case 7 -- NvidiaDriverFloor drift from lib/nvidia.sh fails loud
+# ---------------------------------------------------------------------------
+h7="$work/h7"; new_home "$h7"; mkdir -p "$work/s7"
+write_live_stack "$work/s7" "$nvidia_floor"
 EXTRA_ENV=(FAKE_AWS_DESCRIBE_FLOOR=999.0.0)
-run_deploy "$work/s5" "$work/c5" "$h5" >"$work/o5" 2>&1
+run_deploy "$work/s7" "$work/c7" "$h7" >"$work/o7" 2>&1
 rc=$?
 EXTRA_ENV=()
 check "NvidiaDriverFloor drift exits non-zero" test "$rc" -ne 0
 check "drift message names NvidiaDriverFloor and the lib floor" \
-  bash -c 'grep -Fiq "NvidiaDriverFloor" "$1" && grep -Fq "$2" "$1"' _ "$work/o5" "$nvidia_floor"
+  bash -c 'grep -Fiq "NvidiaDriverFloor" "$1" && grep -Fq "$2" "$1"' _ "$work/o7" "$nvidia_floor"
 
 # ---------------------------------------------------------------------------
-# Case 6 -- the BakedImagePipeline must exist after deploy
+# Case 8 -- the BakedImagePipeline must exist after deploy
 # ---------------------------------------------------------------------------
-h6="$work/h6"; new_home "$h6"; mkdir -p "$work/s6"
-write_live_stack "$work/s6" "$nvidia_floor"
+h8="$work/h8"; new_home "$h8"; mkdir -p "$work/s8"
+write_live_stack "$work/s8" "$nvidia_floor"
 EXTRA_ENV=(FAKE_AWS_NO_PIPELINE=1)
-run_deploy "$work/s6" "$work/c6" "$h6" >"$work/o6" 2>&1
+run_deploy "$work/s8" "$work/c8" "$h8" >"$work/o8" 2>&1
 rc=$?
 EXTRA_ENV=()
 check "a missing BakedImagePipeline exits non-zero" test "$rc" -ne 0
-check "missing-pipeline message names BakedImagePipeline" grep -Fq 'BakedImagePipeline' "$work/o6"
+check "missing-pipeline message names BakedImagePipeline" grep -Fq 'BakedImagePipeline' "$work/o8"
 
 # ---------------------------------------------------------------------------
 # Structural baked-AMI assertions (retained from the old suite)
@@ -344,28 +382,25 @@ check "distribution is us-east-2 ONLY (exactly one Region entry)" \
 
 check "ImagePipeline exists (AWS::ImageBuilder::ImagePipeline)" \
   bash -c 'grep -Fq "Type: AWS::ImageBuilder::ImagePipeline" <<<"$1"' _ "$pipeline_block"
+check "ImagePipeline wires the execution role" \
+  bash -c 'grep -Fq "ExecutionRole:" <<<"$1" && grep -Fq -- "-baked-imagebuilder-execution-role" <<<"$1"' _ "$pipeline_block"
 check "pipeline has NO schedule (manual trigger only)" \
   bash -c '! grep -Fq "Schedule:" <<<"$1"' _ "$pipeline_block"
 check "pipeline documents the monthly-rebuild TODO" \
   bash -c 'grep -Fiq "monthly" "$1"' _ "$infra_template"
-# The build instance profile is created by the operator template; the infra
-# InfrastructureConfiguration must reference it by the same fixed name rather
-# than trying to create IAM.
 check "InfrastructureConfiguration references the operator's instance profile name" \
   bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" <<<"$1"' _ "$infra_config_block"
-# The SSM document must have a deterministic Name because the AMI-publish ROLE
-# (which lives in the operator template) scopes ssm:StartAutomationExecution to
-# that same ARN without being able to !Ref a document in another stack.
 check "SSM publish document has a deterministic Name" \
   bash -c 'grep -A6 "Type: AWS::SSM::Document" "$1" | grep -Fq "Name:"' _ "$infra_template"
 
-# Parameters retained only for deploy-infra's live-parameter passthrough (the
-# resources that consumed them now live in the operator stack). They must stay
-# declared or `cloudformation deploy` rejects the re-passed live values.
-check "infra keeps DeploymentBucketName declared for passthrough" \
+check "infra declares DeploymentBucketName" \
   bash -c 'grep -Eq "^  DeploymentBucketName:" "$1"' _ "$infra_template"
-check "infra keeps EnableSessionManager declared for passthrough" \
+check "infra declares EnableSessionManager" \
   bash -c 'grep -Eq "^  EnableSessionManager:" "$1"' _ "$infra_template"
+check "infra declares AvailabilityZone" \
+  bash -c 'grep -Eq "^  AvailabilityZone:" "$1"' _ "$infra_template"
+check "infra declares the HasAvailabilityZone condition" \
+  bash -c 'grep -Fq "HasAvailabilityZone:" "$1"' _ "$infra_template"
 
 check "produced AMI id is published to /strimserver/ami/baked/latest" \
   bash -c 'grep -Fq "/strimserver/ami/baked/latest" "$1"' _ "$infra_template"

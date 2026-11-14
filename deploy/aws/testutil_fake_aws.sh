@@ -26,6 +26,10 @@
 #   FAKE_AWS_NO_PIPELINE  when 1, imagebuilder list-image-pipelines is empty
 #   FAKE_AWS_DESCRIBE_FLOOR  overrides the NvidiaDriverFloor value returned by
 #                         cloudformation describe-stacks (drift simulation)
+#   FAKE_AWS_TEMPLATE_FLOOR  when set, cloudformation deploy records it as the
+#                         NvidiaDriverFloor stack parameter if the deploy did not
+#                         pass one (models the template Default that real CFN
+#                         applies); used by deploy_infra_test
 #   FAKE_AWS_STATE        optional directory that turns on the tiny stateful
 #                         models: IAM access keys per user, CloudFormation stack
 #                         parameters/status, and the eventual-consistency counter.
@@ -194,6 +198,12 @@ if args_has "cloudformation deploy"; then
       fi
       [[ "$word" == "--parameter-overrides" ]] && collecting=1
     done
+    # Model the template Default: real CloudFormation resolves NvidiaDriverFloor
+    # even when the deploy line omits it, so post-deploy verification sees it.
+    if ! grep -q '^NvidiaDriverFloor=' "$params_file" 2>/dev/null \
+        && [[ -n "${FAKE_AWS_TEMPLATE_FLOOR:-}" ]]; then
+      printf 'NvidiaDriverFloor=%s\n' "$FAKE_AWS_TEMPLATE_FLOOR" >>"$params_file"
+    fi
   fi
   printf 'fake: deploy ok\n'
   exit 0

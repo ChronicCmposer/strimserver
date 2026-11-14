@@ -63,6 +63,10 @@ STACK_NAME="${OPERATOR_STACK_NAME:-strimserver-operator}"
 PROJECT_NAME="${PROJECT_NAME:-strimserver}"
 REGION="${AWS_REGION:-us-east-2}"
 PROFILE="${AWS_PROFILE:-strimserver}"
+# Optional operator-stack passthroughs. Both are omitted unless explicitly set,
+# so the template Default stays authoritative (movienight item 205).
+S3_BUCKET_NAME="${S3_BUCKET_NAME:-}"
+ENABLE_SESSION_MANAGER="${ENABLE_SESSION_MANAGER-}"
 ROTATE=0
 ASSUME_YES=0
 
@@ -101,6 +105,9 @@ Environment:
                        CFN_STACK_NAME (the INFRA stack name from .env.example) is
                        intentionally ignored here. The operator stack name must
                        NOT equal the infra stack name ('strimserver').
+  S3_BUCKET_NAME       optional; passed as DeploymentBucketName when non-empty
+  ENABLE_SESSION_MANAGER  optional true/false; passed as EnableSessionManager
+                       only when explicitly set (template Default: true)
 
 Deploys ONLY the account-global operator template (IAM user, operator policy,
 instance role/profile and Image Builder roles). The regional network/Image
@@ -179,14 +186,30 @@ gate_admin_identity() {
   esac
 }
 
+validate_session_manager() {
+  case "$ENABLE_SESSION_MANAGER" in
+    ""|true|false) ;;
+    *) die "ENABLE_SESSION_MANAGER must be 'true' or 'false' (got '${ENABLE_SESSION_MANAGER}')" ;;
+  esac
+}
+
 deploy_stack() {
+  local -a overrides=("ProjectName=${PROJECT_NAME}")
+  # Pass ONLY explicitly-set optional values; otherwise the template Default is
+  # authoritative (EnableSessionManager defaults to true in the template).
+  if [ -n "$S3_BUCKET_NAME" ]; then
+    overrides+=("DeploymentBucketName=${S3_BUCKET_NAME}")
+  fi
+  if [ -n "$ENABLE_SESSION_MANAGER" ]; then
+    overrides+=("EnableSessionManager=${ENABLE_SESSION_MANAGER}")
+  fi
   log "deploying operator stack '${STACK_NAME}' in ${REGION}"
   aws_admin cloudformation deploy \
     --template-file "$TEMPLATE" \
     --stack-name "$STACK_NAME" \
     --region "$REGION" \
     --capabilities CAPABILITY_NAMED_IAM \
-    --parameter-overrides "ProjectName=${PROJECT_NAME}" \
+    --parameter-overrides "${overrides[@]}" \
     || die "cloudformation deploy failed for stack '${STACK_NAME}'"
 }
 
@@ -407,6 +430,7 @@ print_summary() {
 main() {
   parse_args "$@"
   validate_assert_retry_delay
+  validate_session_manager
   reject_infra_stack_name
   require_cmd aws
 

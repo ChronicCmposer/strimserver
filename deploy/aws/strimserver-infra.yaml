@@ -53,6 +53,14 @@ Parameters:
     Description: CIDR for the created public subnet (only used when CreateNetwork=true).
     AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
 
+  AvailabilityZone:
+    Type: String
+    Default: ""
+    Description: >
+      Optional AZ for the created public subnet (only used when
+      CreateNetwork=true). Empty selects the region's first AZ via
+      !Select [0, !GetAZs ""].
+
   OperatorCidr:
     Type: String
     Description: >
@@ -165,6 +173,7 @@ Rules:
 Conditions:
   CreateNet: !Equals [!Ref CreateNetwork, "true"]
   EnableExpSsh: !Equals [!Ref EnableExperimentalSsh, "true"]
+  HasAvailabilityZone: !Not [!Equals [!Ref AvailabilityZone, ""]]
 
 Resources:
   # ----------------------------------------------------------------------------
@@ -206,7 +215,10 @@ Resources:
     Properties:
       VpcId: !Ref ManagedVpc
       CidrBlock: !Ref SubnetCidr
-      AvailabilityZone: !Select [0, !GetAZs ""]
+      AvailabilityZone: !If
+        - HasAvailabilityZone
+        - !Ref AvailabilityZone
+        - !Select [0, !GetAZs ""]
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Project
@@ -411,6 +423,10 @@ Resources:
       ImageRecipeArn: !Ref BakedImageRecipe
       InfrastructureConfigurationArn: !Ref BakedInfrastructureConfiguration
       DistributionConfigurationArn: !Ref BakedDistributionConfiguration
+      # The IAM role Image Builder assumes for the pipeline lives in the
+      # operator stack (fixed, ProjectName-derived name); pass it by ARN so the
+      # pipeline actually runs instead of failing for want of an execution role.
+      ExecutionRole: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-baked-imagebuilder-execution-role"
       ImageTestsConfiguration:
         ImageTestsEnabled: false
       Status: ENABLED

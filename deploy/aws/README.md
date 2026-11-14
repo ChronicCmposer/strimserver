@@ -357,12 +357,13 @@ The CloudFormation surface is split in two, mirroring the movienight
 operator/infra convention:
 
 * **`deploy/aws/strimserver-operator.yaml`** — account-global identity, created
-  once per account by `provision-account` with admin credentials. It owns the
-  `strimserver` IAM user, the single project-scoped `strimserver-operator`
-  managed policy, the EC2 instance role/profile launched instances assume, and
-  every Image Builder role (build instance role/profile, service execution
-  role, AMI-publish role). IAM lives here so the operator policy can
-  `iam:PassRole` those roles without a circular dependency.
+   once per account by `provision-account` with admin credentials. It owns the
+   project IAM user, the single project-scoped `${ProjectName}-operator`
+   managed policy, the max-permissions `${ProjectName}-boundary` policy, the EC2
+   instance role/profile launched instances assume, and every Image Builder role
+   (build instance role/profile, service execution role, AMI-publish role). IAM
+   lives here so the operator policy can `iam:PassRole` those roles without a
+   circular dependency.
 * **`deploy/aws/strimserver-infra.yaml`** — regional resources, deployed by
   `deploy-infra` as the `[strimserver]` identity: the security group, optional
   VPC/subnet/networking, the baked-AMI Image Builder component/recipe/
@@ -372,16 +373,34 @@ operator/infra convention:
 
 The operator policy is a single managed policy because CloudFormation cannot
 reliably manage two `AWS::IAM::ManagedPolicy` resources attached to the same
-user. It grants only the inventoried operator surface: S3 read/write and
-object-ACL on the deployment bucket (when `DeploymentBucketName` is set), EC2
-describe (including `DescribeImages` for the check-deps DLAMI metadata
-resolver)/run/terminate plus `CreateTags`, the scoped CloudFormation deploy
-lifecycle and reads on `stack/strimserver/*`, both DLAMI SSM parameters
-(`ssm:GetParameter` on the x86_64 and arm64 families, so the check-deps AMI
-resolver can float the arm64 AMI in any region where it exists), self access-key
-rotation, the Image Builder pipeline trigger + reads, and `iam:PassRole` on the
-operator-owned roles. It carries no account-wide IAM administration and no
-DNS-zone access.
+user. Every ARN and resource name derives from `${ProjectName}`, and resource
+ARNs use a region wildcard (`arn:aws:…:*:…`) because the operator identity is
+account-global and may drive more than one region. The policy grants only the
+inventoried operator surface:
+
+* S3 read/write and object-ACL on the deployment bucket (when
+  `DeploymentBucketName` is set);
+* EC2 describe (including `DescribeImages` for the check-deps DLAMI metadata
+  resolver, and `DescribeVpcs`/`DescribeInternetGateways`/`DescribeRouteTables`
+  for the network lifecycle), run/terminate, tag-on-create (`CreateTags`/
+  `DeleteTags` bound to `ec2:CreateAction = RunInstances`), and the scoped
+  self-contained VPC lifecycle (VPC/subnet/IGW/route-table/security-group,
+  including CloudFormation's unconditioned `CreateTags`/`DeleteTags`);
+* the scoped CloudFormation deploy lifecycle and reads on
+  `stack/${ProjectName}/*`, **including `DeleteStack`** so the operator can
+  recover its own `ROLLBACK_COMPLETE` stack, plus `GetTemplateSummary` on `*`
+  (the action has no resource-level support);
+* both DLAMI SSM parameters, so the check-deps AMI resolver can float the arm64
+  AMI in any region where it exists;
+* self access-key rotation, the Image Builder pipeline trigger + reads, the
+  Image Builder component/recipe/infrastructure/distribution/pipeline lifecycle,
+  the baked-AMI EventBridge rule and SSM automation document lifecycle, and
+  `iam:PassRole` on the operator-owned roles.
+
+It carries no account-wide IAM administration and no DNS-zone access. The
+instance role also carries the `${ProjectName}-boundary` permissions boundary
+(the SSM agent action set plus project-scoped SSM/S3 reads), so an inline policy
+added later cannot lift its effective permissions above that ceiling.
 
 Deploy in two steps. `provision-account` is the only admin-run script: it
 deploys the operator stack, mints the service account's access key into the
@@ -394,12 +413,21 @@ identity; it never rotates a key:
 # 1. Once, as an AWS administrator (ambient credentials, no --profile):
 deploy/aws/provision-account --yes
 
-# 2. As [strimserver]: CreateNetwork=true, EnableExperimentalSsh=true,
-#    IngestCidr=OperatorCidr.
+# 2. As [strimserver]: only override what you need.
 OPERATOR_CIDR="203.0.113.4/32" \
-S3_BUCKET_NAME="" \
 deploy/aws/deploy-infra
 ```
+
+`deploy-infra` follows the movienight parameter philosophy: **the template
+Defaults are authoritative.** It passes only the parameters you explicitly set
+through the environment (`OPERATOR_CIDR`, `S3_BUCKET_NAME`, `VPC_ID`,
+`NVIDIA_DRIVER_FLOOR`, `CREATE_NETWORK`, `ENABLE_EXPERIMENTAL_SSH`) plus
+`ProjectName`; everything else is omitted. There is no describe-stacks
+live-parameter re-pass, so an update never silently pins a stale value — set a
+variable only when you actually want to change it. On first create,
+`OPERATOR_CIDR` is required (the template has no default), and the stack name
+must equal the project name because the operator policy scopes its ARNs to it.
+The deploy runs under a 900-second `timeout` (`CFN_DEPLOY_TIMEOUT`).
 
 ### Migrating an existing single-template `strimserver` stack
 
@@ -444,6 +472,17 @@ to the split with this one-time sequence:
 
    This recreates the network/security group and the Image Builder pipeline.
 
+   **Recovery alternative:** the operator now holds `cloudformation:DeleteStack`
+   scoped to `stack/${ProjectName}/*`. If a first create fails and leaves the
+   stack in `ROLLBACK_COMPLETE` (which cannot be updated in place), the operator
+   identity itself can delete it and re-run `deploy-infra`:
+
+   ```sh
+   aws --profile strimserver cloudformation delete-stack --stack-name strimserver
+   aws --profile strimserver cloudformation wait stack-delete-complete --stack-name strimserver
+   OPERATOR_CIDR="203.0.113.4/32" deploy/aws/deploy-infra
+   ```
+
 | Parameter | Default | Notes |
 |---|---|---|
 | `OperatorCidr` | required | CIDR allowed to reach SSH (22) and the controller HTTP/WebSocket port; use your IP as a `/32` |
@@ -451,15 +490,21 @@ to the split with this one-time sequence:
 | `SrtPort` | `9000` | SRT ingest UDP port; must match `STRIMSERVER_SRT_PORT` |
 | `IngestCidr` | `0.0.0.0/0` | SRT is passphrase-encrypted; tighten to the encoder IP if static |
 | `CreateNetwork` / `VpcId` | `false` / `""` | `true` creates a dedicated VPC + public subnet; otherwise supply an existing `VpcId` |
+| `AvailabilityZone` | `""` (first AZ) | AZ for the created public subnet; empty selects `!Select [0, !GetAZs ""]` |
 | `DeploymentBucketName` | `""` | Set only when the bundle is delivered via `s3://` |
 | `EnableExperimentalSsh` / `ExperimentalSshPort` | `false` / `2222` | Open the experimental OpenSSH port to `OperatorCidr` |
 
-Every strimserver tool that talks to AWS (`deploy-infra` excepted — it is
-admin-run) selects this account through the `[strimserver]` profile by pinning
+The row Defaults above are authoritative: `deploy-infra` never re-passes a live
+value you did not set, so changing a template Default and re-deploying takes
+effect for every parameter you have not overridden.
+
+Every strimserver tool that talks to AWS — including `deploy-infra` — selects
+this account through the `[strimserver]` profile by pinning
 `--profile "${AWS_PROFILE:-strimserver}"`, and refuses to run unless
-`aws sts get-caller-identity` reports an ARN ending `:user/strimserver` (the
-identity guard). Set `AWS_PROFILE` to point at a different profile only when
-that profile is also the strimserver operator.
+`aws sts get-caller-identity` reports an ARN ending `:user/<ProjectName>` (the
+identity guard; `<ProjectName>` defaults to `strimserver`). Set `AWS_PROFILE` to
+point at a different profile only when that profile is also the strimserver
+operator.
 
 `KEY_NAME` (the EC2 key pair) is **not** a stack parameter — it is set in
 `deploy/aws/.env` and consumed by `launch`.
