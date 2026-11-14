@@ -198,20 +198,21 @@ Resources:
           #
           # The region segment is wildcarded (movienight parity): the operator
           # identity is account-global and may drive more than one region.
+          # The read surface is the ec2:Describe* wildcard, not an enumerated
+          # list: CloudFormation EC2 resource handlers issue assorted Describe*
+          # calls under the caller's identity (ManagedSubnet needs
+          # ec2:DescribeAvailabilityZones; reads vary per attempt), so
+          # enumeration kept missing them. Read-only surface; EC2 Describe
+          # actions have no resource-level support, so Resource stays "*".
+          #
+          # This grant also covers ec2:DescribeImages, which backs the
+          # check-deps DLAMI metadata resolver reading Images[0].[Name,
+          # CreationDate], and the VPC/IGW/route-table reads that back the infra
+          # stack's self-contained network.
           - Sid: Ec2Describe
             Effect: Allow
             Action:
-              - ec2:DescribeInstances
-              - ec2:DescribeSecurityGroups
-              - ec2:DescribeSubnets
-              # ec2:DescribeImages also backs the check-deps DLAMI metadata
-              # resolver, which reads Images[0].[Name,CreationDate].
-              - ec2:DescribeImages
-              # VPC/IGW/route-table reads back the infra stack's self-contained
-              # network (and the network-lifecycle deploy).
-              - ec2:DescribeVpcs
-              - ec2:DescribeInternetGateways
-              - ec2:DescribeRouteTables
+              - ec2:Describe*
             Resource: "*"
           # ec2:RunInstances is authorized against EVERY resource the request
           # references (the instance, its root volume, the network interface, the

@@ -146,8 +146,8 @@ check "standalone DLAMI read policy resource is gone (StrimserverDlamiReadPolicy
   bash -c '! grep -Fq "StrimserverDlamiReadPolicy:" "$1"' _ "$operator_template"
 check "operator policy covers both x86_64 + arm64 DLAMI SSM params" \
   bash -c 'grep -Fq "deeplearning/ami/x86_64/" <<<"$1" && grep -Fq "deeplearning/ami/arm64/" <<<"$1"' _ "$operator_policy"
-check "operator policy grants ec2:DescribeImages (check-deps DLAMI metadata)" \
-  bash -c 'grep -Fq "ec2:DescribeImages" <<<"$1"' _ "$operator_policy"
+check "operator policy grants ec2:Describe* (covers check-deps DLAMI metadata)" \
+  bash -c 'grep -Fq "ec2:Describe*" <<<"$1"' _ "$operator_policy"
 check "operator policy covers the ProjectName-derived baked-AMI SSM parameter" \
   bash -c 'grep -Fq "parameter/\${ProjectName}/ami/baked/latest" <<<"$1"' _ "$operator_policy"
 check "exactly ONE managed policy attaches to the user (Users: appears once)" \
@@ -176,8 +176,7 @@ check "operator policy has no bare clip-chomping '>' Description" \
 for action in \
   s3:ListBucket s3:GetBucketLocation s3:GetBucketPolicy s3:PutBucketPolicy \
   s3:GetObject s3:PutObject s3:PutObjectAcl s3:DeleteObject \
-  ec2:DescribeInstances ec2:DescribeSecurityGroups ec2:DescribeSubnets \
-  ec2:DescribeImages \
+  'ec2:Describe*' \
   ec2:RunInstances ec2:TerminateInstances ec2:CreateTags \
   cloudformation:DescribeStacks \
   ssm:GetParameter \
@@ -266,6 +265,8 @@ check "VPC lifecycle scopes the network resource types with a region wildcard" \
   bash -c 'for r in "vpc/*" "subnet/*" "internet-gateway/*" "route-table/*" "security-group/*"; do grep -Fq "$r" <<<"$1" || exit 1; done; grep -Fq "arn:aws:ec2:*:\${AWS::AccountId}:" <<<"$1"' _ "$vpc_stmt"
 check "VPC lifecycle CreateTags/DeleteTags stay UNCONDITIONED (CFN reserved keys)" \
   bash -c '! grep -Fq "aws:TagKeys" <<<"$1" && ! grep -Fq "ec2:CreateAction" <<<"$1"' _ "$vpc_stmt"
+check "VPC lifecycle keeps its enumerated create/delete actions (no Describe wildcard)" \
+  bash -c 'for a in CreateVpc DeleteVpc CreateSubnet DeleteSubnet CreateSecurityGroup DeleteSecurityGroup; do grep -Fq "ec2:$a" <<<"$1" || exit 1; done; ! grep -Fq "ec2:Describe*" <<<"$1"' _ "$vpc_stmt"
 
 # --- least privilege: no unused admin grants ---------------------------------
 for action in \
@@ -331,11 +332,23 @@ check "CreateTags aws:TagKeys allowlist is exactly the launch keys (Project, Nam
   bash -c 'grep -Fq -- "- Project" <<<"$1" && grep -Fq -- "- Name" <<<"$1"' _ "$tags_stmt"
 
 check "Describe statement exists" \
-  bash -c 'grep -Fq "ec2:DescribeInstances" <<<"$1"' _ "$describe_stmt"
-check "Describe statement includes the VPC network lookup actions" \
-  bash -c 'for a in DescribeVpcs DescribeInternetGateways DescribeRouteTables; do grep -Fq "ec2:$a" <<<"$1" || exit 1; done' _ "$describe_stmt"
+  bash -c 'grep -Fq "ec2:Describe*" <<<"$1"' _ "$describe_stmt"
+# CloudFormation EC2 handlers issue assorted Describe* calls under the caller's
+# identity (DescribeAvailabilityZones for subnets, etc.). Enumerating them has
+# missed handler reads twice, so the operator read surface is the wildcard; ec2
+# Describe actions have no resource-level support, hence Resource:"*".
+check "Describe statement grants the ec2:Describe* wildcard" \
+  bash -c 'grep -Fq "ec2:Describe*" <<<"$1"' _ "$describe_stmt"
+check "Describe statement no longer enumerates individual ec2 Describe actions" \
+  bash -c '! grep -Eq -- "- ec2:Describe[A-Za-z]+$" <<<"$1"' _ "$describe_stmt"
 check "Describe statement stays Resource \"*\" and unconditioned" \
   bash -c 'grep -Fq "Resource: \"*\"" <<<"$1" && ! grep -Fq "aws:RequestTag" <<<"$1" && ! grep -Fq "aws:ResourceTag" <<<"$1"' _ "$describe_stmt"
+
+# The build-instance role's EC2 list (the identity the permissions boundary is
+# derived from) stays enumerated: it is a separate, least-privilege surface from
+# the operator user's handler-driven reads.
+check "build-instance/permissions-boundary EC2 describe list stays enumerated" \
+  bash -c 'for a in DescribeInstances DescribeImages DescribeInstanceStatus DescribeInstanceTypes DescribeSubnets DescribeSecurityGroups DescribeVpcs; do grep -Fq -- "- ec2:$a" "$1" || exit 1; done' _ "$operator_template"
 
 check "the old unscoped Ec2LaunchTerminate statement is gone" \
   bash -c '! grep -Fq "Ec2LaunchTerminate" "$1"' _ "$operator_template"
