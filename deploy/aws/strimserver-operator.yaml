@@ -377,18 +377,20 @@ Resources:
             Action:
               - imagebuilder:StartImagePipelineExecution
             Resource: !Sub "arn:aws:imagebuilder:*:${AWS::AccountId}:image-pipeline/${ProjectName}-baked"
-          # Read/watch surface for a rebuild. Image Builder list actions do not
-          # support resource-level permissions, so those stay Resource:"*".
+          # Read/watch surface for rebuilds AND the CloudFormation resource
+          # handlers. When CFN creates/updates an Image Builder resource it
+          # reads the referenced resources (e.g. GetComponent on the base
+          # component while creating an ImageRecipe) under THIS caller's
+          # identity, not the execution role. Enumerated reads kept missing
+          # those handler calls, so the read surface is the Get*/List* pair on
+          # the account's Image Builder ARNs (region-wild, matching the
+          # lifecycle statement below).
           - Sid: ImageBuilderRead
             Effect: Allow
             Action:
-              - imagebuilder:GetImagePipeline
-              - imagebuilder:GetImage
-              - imagebuilder:GetImageRecipe
-              - imagebuilder:ListImagePipelines
-              - imagebuilder:ListImages
-              - imagebuilder:ListImageBuildVersions
-            Resource: "*"
+              - imagebuilder:Get*
+              - imagebuilder:List*
+            Resource: !Sub "arn:aws:imagebuilder:*:${AWS::AccountId}:*"
           # D.3: the infra stack creates and updates the Image Builder
           # component/recipe/infrastructure/distribution/pipeline as this
           # identity. Scoped to the account's Image Builder ARNs, region-wild.

@@ -226,8 +226,14 @@ check "ImageBuilder rebuild statement triggers the BakedImagePipeline" \
   bash -c 'grep -Fq "imagebuilder:StartImagePipelineExecution" <<<"$1"' _ "$ib_rebuild_stmt"
 check "ImageBuilder rebuild is scoped to the ProjectName pipeline ARN" \
   bash -c 'grep -Fq "image-pipeline/\${ProjectName}-baked" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$ib_rebuild_stmt"
-check "ImageBuilder read statement covers the rebuild-watch surface" \
-  bash -c 'for a in GetImagePipeline ListImagePipelines GetImage ListImages GetImageRecipe; do grep -Fq "imagebuilder:$a" <<<"$1" || exit 1; done' _ "$ib_read_stmt"
+# CloudFormation's ImageBuilder resource handlers perform read calls
+# (GetComponent while creating an ImageRecipe, etc.) under the caller's
+# identity; enumerated reads kept missing them. The read surface is the
+# Get*/List* wildcard pair, scoped to the account's imagebuilder ARNs.
+check "ImageBuilder read statement grants imagebuilder:Get*/List* wildcards" \
+  bash -c 'grep -Fq "imagebuilder:Get*" <<<"$1" && grep -Fq "imagebuilder:List*" <<<"$1"' _ "$ib_read_stmt"
+check "ImageBuilder read statement is scoped to the account's imagebuilder ARN" \
+  bash -c 'grep -Fq "arn:aws:imagebuilder:*:\${AWS::AccountId}:" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$ib_read_stmt"
 
 # --- D.3: Image Builder / Events / SSM document lifecycle --------------------
 check "Image Builder lifecycle statement covers Component CRUD" \
@@ -240,6 +246,8 @@ check "Image Builder lifecycle grants TagResource/UntagResource (CFN tags on cre
   bash -c 'for a in TagResource UntagResource; do grep -Fq "imagebuilder:$a" <<<"$1" || exit 1; done' _ "$ib_lifecycle_stmt"
 check "Image Builder TagResource/UntagResource stay on the imagebuilder ARN scope" \
   bash -c 'grep -Fq "arn:aws:imagebuilder:*:\${AWS::AccountId}:" <<<"$1"' _ "$ib_lifecycle_stmt"
+check "Image Builder lifecycle keeps its enumerated Create/Delete/Tag actions" \
+  bash -c 'for a in CreateComponent DeleteComponent CreateImageRecipe DeleteImageRecipe CreateImagePipeline DeleteImagePipeline TagResource UntagResource; do grep -Fq "imagebuilder:$a" <<<"$1" || exit 1; done' _ "$ib_lifecycle_stmt"
 check "Events lifecycle is scoped to the baked-AMI publish rule" \
   bash -c 'for a in PutRule PutTargets RemoveTargets DeleteRule DescribeRule ListTargetsByRule EnableRule DisableRule; do grep -Fq "events:$a" <<<"$1" || exit 1; done; grep -Fq "rule/\${ProjectName}-baked-ami-publish" <<<"$1"' _ "$events_stmt"
 check "Events rule scope still matches the deterministic publish rule name" \
