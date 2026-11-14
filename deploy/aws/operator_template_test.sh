@@ -121,6 +121,41 @@ for action in \
     bash -c 'grep -Fq -- "$2" <<<"$1"' _ "$operator_policy" "$action"
 done
 
+# --- deploy-infra + AMI-rebuild surface the operator now owns -----------------
+# deploy-infra is no longer admin-run: the same [strimserver] operator runs the
+# stack deploy and watches an Image Builder rebuild, so the policy must cover
+# the CloudFormation deploy lifecycle (scoped to this stack), iam:PassRole for
+# the roles the template wires, the Image Builder pipeline trigger + reads, and
+# ec2:DescribeImages (already covered above for the check-deps drift gate).
+cfn_deploy_stmt="$(extract_statement CloudFormationDeployStack)"
+cfn_validate_stmt="$(extract_statement CloudFormationValidateTemplate)"
+cfn_read_stmt="$(extract_statement CloudFormationReadStack)"
+pass_ib_stmt="$(extract_statement PassImageBuilderRoles)"
+ib_rebuild_stmt="$(extract_statement ImageBuilderRebuild)"
+ib_read_stmt="$(extract_statement ImageBuilderRead)"
+
+check "CloudFormation deploy statement exists" \
+  bash -c 'grep -Fq "cloudformation:CreateStack" <<<"$1" && grep -Fq "cloudformation:UpdateStack" <<<"$1"' _ "$cfn_deploy_stmt"
+check "CloudFormation deploy is scoped to stack/strimserver/*" \
+  bash -c 'grep -Fq "stack/strimserver/*" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$cfn_deploy_stmt"
+check "CloudFormation deploy carries the change-set actions aws deploy needs" \
+  bash -c 'for a in CreateChangeSet DescribeChangeSet ExecuteChangeSet DeleteChangeSet; do grep -Fq "cloudformation:$a" <<<"$1" || exit 1; done' _ "$cfn_deploy_stmt"
+check "CloudFormation ValidateTemplate is granted on Resource \"*\"" \
+  bash -c 'grep -Fq "cloudformation:ValidateTemplate" <<<"$1" && grep -Fq "Resource: \"*\"" <<<"$1"' _ "$cfn_validate_stmt"
+check "CloudFormation read statement covers DescribeStacks/DescribeStackEvents/GetTemplate" \
+  bash -c 'for a in DescribeStacks DescribeStackEvents GetTemplate; do grep -Fq "cloudformation:$a" <<<"$1" || exit 1; done' _ "$cfn_read_stmt"
+check "the operator policy grants no DeleteStack (deploy does not need it)" \
+  bash -c '! grep -Fq "cloudformation:DeleteStack" <<<"$1"' _ "$operator_policy"
+
+check "iam:PassRole covers both Image Builder roles" \
+  bash -c 'grep -Fq "iam:PassRole" <<<"$1" && grep -Fq "BakedImageBuilderInstanceRole" <<<"$1" && grep -Fq "BakedImageBuilderExecutionRole" <<<"$1"' _ "$pass_ib_stmt"
+check "ImageBuilder rebuild statement triggers the BakedImagePipeline" \
+  bash -c 'grep -Fq "imagebuilder:StartPipelineExecution" <<<"$1"' _ "$ib_rebuild_stmt"
+check "ImageBuilder rebuild is scoped to the pipeline ARN" \
+  bash -c 'grep -Fq "image-pipeline/strimserver-baked" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$ib_rebuild_stmt"
+check "ImageBuilder read statement covers the rebuild-watch surface" \
+  bash -c 'for a in GetImagePipeline ListImagePipelines GetImage ListImages GetImageRecipe; do grep -Fq "imagebuilder:$a" <<<"$1" || exit 1; done' _ "$ib_read_stmt"
+
 # --- least privilege: no unused admin grants ---------------------------------
 # StackIamManagement (C1) granted account-wide IAM administration the operator
 # never uses (deploy-infra is admin-run). None of these may reappear.

@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # deploy_infra_test.sh -- drive deploy/aws/deploy-infra against the fake aws.
 #
-# Asserts decision 11b behaviour: the script keeps the stack deploy admin-run
-# but writes the service-account key to a `[strimserver]` profile (NOT
-# `[default]`), takes a timestamped backup of the credentials file, writes the
-# profile's region into ~/.aws/config, ROTATES create-before-delete (a failed
-# create must leave the old key intact), and asserts the minted identity via
-# `aws sts get-caller-identity` showing `:user/strimserver`.
+# deploy-infra is now the PROFILE-RUN stack deploy (provision-account owns the
+# admin bootstrap and key rotation). These assertions pin:
+#   * it requires the [strimserver] identity (default AWS_PROFILE=strimserver,
+#     --profile override) and never rotates an access key;
+#   * an existing stack's live parameters are re-passed verbatim, so a
+#     `cloudformation deploy` cannot silently reset an unspecified parameter to
+#     its template default;
+#   * explicit OPERATOR_CIDR / S3_BUCKET_NAME / NVIDIA_DRIVER_FLOOR overrides win;
+#   * a first create uses env values / template defaults;
+#   * post-deploy NvidiaDriverFloor must equal lib/nvidia.sh's floor (fail loud
+#     on drift) and the BakedImagePipeline must exist.
+#
+# The structural baked-AMI assertions at the bottom are retained from the old
+# suite.
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,134 +36,181 @@ check() {
 }
 
 fake_aws_install
-trap fake_aws_cleanup EXIT
 
-home="$(mktemp -d)"
-mkdir -p "$home/.aws"
-creds="$home/.aws/credentials"
-config="$home/.aws/config"
-printf '[default]\naws_access_key_id = OLDADMINKEY\naws_secret_access_key = OLDADMINSECRET\n\n[other]\naws_access_key_id = OTHERKEY\naws_secret_access_key = OTHERSECRET\n' >"$creds"
-printf '[default]\nregion = eu-west-1\n' >"$config"
+work="$(mktemp -d)"
+trap 'fake_aws_cleanup; rm -rf "$work"' EXIT
 
-# Two pre-existing service-account keys, so the run must rotate them.
-export FAKE_AWS_EXISTING_KEYS="OLDKEY1 OLDKEY2"
+nvidia_floor="$(sed -n 's/^NVIDIA_DRIVER_FLOOR="\(.*\)"$/\1/p' "$script_dir/lib/nvidia.sh" | head -n1)"
+[[ -n "$nvidia_floor" ]] || { echo "FAIL: could not read NVIDIA_DRIVER_FLOOR" >&2; exit 1; }
 
-# run_deploy [home] [creds]: drive deploy-infra against the fake aws. Defaults to
-# the primary fixture (used by the happy-path and identity-assertion cases); the
-# CRLF fixture passes its own home/creds so the two runs never share state.
+# run_deploy <state> <calls> <home> [args...]
+# EXTRA_ENV holds extra KEY=VALUE assignments for this invocation.
+EXTRA_ENV=()
 run_deploy() {
-  local run_home="${1:-$home}" run_creds="${2:-$creds}"
+  local state="$1" calls="$2" home="$3"; shift 3
   ( cd "$repo_root" && env -i \
-      PATH="$PATH" HOME="$run_home" \
-      AWS_SHARED_CREDENTIALS_FILE="$run_creds" \
-      OPERATOR_CIDR="203.0.113.4/32" S3_BUCKET_NAME="" \
-      FAKE_AWS_CALLS="$FAKE_AWS_CALLS" \
-      FAKE_AWS_BINDIR="$FAKE_AWS_BINDIR" \
-      FAKE_AWS_EXISTING_KEYS="$FAKE_AWS_EXISTING_KEYS" \
-      ${FAKE_AWS_STRIM_ARN:+FAKE_AWS_STRIM_ARN="$FAKE_AWS_STRIM_ARN"} \
-      bash "$deploy_infra" 2>&1 )
+      PATH="$PATH" HOME="$home" \
+      AWS_SHARED_CREDENTIALS_FILE="$home/.aws/credentials" \
+      AWS_CONFIG_FILE="$home/.aws/config" \
+      FAKE_AWS_STATE="$state" \
+      FAKE_AWS_CALLS="$calls" \
+      "${EXTRA_ENV[@]}" \
+      bash "$deploy_infra" "$@" )
 }
 
-# --- happy path ---------------------------------------------------------------
-output="$(run_deploy)"
+new_home() { # new_home <dir>: a fixture HOME with a pre-existing [default] profile
+  local dir="$1"
+  mkdir -p "$dir/.aws"
+  printf '[default]\naws_access_key_id = ADMINKEY\naws_secret_access_key = ADMINSECRET\n' >"$dir/.aws/credentials"
+  printf '[default]\nregion = eu-west-1\n' >"$dir/.aws/config"
+}
+
+# ---------------------------------------------------------------------------
+# Case 1 -- first create: profile identity, no key rotation, template defaults
+# ---------------------------------------------------------------------------
+h1="$work/h1"; new_home "$h1"; mkdir -p "$work/s1"
+creds_before="$(cat "$h1/.aws/credentials")"
+EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32 S3_BUCKET_NAME=bucket-1)
+run_deploy "$work/s1" "$work/c1" "$h1" >"$work/o1" 2>&1
 rc=$?
+EXTRA_ENV=()
 
-check "deploy-infra exits 0" test "$rc" -eq 0
-check "writes a [strimserver] profile" grep -Fq '[strimserver]' "$creds"
-check "writes the new access key id under [strimserver]" grep -Fq 'aws_access_key_id = AKIAFAKEFAKEFAKEFAKE' "$creds"
-check "writes the new secret under [strimserver]" grep -Fq 'aws_secret_access_key = wJalrFAKEsecret' "$creds"
-check "preserves the pre-existing [default] profile" grep -Fq 'OLDADMINKEY' "$creds"
-check "preserves an unrelated [other] profile" grep -Fq 'OTHERKEY' "$creds"
-check "new key is NOT written under [default]" bash -c '! awk "/^\[default\]/{p=1;next} /^\[/{p=0} p" "$1" | grep -Fq AKIAFAKEFAKEFAKEFAKE' _ "$creds"
-check "stdout/stderr advertise [strimserver], not [default]" bash -c 'grep -Fq "[strimserver]" <<<"$1" && ! grep -Fq "[default]" <<<"$1"' _ "$output"
-check "takes a timestamped credentials backup" bash -c 'ls "$1"/credentials.bak.* >/dev/null 2>&1' _ "$home/.aws"
-check "asserts identity via sts get-caller-identity --profile strimserver" \
-  bash -c 'grep -Fq -- "sts get-caller-identity" "$1" && grep -Fq -- "--profile strimserver" "$1"' _ "$FAKE_AWS_CALLS"
-check "rotates the service-account key (iam create-access-key)" grep -Fq 'iam create-access-key' "$FAKE_AWS_CALLS"
+check "first create exits 0" test "$rc" -eq 0
+deploy_line="$(grep -m1 'cloudformation deploy' "$work/c1" || true)"
+check "deploy runs as --profile strimserver" \
+  bash -c '[[ "$1" == *"--profile strimserver"* ]]' _ "$deploy_line"
+check "deploy uses the strimserver stack and named-IAM capability" \
+  bash -c '[[ "$1" == *"--stack-name strimserver"* && "$1" == *"--capabilities CAPABILITY_NAMED_IAM"* ]]' _ "$deploy_line"
+check "deploy passes the env operator CIDR to OperatorCidr and IngestCidr" \
+  bash -c '[[ "$1" == *OperatorCidr=203.0.113.4/32* && "$1" == *IngestCidr=203.0.113.4/32* ]]' _ "$deploy_line"
+check "deploy passes DeploymentBucketName" \
+  bash -c '[[ "$1" == *DeploymentBucketName=bucket-1* ]]' _ "$deploy_line"
+check "deploy always passes the lib floor as NvidiaDriverFloor" \
+  bash -c '[[ "$1" == *"NvidiaDriverFloor=$2"* ]]' _ "$deploy_line" "$nvidia_floor"
+check "first create does not force CreateNetwork/EnableExperimentalSsh" \
+  bash -c '[[ "$1" != *"CreateNetwork="* && "$1" != *"EnableExperimentalSsh="* ]]' _ "$deploy_line"
+check "no access key is created or deleted (rotation owns that)" \
+  bash -c '! grep -Eq "iam (create|delete)-access-key" "$1"' _ "$work/c1"
+check "the pre-existing credentials file is untouched" \
+  test "$(cat "$h1/.aws/credentials")" = "$creds_before"
+check "identity is asserted via the profile" \
+  bash -c 'grep -Eq -- "--profile strimserver .*sts get-caller-identity" "$1"' _ "$work/c1"
+check "post-deploy reads the stack status as CREATE_COMPLETE" \
+  bash -c 'grep -Fq "cloudformation describe-stacks" "$1" && grep -Fq "CREATE_COMPLETE" "$2"' _ "$work/c1" "$work/o1"
+check "post-deploy lists Image Builder pipelines" \
+  bash -c 'grep -Fq "imagebuilder list-image-pipelines" "$1"' _ "$work/c1"
 
-# --- m4: the profile's region is written to ~/.aws/config ---------------------
-check "writes [profile strimserver] to ~/.aws/config" grep -Fq '[profile strimserver]' "$config"
-check "writes region = us-east-2 to ~/.aws/config" grep -Fq 'region = us-east-2' "$config"
-check "preserves the pre-existing [default] config section verbatim" grep -Fq 'region = eu-west-1' "$config"
-check "takes a timestamped config backup" bash -c 'ls "$1"/config.bak.* >/dev/null 2>&1' _ "$home/.aws"
-
-# --- m2: create-before-delete rotation ---------------------------------------
-check "deletes the first superseded key (OLDKEY1)" grep -Fq -- '--access-key-id OLDKEY1' "$FAKE_AWS_CALLS"
-check "deletes the second superseded key (OLDKEY2)" grep -Fq -- '--access-key-id OLDKEY2' "$FAKE_AWS_CALLS"
-check "never deletes the freshly minted key" \
-  bash -c '! grep -Fq -- "--access-key-id AKIAFAKEFAKEFAKEFAKE" "$1"' _ "$FAKE_AWS_CALLS"
-create_line="$(grep -n 'iam create-access-key' "$FAKE_AWS_CALLS" | head -n1 | cut -d: -f1)"
-delete_line="$(grep -n 'iam delete-access-key' "$FAKE_AWS_CALLS" | head -n1 | cut -d: -f1)"
-check "creates the new key BEFORE deleting the old (create-before-delete)" \
-  bash -c '[ -n "$1" ] && [ -n "$2" ] && [ "$1" -lt "$2" ]' _ "${create_line:-}" "${delete_line:-}"
-
-# --- m3: a failed create must leave the old key(s) intact ---------------------
-# Intercept only `iam create-access-key` (return non-zero) and delegate every
-# other call to the shared fake, so the failure is isolated to key creation.
-fail_bindir="$(mktemp -d)"
-cat >"$fail_bindir/aws" <<'WRAP_EOF'
-#!/usr/bin/env bash
-case "$*" in
-  *"iam create-access-key"*)
-    printf '%s\n' "$*" >>"${FAKE_AWS_CALLS:-/dev/null}"
-    exit 1 ;;
-  *) exec "$FAKE_AWS_BINDIR/aws" "$@" ;;
-esac
-WRAP_EOF
-chmod +x "$fail_bindir/aws"
-
-creds_before="$(cat "$creds")"
-: >"$FAKE_AWS_CALLS"
-PATH="$fail_bindir:$PATH" run_deploy >/dev/null 2>&1
+# ---------------------------------------------------------------------------
+# Case 2 -- a non-strimserver identity is rejected before deploying
+# ---------------------------------------------------------------------------
+h2="$work/h2"; new_home "$h2"; mkdir -p "$work/s2"
+EXTRA_ENV=(OPERATOR_CIDR=203.0.113.4/32 FAKE_AWS_STRIM_ARN=arn:aws:iam::183438553939:user/admin)
+run_deploy "$work/s2" "$work/c2" "$h2" >"$work/o2" 2>&1
 rc=$?
-check "fails loud when create-access-key fails" test "$rc" -ne 0
-check "attempted the create that then failed" grep -Fq 'iam create-access-key' "$FAKE_AWS_CALLS"
-check "does NOT delete any key when create failed" \
-  bash -c '! grep -Fq "iam delete-access-key" "$1"' _ "$FAKE_AWS_CALLS"
-check "leaves the previous [strimserver] credentials intact" test "$(cat "$creds")" = "$creds_before"
-rm -rf "$fail_bindir"
+EXTRA_ENV=()
+check "wrong identity exits non-zero" test "$rc" -ne 0
+check "wrong identity names the expected :user/strimserver" grep -Fq -- ':user/strimserver' "$work/o2"
+check "no deploy runs under a wrong identity" \
+  bash -c '! grep -Fq "cloudformation deploy" "$1"' _ "$work/c2"
 
-# --- M1: a CRLF/padded [strimserver] header is replaced, not duplicated -------
-home_crlf="$(mktemp -d)"
-mkdir -p "$home_crlf/.aws"
-creds_crlf="$home_crlf/.aws/credentials"
-config_crlf="$home_crlf/.aws/config"
-# A Windows/WSL-style CRLF file whose [strimserver] header also carries trailing
-# spaces: both must be normalized before the header comparison, or the run
-# appends a second [strimserver] section instead of replacing the stale one.
-printf '[default]\r\naws_access_key_id = OLDADMINKEY\r\n\r\n[strimserver]  \r\naws_access_key_id = STALEKEY\r\naws_secret_access_key = STALESECRET\r\n\r\n[other]\r\naws_access_key_id = OTHERKEY\r\n' >"$creds_crlf"
-printf '[default]\r\nregion = eu-west-1\r\n' >"$config_crlf"
+# ---------------------------------------------------------------------------
+# Live-parameter fixture: an existing stack with non-default values.
+# ---------------------------------------------------------------------------
+write_live_stack() { # write_live_stack <state> <floor>
+  mkdir -p "$1"
+  cat >"$1/stack-params" <<EOF
+CreateNetwork=false
+OperatorCidr=198.51.100.7/32
+IngestCidr=0.0.0.0/0
+EnableExperimentalSsh=true
+EnableSessionManager=false
+VpcId=vpc-abc123
+VpcCidr=10.9.0.0/16
+SubnetCidr=10.9.1.0/24
+ControllerPort=4100
+SrtPort=9100
+DeploymentBucketName=live-bucket
+ExperimentalSshPort=2200
+NvidiaDriverFloor=$2
+NvidiaFloorMachineryUrl=https://example.test/nvidia.sh
+OpensshExperimentalRpmUrl=https://example.test/openssh.rpm
+EOF
+  printf 'UPDATE_COMPLETE' >"$1/stack-status"
+}
 
-run_deploy "$home_crlf" "$creds_crlf" >/dev/null 2>&1
+# ---------------------------------------------------------------------------
+# Case 3 -- live parameters are re-passed verbatim (not reset to defaults)
+# ---------------------------------------------------------------------------
+h3="$work/h3"; new_home "$h3"; mkdir -p "$work/s3"
+write_live_stack "$work/s3" "$nvidia_floor"
+run_deploy "$work/s3" "$work/c3" "$h3" >"$work/o3" 2>&1
 rc=$?
-strim_sections="$(awk '
-  /^\[/ { l = $0; sub(/\r+$/, "", l); sub(/[[:space:]]+$/, "", l); if (l == "[strimserver]") n++ }
-  END { print n + 0 }
-' "$creds_crlf")"
-check "CRLF fixture run exits 0" test "$rc" -eq 0
-check "CRLF: exactly one [strimserver] section survives" test "$strim_sections" = 1
-check "CRLF: the stale key is gone" bash -c '! grep -Fq STALEKEY "$1"' _ "$creds_crlf"
-check "CRLF: the new key is written" grep -Fq 'AKIAFAKEFAKEFAKEFAKE' "$creds_crlf"
-check "CRLF: unrelated [other] profile preserved" grep -Fq 'OTHERKEY' "$creds_crlf"
+check "live-stack update exits 0" test "$rc" -eq 0
+deploy3="$(grep -m1 'cloudformation deploy' "$work/c3" || true)"
+for expected in \
+  CreateNetwork=false OperatorCidr=198.51.100.7/32 IngestCidr=0.0.0.0/0 \
+  EnableExperimentalSsh=true EnableSessionManager=false VpcId=vpc-abc123 \
+  VpcCidr=10.9.0.0/16 SubnetCidr=10.9.1.0/24 ControllerPort=4100 SrtPort=9100 \
+  DeploymentBucketName=live-bucket ExperimentalSshPort=2200 \
+  NvidiaFloorMachineryUrl=https://example.test/nvidia.sh \
+  OpensshExperimentalRpmUrl=https://example.test/openssh.rpm; do
+  check "live parameter is re-passed: $expected" \
+    bash -c '[[ "$1" == *"$2"* ]]' _ "$deploy3" "$expected"
+done
+check "a live non-default port is not reset to the template default (4100 != 4000)" \
+  bash -c '[[ "$1" == *"ControllerPort=4100"* && "$1" != *"ControllerPort=4000"* ]]' _ "$deploy3"
+check "post-deploy sees UPDATE_COMPLETE" grep -Fq 'UPDATE_COMPLETE' "$work/o3"
 
-# --- identity assertion rejects a wrong identity ------------------------------
-FAKE_AWS_STRIM_ARN="arn:aws:iam::999999999999:user/not-strimserver"
-export FAKE_AWS_STRIM_ARN
-run_deploy >/dev/null 2>&1
+# ---------------------------------------------------------------------------
+# Case 4 -- explicit overrides win; everything else stays live
+# ---------------------------------------------------------------------------
+h4="$work/h4"; new_home "$h4"; mkdir -p "$work/s4"
+write_live_stack "$work/s4" "$nvidia_floor"
+EXTRA_ENV=(OPERATOR_CIDR=203.0.113.9/32 S3_BUCKET_NAME=new-bucket CREATE_NETWORK=true)
+run_deploy "$work/s4" "$work/c4" "$h4" >"$work/o4" 2>&1
 rc=$?
-check "fails loud when the minted identity is not :user/strimserver" test "$rc" -ne 0
+EXTRA_ENV=()
+check "override run exits 0" test "$rc" -eq 0
+deploy4="$(grep -m1 'cloudformation deploy' "$work/c4" || true)"
+check "OPERATOR_CIDR overrides both CIDR parameters" \
+  bash -c '[[ "$1" == *OperatorCidr=203.0.113.9/32* && "$1" == *IngestCidr=203.0.113.9/32* ]]' _ "$deploy4"
+check "S3_BUCKET_NAME overrides DeploymentBucketName" \
+  bash -c '[[ "$1" == *DeploymentBucketName=new-bucket* ]]' _ "$deploy4"
+check "CREATE_NETWORK overrides the live CreateNetwork" \
+  bash -c '[[ "$1" == *CreateNetwork=true* ]]' _ "$deploy4"
+check "un-overridden live parameters survive the update" \
+  bash -c '[[ "$1" == *ControllerPort=4100* && "$1" == *VpcId=vpc-abc123* && "$1" == *EnableExperimentalSsh=true* ]]' _ "$deploy4"
 
-# --- Baked-AMI EC2 Image Builder stack (structural) ---------------------------
-# The durable stack must define the whole baked-AMI build in-template: a build
-# component that invariantly re-applies the repo's NVIDIA floor machinery plus
-# htop / the bundled openssh RPM / the canonical containerd root+state config /
-# enabled nvidia-persistenced, an ImageRecipe pinned to the DLAMI that tags the
-# driver floor, us-east-2-only distribution, a manually-triggered pipeline, and
-# publication of the produced AMI id to /strimserver/ami/baked/latest.
+# ---------------------------------------------------------------------------
+# Case 5 -- NvidiaDriverFloor drift from lib/nvidia.sh fails loud
+# ---------------------------------------------------------------------------
+h5="$work/h5"; new_home "$h5"; mkdir -p "$work/s5"
+write_live_stack "$work/s5" "$nvidia_floor"
+EXTRA_ENV=(FAKE_AWS_DESCRIBE_FLOOR=999.0.0)
+run_deploy "$work/s5" "$work/c5" "$h5" >"$work/o5" 2>&1
+rc=$?
+EXTRA_ENV=()
+check "NvidiaDriverFloor drift exits non-zero" test "$rc" -ne 0
+check "drift message names NvidiaDriverFloor and the lib floor" \
+  bash -c 'grep -Fiq "NvidiaDriverFloor" "$1" && grep -Fq "$2" "$1"' _ "$work/o5" "$nvidia_floor"
+
+# ---------------------------------------------------------------------------
+# Case 6 -- the BakedImagePipeline must exist after deploy
+# ---------------------------------------------------------------------------
+h6="$work/h6"; new_home "$h6"; mkdir -p "$work/s6"
+write_live_stack "$work/s6" "$nvidia_floor"
+EXTRA_ENV=(FAKE_AWS_NO_PIPELINE=1)
+run_deploy "$work/s6" "$work/c6" "$h6" >"$work/o6" 2>&1
+rc=$?
+EXTRA_ENV=()
+check "a missing BakedImagePipeline exits non-zero" test "$rc" -ne 0
+check "missing-pipeline message names BakedImagePipeline" grep -Fq 'BakedImagePipeline' "$work/o6"
+
+# ---------------------------------------------------------------------------
+# Structural baked-AMI assertions (retained from the old suite)
+# ---------------------------------------------------------------------------
 infra_template="$script_dir/strimserver-infra.yaml"
-nvidia_floor="$(sed -n 's/^NVIDIA_DRIVER_FLOOR="\(.*\)"$/\1/p' "$script_dir/lib/nvidia.sh" | head -n1)"
 
-# extract_resource <Name>: print the YAML block for a top-level (2-space) resource.
 extract_template_resource() {
   awk -v name="$1" '
     $0 ~ "^  " name ":" {p=1; print; next}
@@ -165,7 +220,6 @@ extract_template_resource() {
 }
 
 check "infra template exists" test -f "$infra_template"
-check "reads NVIDIA_DRIVER_FLOOR from lib/nvidia.sh (single source of truth)" test -n "$nvidia_floor"
 check "NvidiaDriverFloor parameter default equals the repo floor" \
   bash -c 'grep -A4 "^  NvidiaDriverFloor:" "$1" | grep -Fq "Default: \"$2\""' _ "$infra_template" "$nvidia_floor"
 
@@ -223,7 +277,7 @@ check "an SSM automation document writes the baked AMI id (PutParameter)" \
   bash -c 'grep -Fq "AWS::SSM::Document" "$1" && grep -Fq "PutParameter" "$1"' _ "$infra_template"
 
 if [[ "$failures" -eq 0 ]]; then
-  echo "PASS: deploy-infra operator-profile behaviour OK"
+  echo "PASS: deploy-infra profile-run behaviour OK"
   exit 0
 fi
 echo "FAILED: $failures assertion(s)" >&2

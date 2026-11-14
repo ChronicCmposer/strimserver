@@ -1,178 +1,250 @@
 #!/usr/bin/env bash
-# deploy-infra: deploy the strimserver durable CloudFormation stack, then
-# ensure the strimserver IAM service account has a usable access key and write
-# it to the project-scoped [strimserver] profile.
 #
-# RUN WITH YOUR OWN ADMINISTRATOR CREDENTIALS. Re-runnable but NOT idempotent:
-# the stack deploy is declarative (a no-op when nothing changed), while the
-# access-key step deliberately ROTATES to exactly one fresh key and rewrites the
-# [strimserver] section of the local ~/.aws/credentials each run (an IAM secret
-# can only be shown once). Each run, in order:
-#   1. creates the new key FIRST, so a failed create leaves the old key intact
-#      and the operator is never left with zero keys;
-#   2. writes the [strimserver] credentials + [profile strimserver] region
-#      (backed up first; every other profile is preserved verbatim);
-#   3. deletes the now-superseded old key(s); and
-#   4. asserts the new key authenticates as arn:...:user/strimserver.
-# All strimserver tooling then selects this profile via AWS_PROFILE (default
-# strimserver).
+# deploy/aws/deploy-infra -- deploy the strimserver durable CloudFormation stack
+# as the project-scoped [strimserver] service account.
+#
+# RUN MODEL
+#   Once, with an AWS administrator's ambient credentials:
+#     deploy/aws/provision-account
+#   It creates the stack, the scoped operator policy and the [strimserver]
+#   access key. Afterwards every operation -- this script and the launch tooling
+#   -- runs as that profile. deploy-infra NO LONGER uses admin credentials and
+#   NEVER rotates an access key (that lives in provision-account).
+#
+# WHY LIVE PARAMETERS ARE RE-PASSED
+#   `aws cloudformation deploy` treats any parameter omitted from
+#   --parameter-overrides as "reset to the template default". An update that only
+#   wanted to bump one value would silently clear VpcId, ports, the bucket, the
+#   Image Builder URLs, etc. When the stack already exists this script therefore
+#   reads every live parameter from describe-stacks and re-passes it verbatim,
+#   applying only explicit overrides:
+#     OPERATOR_CIDR        -> OperatorCidr + IngestCidr
+#     S3_BUCKET_NAME       -> DeploymentBucketName
+#     NVIDIA_DRIVER_FLOOR  -> NvidiaDriverFloor (must match lib/nvidia.sh)
+#     CREATE_NETWORK       -> CreateNetwork (explicit only; defaults to the live value)
+#     ENABLE_EXPERIMENTAL_SSH -> EnableExperimentalSsh (explicit only; defaults to live)
+#   On first create (no stack) it passes the env values and otherwise lets the
+#   template defaults apply (NvidiaDriverFloor is always pinned to lib/nvidia.sh).
+#
+# POST-DEPLOY CONTRACT
+#   * Stack status must be CREATE_COMPLETE or UPDATE_COMPLETE.
+#   * The live NvidiaDriverFloor parameter must equal NVIDIA_DRIVER_FLOOR from
+#     deploy/aws/lib/nvidia.sh. A floor bump that updates the library but not the
+#     stack (or a hand-edited parameter) fails loud here.
+#   * The BakedImagePipeline must exist, so a rebuild can be triggered.
+#
+# Usage:
+#   deploy/aws/deploy-infra [--stack-name S] [--region R] [--profile P]
+#
+# License: proprietary (see LICENSE). All rights reserved.
+
 set -euo pipefail
 
-# --- Env-driven tunables (empty = omit / use defaults) ------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE="${SCRIPT_DIR}/strimserver-infra.yaml"
+
+# NVIDIA_DRIVER_FLOOR is the canonical version-floor contract. Capture an
+# explicit env override before sourcing the library (which assigns the floor),
+# then always compare the deployed value against the library's floor.
+NVIDIA_DRIVER_FLOOR_OVERRIDE="${NVIDIA_DRIVER_FLOOR:-}"
+# shellcheck source=lib/nvidia.sh
+source "${SCRIPT_DIR}/lib/nvidia.sh"
+EXPECTED_FLOOR="$NVIDIA_DRIVER_FLOOR"
+
+STACK_NAME="${CFN_STACK_NAME:-strimserver}"
+REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-2}}"
+PROFILE="${AWS_PROFILE:-strimserver}"
 OPERATOR_CIDR="${OPERATOR_CIDR:-}"
 S3_BUCKET_NAME="${S3_BUCKET_NAME:-}"
-IAM_USER="${IAM_USER:-strimserver}"
-CFN_STACK_NAME="${CFN_STACK_NAME:-strimserver}"
-# The dedicated operator profile this script provisions. Honors an explicit
-# AWS_PROFILE (the variable every strimserver tooling script pins); defaults to
-# [strimserver]. Deliberately NOT exported: the stack deploy and key creation
-# run as the ambient ADMIN identity and must not be redirected to this profile.
-PROFILE="${AWS_PROFILE:-strimserver}"
-# ------------------------------------------------------------------------------
-
-command -v aws >/dev/null 2>&1 \
-  || { echo "deploy-infra: ERROR: aws CLI not found on PATH" >&2; exit 1; }
-aws sts get-caller-identity >/dev/null \
-  || { echo "deploy-infra: ERROR: not authenticated; configure AWS_PROFILE / credentials first" >&2; exit 1; }
+# Explicit network overlays are honored only when set; otherwise the live value
+# (or, on first create, the template default) is used.
+CREATE_NETWORK="${CREATE_NETWORK-}"
+ENABLE_EXPERIMENTAL_SSH="${ENABLE_EXPERIMENTAL_SSH-}"
+PIPELINE_NAME="strimserver-baked"
 
 log() { printf 'deploy-infra: %s\n' "$*" >&2; }
+die() { printf 'deploy-infra: ERROR: %s\n' "$*" >&2; exit 1; }
 
-# backup_file <file>: timestamped copy, only when the file exists.
-backup_file() {
-  local file="$1" stamp
-  [ -f "$file" ] || return 0
-  stamp="$(date +%Y%m%d%H%M%S)"
-  cp -p "$file" "${file}.bak.${stamp}"
-  log "backed up $file -> ${file}.bak.${stamp}"
+usage() {
+  cat <<'EOF'
+Usage: deploy/aws/deploy-infra [options]
+
+Deploys the strimserver stack as the [strimserver] service account. Run
+deploy/aws/provision-account once (with admin credentials) first.
+
+Options:
+  --stack-name S   CloudFormation stack name (default: strimserver)
+  --region R       AWS region (default: us-east-2)
+  --profile P      AWS profile (default: $AWS_PROFILE, else strimserver)
+  -h, --help       show this help
+
+Overrides (environment): OPERATOR_CIDR, S3_BUCKET_NAME, NVIDIA_DRIVER_FLOOR,
+CREATE_NETWORK, ENABLE_EXPERIMENTAL_SSH. Existing stack parameters are otherwise
+preserved verbatim.
+EOF
 }
 
-# upsert_ini_section <file> <header> <body>: replace the named INI section (its
-# header through the next header), preserving every other section verbatim.
-upsert_ini_section() {
-  local file="$1" header="$2" body="$3" tmp
-  tmp="${file}.tmp.$$"
-  if [ -f "$file" ]; then
-    # Normalize a trailing CR (CRLF/Windows/WSL files) and trailing spaces
-    # before the header comparison, so a padded/CRLF header is replaced in
-    # place instead of being appended as a duplicate section.
-    awk -v hdr="$header" '
-      /^\[/ {
-        line = $0
-        sub(/\r+$/, "", line)
-        sub(/[[:space:]]+$/, "", line)
-        in_sec = (line == hdr) ? 1 : 0
-      }
-      !in_sec { print }
-    ' "$file" >"$tmp"
-  else
-    : >"$tmp"
-  fi
-  printf '%s\n%s\n' "$header" "$body" >>"$tmp"
-  chmod 600 "$tmp" 2>/dev/null || true
-  mv "$tmp" "$file"
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "'$1' not found on PATH"
 }
 
-# --- 1. Deploy the durable CloudFormation stack -------------------------------
-# The stack creates an IAM user, so the named-IAM capability is required
-# (CAPABILITY_IAM is a strict subset and would be redundant).
-aws cloudformation deploy \
-  --template-file deploy/aws/strimserver-infra.yaml \
-  --stack-name "$CFN_STACK_NAME" \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameter-overrides \
-      CreateNetwork="true" \
-      OperatorCidr="$OPERATOR_CIDR" \
-      IngestCidr="$OPERATOR_CIDR" \
-      EnableExperimentalSsh="true" \
-      DeploymentBucketName="$S3_BUCKET_NAME"   # omit when using https/local deploy
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --stack-name)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || die "--stack-name requires a value"
+        STACK_NAME="$2"; shift 2 ;;
+      --stack-name=*)
+        STACK_NAME="${1#*=}"; [ -n "$STACK_NAME" ] || die "--stack-name requires a value"; shift ;;
+      --region)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || die "--region requires a value"
+        REGION="$2"; shift 2 ;;
+      --region=*)
+        REGION="${1#*=}"; [ -n "$REGION" ] || die "--region requires a value"; shift ;;
+      --profile)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || die "--profile requires a value"
+        PROFILE="$2"; shift 2 ;;
+      --profile=*)
+        PROFILE="${1#*=}"; [ -n "$PROFILE" ] || die "--profile requires a value"; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown argument: $1 (try --help)" ;;
+    esac
+  done
+}
 
-# --- 2. Ensure the strimserver service account has a usable access key --------
-# The IAM user and its read-only ssm:GetParameter policy are created by the stack
-# above; CloudFormation cannot create IAM access keys, so create/rotate one here.
-if ! aws iam get-user --user-name "$IAM_USER" >/dev/null 2>&1; then
-  echo "deploy-infra: ERROR: IAM user '$IAM_USER' not found after stack deploy" >&2
-  exit 1
-fi
+aws_run() {
+  aws --profile "$PROFILE" --region "$REGION" "$@"
+}
 
-OLD_KEYS="$(aws iam list-access-keys --user-name "$IAM_USER" \
-  --query 'AccessKeyMetadata[].AccessKeyId' --output text)"
+require_strimserver_identity() {
+  local arn
+  arn="$(aws_run sts get-caller-identity --query 'Arn' --output text)" \
+    || die "not authenticated for profile '$PROFILE'; run deploy/aws/provision-account first"
+  case "$arn" in
+    *:user/strimserver) log "operator identity: ${arn}" ;;
+    *) die "profile '$PROFILE' authenticated as '$arn', expected ...:user/strimserver. Run deploy/aws/provision-account (with admin credentials) first." ;;
+  esac
+}
 
-log "creating a fresh access key for '$IAM_USER'"
-read -r ACCESS_KEY_ID SECRET < <(aws iam create-access-key --user-name "$IAM_USER" \
-  --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text)
+# describe_parameters: one `Key<TAB>Value` line per live parameter. A missing
+# stack is not an error here -- it selects the first-create path.
+describe_parameters() {
+  aws_run cloudformation describe-stacks \
+    --stack-name "$STACK_NAME" \
+    --query 'Stacks[0].Parameters[].[ParameterKey,ParameterValue]' \
+    --output text 2>/dev/null
+}
 
-# --- 3. Write the [strimserver] profile + region (backup first) ---------------
-# The service-account key lands under [strimserver], never [default]: the ambient
-# default is a different identity, and every strimserver tool pins [strimserver].
-# Writing before deleting means a failure here still leaves the old key valid.
-CREDENTIALS_FILE="${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"
-CONFIG_FILE="${AWS_CONFIG_FILE:-$HOME/.aws/config}"
-mkdir -p "$(dirname "$CREDENTIALS_FILE")" "$(dirname "$CONFIG_FILE")"
+validate_bool() { # validate_bool <name> <value>
+  case "$2" in
+    true|false) ;;
+    *) die "$1 must be 'true' or 'false' (got '$2')" ;;
+  esac
+}
 
-backup_file "$CREDENTIALS_FILE"
-upsert_ini_section "$CREDENTIALS_FILE" "[$PROFILE]" \
-  "aws_access_key_id = $ACCESS_KEY_ID
-aws_secret_access_key = $SECRET"
+# build_parameters: sets PARAM_ARGS to the complete --parameter-overrides list.
+# STACK_EXISTS is 0 on first create, 1 when live parameters were loaded.
+build_parameters() {
+  local live key value
+  local -a keys=()
+  declare -A params=()
 
-# Region for [profile strimserver]: explicit AWS_REGION/AWS_DEFAULT_REGION wins,
-# else the ambient admin CLI's configured region, else the project default
-# (us-east-2 -- where the pinned x86_64 AL2023 DLAMI lives). Without this the
-# profile carries no region and tooling would have to pass --region everywhere.
-REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
-if [ -z "$REGION" ]; then
-  REGION="$(aws configure get region 2>/dev/null || true)"
-fi
-REGION="${REGION:-us-east-2}"
-
-backup_file "$CONFIG_FILE"
-upsert_ini_section "$CONFIG_FILE" "[profile $PROFILE]" "region = $REGION"
-log "wrote [$PROFILE] to $CREDENTIALS_FILE and [profile $PROFILE] region = $REGION to $CONFIG_FILE"
-
-# --- 4. Delete the superseded key(s), only once the new key is in place -------
-for key in $OLD_KEYS; do
-  if [ "$key" = "$ACCESS_KEY_ID" ]; then
-    continue
+  STACK_EXISTS=0
+  if live="$(describe_parameters)"; then
+    STACK_EXISTS=1
+    while IFS=$'\t' read -r key value; do
+      [ -n "$key" ] && params["$key"]="$value"
+    done <<<"$live"
   fi
-  log "deleting superseded access key $key"
-  aws iam delete-access-key --user-name "$IAM_USER" --access-key-id "$key"
-done
 
-# --- 5. Assert the minted key really is the strimserver operator --------------
-# Capture stderr so a credential/config failure reports its actual cause instead
-# of a bare '<none>'. IAM is eventually consistent: a freshly minted access key
-# can return InvalidClientTokenId for a few seconds before it is usable, so retry
-# with a short backoff before failing.
-assert_err="$(mktemp)"
-trap 'rm -f "$assert_err"' EXIT
-assert_attempts=10
-assert_sleep=2
-ASSERTED_ARN=""
-for attempt in $(seq 1 "$assert_attempts"); do
-  if ASSERTED_ARN="$(aws --profile "$PROFILE" sts get-caller-identity \
-        --query Arn --output text 2>"$assert_err")"; then
-    break
+  if [ -n "$OPERATOR_CIDR" ]; then
+    params[OperatorCidr]="$OPERATOR_CIDR"
+    params[IngestCidr]="$OPERATOR_CIDR"
+  elif [ "$STACK_EXISTS" -eq 0 ]; then
+    die "OPERATOR_CIDR is required on first create (it becomes OperatorCidr and IngestCidr)"
   fi
-  ASSERTED_ARN=""
-  if [ "$attempt" -lt "$assert_attempts" ]; then
-    log "identity not yet valid (attempt $attempt/$assert_attempts); retrying in ${assert_sleep}s"
-    sleep "$assert_sleep"
+
+  if [ -n "$S3_BUCKET_NAME" ]; then
+    params[DeploymentBucketName]="$S3_BUCKET_NAME"
   fi
-done
 
-case "$ASSERTED_ARN" in
-  *:user/strimserver)
-    log "verified [$PROFILE] authenticates as $ASSERTED_ARN"
-    ;;
-  "")
-    echo "deploy-infra: ERROR: the new [$PROFILE] profile did not authenticate as ...:user/strimserver" >&2
-    echo "deploy-infra: aws sts get-caller-identity failed with:" >&2
-    sed 's/^/deploy-infra:   /' "$assert_err" >&2
-    exit 1
-    ;;
-  *)
-    echo "deploy-infra: ERROR: the new [$PROFILE] profile authenticated as '$ASSERTED_ARN', not ...:user/strimserver" >&2
-    exit 1
-    ;;
-esac
+  params[NvidiaDriverFloor]="${NVIDIA_DRIVER_FLOOR_OVERRIDE:-$EXPECTED_FLOOR}"
 
-log "done. The [$PROFILE] profile is written to $CREDENTIALS_FILE."
+  if [ -n "$CREATE_NETWORK" ]; then
+    validate_bool CREATE_NETWORK "$CREATE_NETWORK"
+    params[CreateNetwork]="$CREATE_NETWORK"
+  fi
+  if [ -n "$ENABLE_EXPERIMENTAL_SSH" ]; then
+    validate_bool ENABLE_EXPERIMENTAL_SSH "$ENABLE_EXPERIMENTAL_SSH"
+    params[EnableExperimentalSsh]="$ENABLE_EXPERIMENTAL_SSH"
+  fi
+
+  PARAM_ARGS=()
+  for key in "${!params[@]}"; do
+    keys+=("$key")
+  done
+  # Stable order makes logs/diffs readable and the deploy reproducible.
+  while IFS= read -r key; do
+    PARAM_ARGS+=("${key}=${params[$key]}")
+  done < <(printf '%s\n' ${keys[@]+"${keys[@]}"} | sort)
+}
+
+deploy_stack() {
+  local mode="first create"
+  [ "$STACK_EXISTS" -eq 1 ] && mode="existing stack"
+  log "deploying stack '${STACK_NAME}' in ${REGION} as profile '${PROFILE}' (${mode})"
+  aws_run cloudformation deploy \
+    --template-file "$TEMPLATE" \
+    --stack-name "$STACK_NAME" \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --parameter-overrides "${PARAM_ARGS[@]}" \
+    || die "cloudformation deploy failed for stack '${STACK_NAME}'"
+}
+
+verify_stack_status() {
+  local status
+  status="$(aws_run cloudformation describe-stacks \
+    --stack-name "$STACK_NAME" \
+    --query 'Stacks[0].StackStatus' --output text)" \
+    || die "could not read the stack status for '${STACK_NAME}'"
+  case "$status" in
+    CREATE_COMPLETE|UPDATE_COMPLETE) log "stack status: ${status}" ;;
+    *) die "stack '${STACK_NAME}' is in status '${status}', expected CREATE_COMPLETE or UPDATE_COMPLETE" ;;
+  esac
+}
+
+verify_nvidia_floor() {
+  local live_floor
+  live_floor="$(describe_parameters \
+    | awk -F'\t' '$1 == "NvidiaDriverFloor" { print $2 }')" \
+    || die "could not read the live NvidiaDriverFloor parameter"
+  [ -n "$live_floor" ] \
+    || die "stack '${STACK_NAME}' has no NvidiaDriverFloor parameter; the version-floor contract is missing"
+  [ "$live_floor" = "$EXPECTED_FLOOR" ] \
+    || die "NvidiaDriverFloor drift: stack reports '${live_floor}' but deploy/aws/lib/nvidia.sh pins '${EXPECTED_FLOOR}'. Update lib/nvidia.sh and the stack together."
+  log "NvidiaDriverFloor matches lib/nvidia.sh (${EXPECTED_FLOOR})"
+}
+
+verify_image_pipeline() {
+  local pipelines
+  pipelines="$(aws_run imagebuilder list-image-pipelines \
+    --query 'imagePipelineList[].name' --output text)" \
+    || die "could not list Image Builder pipelines"
+  grep -qw "$PIPELINE_NAME" <<<"$pipelines" \
+    || die "Image Builder pipeline '${PIPELINE_NAME}' (BakedImagePipeline) not found; the stack did not create the baked-AMI pipeline"
+  log "Image Builder pipeline present: ${PIPELINE_NAME}"
+}
+
+main() {
+  parse_args "$@"
+  require_cmd aws
+  require_strimserver_identity
+  build_parameters
+  deploy_stack
+  verify_stack_status
+  verify_nvidia_floor
+  verify_image_pipeline
+  log "done. Stack '${STACK_NAME}' is updated as the [${PROFILE}] service account."
+}
+
+main "$@"

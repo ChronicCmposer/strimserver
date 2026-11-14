@@ -340,23 +340,25 @@ Resources:
   # Project-scoped operator policy (decision 11b): the service user is also the
   # project operator, so the operator surface its own tooling (deploy/aws/launch,
   # deploy/aws/terminate, and the scripts/tools publish helpers) actually calls
-  # is attached here. Least privilege by construction: the durable stack itself
-  # is deployed by deploy/aws/deploy-infra with ADMIN credentials, so no
-  # account-wide IAM administration is granted. This is the SINGLE managed policy
-  # attached to the user (CloudFormation cannot reliably manage two
-  # AWS::IAM::ManagedPolicy resources attached to one user) and it also serves the
-  # check-deps DLAMI resolver via the SsmDlamiLookup + Ec2Describe grants below.
+  # is attached here. The durable stack itself is bootstrapped ONCE by
+  # deploy/aws/provision-account with admin credentials; thereafter
+  # deploy/aws/deploy-infra runs as THIS identity, so the policy covers the
+  # scoped CloudFormation deploy lifecycle and the Image Builder rebuild surface
+  # below without granting account-wide IAM administration. It also serves the
+  # check-deps DLAMI resolver via the SsmDlamiLookup + Ec2Describe grants.
+  # This is the SINGLE managed policy attached to the user (CloudFormation cannot
+  # reliably manage two AWS::IAM::ManagedPolicy resources attached to one user).
   StrimserverOperatorPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: strimserver-operator
       Description: >-
         Least-privilege operator surface for the strimserver account: publish
-        artifacts to the deployment bucket, read the strimserver stack outputs,
-        resolve the DLAMI, launch/terminate tagged GPU instances, hand the
-        strimserver instance role to EC2 only, and rotate its own access key. No
-        account-wide IAM administration and no DNS-zone management is granted:
-        this project owns no hosted zone.
+        artifacts to the deployment bucket, deploy this stack, read its outputs,
+        resolve the DLAMI, launch/terminate tagged GPU instances, rebuild the
+        baked AMI, hand the template's roles only to their services, and rotate
+        its own access key. No account-wide IAM administration and no DNS-zone
+        management is granted: this project owns no hosted zone.
       Users:
         - !Ref StrimserverServiceUser
       PolicyDocument:
@@ -491,12 +493,36 @@ Resources:
             Condition:
               StringEquals:
                 "aws:ResourceTag/Project": !Ref ProjectName
-          # launch/terminate read the stack outputs; the stack lifecycle itself
-          # is admin-run (deploy-infra), so only DescribeStacks is needed.
+          # launch/terminate read the stack outputs; deploy-infra additionally
+          # reads the live parameters and stack events, and fetches the template
+          # for a diff. Scoped to this stack.
           - Sid: CloudFormationReadStack
             Effect: Allow
             Action:
               - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:GetTemplate
+            Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/strimserver/*"
+          # ValidateTemplate has no resource-level permissions, so it must be
+          # Resource:"*"; aws cloudformation deploy calls it before mutating.
+          - Sid: CloudFormationValidateTemplate
+            Effect: Allow
+            Action:
+              - cloudformation:ValidateTemplate
+            Resource: "*"
+          # deploy-infra runs `aws cloudformation deploy` as this identity. The
+          # CLI implements deploy with a change set, so the change-set lifecycle
+          # is required alongside CreateStack/UpdateStack. DeleteStack is NOT
+          # granted: deploy never needs to destroy the durable stack.
+          - Sid: CloudFormationDeployStack
+            Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+              - cloudformation:CreateChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DeleteChangeSet
             Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/strimserver/*"
           - Sid: SsmDlamiLookup
             Effect: Allow
@@ -524,6 +550,42 @@ Resources:
             Condition:
               StringEquals:
                 "iam:PassedToService": ec2.amazonaws.com
+          # deploy-infra re-deploys this template, which wires these roles into
+          # Image Builder, the instance profile and the EventBridge target.
+          # CloudFormation must therefore be able to pass exactly those roles
+          # (never an arbitrary role) to their services.
+          - Sid: PassImageBuilderRoles
+            Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !GetAtt BakedImageBuilderInstanceRole.Arn
+              - !GetAtt BakedImageBuilderExecutionRole.Arn
+              - !GetAtt BakedAmiPublishRole.Arn
+            Condition:
+              StringEquals:
+                "iam:PassedToService":
+                  - ec2.amazonaws.com
+                  - imagebuilder.amazonaws.com
+                  - events.amazonaws.com
+                  - ssm.amazonaws.com
+          # Manual baked-AMI rebuild: trigger the one pipeline this stack owns.
+          - Sid: ImageBuilderRebuild
+            Effect: Allow
+            Action:
+              - imagebuilder:StartPipelineExecution
+            Resource: !Sub "arn:aws:imagebuilder:${AWS::Region}:${AWS::AccountId}:image-pipeline/strimserver-baked"
+          # Read/watch surface for a rebuild. Image Builder list actions do not
+          # support resource-level permissions, so those stay Resource:"*".
+          - Sid: ImageBuilderRead
+            Effect: Allow
+            Action:
+              - imagebuilder:GetImagePipeline
+              - imagebuilder:GetImage
+              - imagebuilder:GetImageRecipe
+              - imagebuilder:ListImagePipelines
+              - imagebuilder:ListImages
+              - imagebuilder:ListImageBuildVersions
+            Resource: "*"
 
   # Optional: experimental OpenSSH port (separate sshd, see tools/openssh).
   # Added as a standalone ingress rule so it is cleanly conditional and does

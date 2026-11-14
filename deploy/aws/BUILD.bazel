@@ -156,14 +156,32 @@ sh_test(
 sh_test(
     name = "operator_template_test",
     srcs = ["operator_template_test.sh"],
-    data = ["strimserver-infra.yaml"],
+    data = [
+        "launch",
+        "strimserver-infra.yaml",
+    ],
 )
 
 sh_test(
     name = "deploy_infra_test",
     srcs = ["deploy_infra_test.sh"],
     data = [
+        "//deploy/aws/lib:nvidia.sh",
         "deploy-infra",
+        "strimserver-infra.yaml",
+        "testutil_fake_aws.sh",
+    ],
+)
+
+# provision_account_test.sh drives the admin-run bootstrap end to end against
+# the shared fake aws: admin gate, stack deploy, ensure-single-access-key
+# reuse/--rotate semantics, INI upsert with backups, and the bounded
+# InvalidClientTokenId retry on the post-provision identity assertion.
+sh_test(
+    name = "provision_account_test",
+    srcs = ["provision_account_test.sh"],
+    data = [
+        "provision-account",
         "strimserver-infra.yaml",
         "testutil_fake_aws.sh",
     ],
