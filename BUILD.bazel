@@ -94,6 +94,9 @@ pkg_files(
         "//deploy/aws:prompt_login.fish",
         "//core:strimserver.env",
         "//core:mediamtx.yaml.template",
+        # Static template shipped at the bundle root; deploy.sh substitutes
+        # __EXPECTED_IP__ at deploy time (reads it from $script_dir).
+        "//deploy/aws:strim-ddns-verify.service.template",
     ],
     attributes = pkg_attributes(mode = "0644"),
     strip_prefix = strip_prefix.files_only(),

@@ -13,6 +13,10 @@
 #   FAKE_AWS_STS_FAIL     when 1, every sts call fails (rc 255)
 #   FAKE_AWS_EXISTING_KEYS  tab/space-separated key ids for iam list-access-keys
 #   FAKE_AWS_ACCESS_KEY_ID / FAKE_AWS_SECRET_ACCESS_KEY  create-access-key output
+#   FAKE_AWS_SSM_BAKED_AMI  value for `ssm get-parameter` (the baked-AMI param);
+#                         unset/empty simulates ParameterNotFound (rc 254)
+#   FAKE_AWS_INSTANCE_ID  instance id printed by `ec2 run-instances`
+#                         (default i-0123456789abcdef0)
 #
 # Not intended to be executed directly.
 
@@ -51,6 +55,16 @@ case "$args" in
     printf '%s\t%s\n' \
       "${FAKE_AWS_ACCESS_KEY_ID:-AKIAFAKEFAKEFAKEFAKE}" \
       "${FAKE_AWS_SECRET_ACCESS_KEY:-wJalrFAKEsecretFAKEsecretFAKEsecretFAKEkey}"
+    ;;
+  *"ssm get-parameter"*)
+    if [[ -z "${FAKE_AWS_SSM_BAKED_AMI:-}" ]]; then
+      printf 'An error occurred (ParameterNotFound) when calling the GetParameter operation\n' >&2
+      exit 254
+    fi
+    printf '%s\n' "$FAKE_AWS_SSM_BAKED_AMI"
+    ;;
+  *"ec2 run-instances"*)
+    printf '%s\n' "${FAKE_AWS_INSTANCE_ID:-i-0123456789abcdef0}"
     ;;
 esac
 

@@ -27,12 +27,15 @@ Env vars (typically sourced from deploy/aws/.env):
   ARCH                  optional override: "amd64"/"x86_64" or "arm64"/"aarch64";
                         default: inferred from the INSTANCE_TYPE family
                         (g5g/c6g/m6g/r6g/a1/g6g/7g -> arm64, everything else amd64)
-  AMI_ID                explicit AMI id (default: arch-aware - the pinned x86_64
-                        DEFAULT_AMI_ID for amd64, the arm64 DLAMI SSM float for
-                        arm64; see DEFAULT_DLAMI_SSM_PARAM_ARM64)
+  AMI_ID                explicit AMI id (default: the baked-AMI SSM parameter
+                        /strimserver/ami/baked/latest when the Image Builder
+                        pipeline has published one; otherwise the pinned x86_64
+                        DEFAULT_AMI_ID for amd64, or the arm64 DLAMI SSM float for
+                        arm64 - see DEFAULT_DLAMI_SSM_PARAM_ARM64)
   DLAMI_SSM_PARAM       optional override: resolve the AL2023 GPU DLAMI via this
-                        SSM path instead of the architecture default (amd64: the
-                        pinned DEFAULT_AMI_ID; arm64: the arm64 DLAMI SSM float)
+                        SSM path instead of the baked AMI / architecture default
+                        (amd64: the pinned DEFAULT_AMI_ID; arm64: the arm64 DLAMI
+                        SSM float)
   DEPLOYMENT_SRC        optional; passed through to setup_strimserver. On arm64
                         launches, when unset (and no S3_BUCKET legacy path), it
                         defaults to the GitHub release asset for DEPLOYMENT (the
@@ -111,6 +114,16 @@ DEFAULT_DLAMI_SSM_PARAM_ARM64 = (
     "/aws/service/deeplearning/ami/arm64/"
     "base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
 )
+
+# Baked-AMI SSM parameter (us-east-2). The CloudFormation Image Builder pipeline
+# writes the AMI id of the pre-baked strimserver image here once it has built
+# one. launch prefers this over the DLAMI fallbacks because the baked image
+# already ships the accepted NVIDIA driver/container stack, so first boot skips
+# the long GPU setup. Until the pipeline has published an AMI the parameter is
+# absent and launch falls back to the architecture default (loudly: the pinned
+# x86_64 DLAMI's bundled driver is below the floor, so deploy.sh fails fast
+# until a baked AMI exists). An explicit AMI_ID or DLAMI_SSM_PARAM still wins.
+STRIM_AMI_SSM_PARAM = "/strimserver/ami/baked/latest"
 
 # Deployment bundle naming: every release publishes FOUR bundles under
 # fully-explicit names -- the Go controller and the C controller, each for
@@ -219,18 +232,48 @@ def resolve_arch(instance_type, arch_override=""):
     return "amd64"
 
 
+def baked_ami():
+    """The Image Builder baked AMI id from SSM, or "" when the pipeline has not
+    published one yet (ParameterNotFound / any lookup failure)."""
+    try:
+        return aws_text([
+            "ssm", "get-parameter",
+            "--name", STRIM_AMI_SSM_PARAM,
+            "--query", "Parameter.Value",
+            "--output", "text",
+        ])
+    except subprocess.CalledProcessError:
+        return ""
+
+
 def select_ami(cfg):
     """The AMI id to launch with, in override order: AMI_ID, then a custom
-    DLAMI_SSM_PARAM, then an architecture default. amd64 keeps the pinned
-    DEFAULT_AMI_ID (us-east-2) exactly as before; arm64 resolves the arm64 DLAMI
-    SSM float (operator must verify it exists in their region - see the
+    DLAMI_SSM_PARAM, then the baked-AMI SSM parameter, then an architecture
+    default. The baked image is the intended path; until the Image Builder
+    pipeline publishes it, amd64 falls back to the pinned DEFAULT_AMI_ID
+    (us-east-2) with a loud warning, and arm64 resolves the arm64 DLAMI SSM
+    float (operator must verify it exists in their region - see the
     DEFAULT_DLAMI_SSM_PARAM_ARM64 note above)."""
     if cfg.ami:
         return cfg.ami
     if cfg.dlami_ssm_param != DEFAULT_DLAMI_SSM_PARAM:
         return f"resolve:ssm:{cfg.dlami_ssm_param}"
+    baked = baked_ami()
+    if baked:
+        print(f"using baked AMI {baked} from SSM {STRIM_AMI_SSM_PARAM}")
+        return baked
     if cfg.arch == "arm64":
         return f"resolve:ssm:{DEFAULT_DLAMI_SSM_PARAM_ARM64}"
+    print(
+        f"WARNING: baked-AMI SSM parameter {STRIM_AMI_SSM_PARAM} is not "
+        "available (the CloudFormation Image Builder pipeline has not "
+        "published an AMI yet); falling back to the pinned DLAMI "
+        f"{DEFAULT_AMI_ID}.\n"
+        "         That DLAMI's bundled NVIDIA driver is below the required "
+        "floor, so deploy.sh will fail-fast on the driver floor until the "
+        "pipeline produces an AMI.",
+        file=sys.stderr,
+    )
     return DEFAULT_AMI_ID
 
 
@@ -754,10 +797,11 @@ def launch_instance(cfg, use_spot, wait):
 
     subnet = resolve_subnet(cfg, sg)
     # Override order (select_ami): AMI_ID, then a custom DLAMI_SSM_PARAM, then
-    # an architecture default - amd64 keeps the pinned DEFAULT_AMI_ID (us-east-2)
-    # exactly as before, arm64 resolves the arm64 DLAMI SSM float. The /latest
-    # SSM float is no longer the x86_64 default, so the containerd runtime is
-    # deterministic on the amd64 path.
+    # the baked-AMI SSM parameter, then an architecture default - amd64 falls
+    # back to the pinned DEFAULT_AMI_ID (us-east-2), arm64 to the arm64 DLAMI
+    # SSM float. The baked image is preferred once the Image Builder pipeline
+    # publishes it; until then amd64 warns loudly about the driver-floor
+    # fail-fast on the pinned DLAMI.
     ami = select_ami(cfg)
 
     # Fold subnet + security group + public-IP request into a single primary NIC.

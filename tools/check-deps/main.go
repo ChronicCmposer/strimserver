@@ -81,6 +81,11 @@ type Options struct {
 	UserAgent string
 	// RateLimitRetryDelay is the backoff before the Fetcher's single rate-limit retry.
 	RateLimitRetryDelay time.Duration
+	// CheckBakedAMI enables the baked-AMI driver-floor advisory: resolve the
+	// Image Builder SSM parameter, read the AMI's strimserver:nvidia-driver
+	// tag, and warn when it is below NVIDIA_DRIVER_FLOOR. It defaults on for a
+	// production run; --offline skips it because it shells out to the aws CLI.
+	CheckBakedAMI bool
 }
 
 // main parses flags into Options, resolves the repo root, wires the warning
@@ -193,6 +198,7 @@ func newOptions() Options {
 		MaxResponseBytes:     16 << 20,
 		UserAgent:            "strimserver-check-deps",
 		RateLimitRetryDelay:  750 * time.Millisecond,
+		CheckBakedAMI:        true,
 		Stdout:               os.Stdout,
 		Stderr:               os.Stderr,
 		Now:                  time.Now,
@@ -454,6 +460,14 @@ func run(opts *Options, cache *Cache, resolvers []ResolverEntry, batchResolvers 
 	all := resolveAll(opts, guard, resolvers, batchResolvers, dedupe(deps), classifier)
 	if guard.changed {
 		cache.Save(guard.entries)
+	}
+
+	// Advisory baked-AMI freshness: the deploy path trusts an Image Builder AMI
+	// whose driver version is tagged on the image. Compare that tag to the
+	// repository floor and warn (never fail) when the baked image is stale.
+	// Offline runs skip the aws shell-out.
+	if opts.CheckBakedAMI && !opts.Offline {
+		checkBakedAMI(opts.Root, opts.NativeToolTimeout, opts.Warn)
 	}
 
 	// The ignore set is loaded whenever it can affect the outcome: --ignore

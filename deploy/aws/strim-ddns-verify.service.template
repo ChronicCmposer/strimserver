@@ -1,0 +1,22 @@
+[Unit]
+Description=strim Dynamic DNS verification (one-shot, bounded background retries)
+# The deploy kicks this unit off after arming the 6-hour refresh timer and does
+# NOT wait for it. The retry loop lives here, not in deploy.sh, so a slow or
+# still-propagating authoritative DNS answer never blocks a deploy.
+After=containerd.service network-online.target strim-ddns.service
+Requires=containerd.service
+Wants=strim-ddns.service
+
+[Service]
+Type=oneshot
+# DDNS_HOST / DDNS_DOMAIN come from the deployed env file; the expected public
+# IP is baked in by deploy.sh (substituted for __EXPECTED_IP__).
+EnvironmentFile=-/mnt/nvme/config/strimserver.env
+# `check` needs no password; the bind mounts mirror the strim-ddns unit so the
+# FROM-scratch image has a resolver configuration. Bounded: 24 attempts with 5s
+# between them. systemd expands $$ -> $, so the shell receives $(...) and
+# $DDNS_HOST/$DDNS_DOMAIN literally.
+ExecStart=/bin/bash -c 'for attempt in $$(seq 1 24); do got="$$(/usr/bin/ctr -n strimserver run --rm --net-host --read-only --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro docker.io/library/strim-ddns:latest strim-ddns /strim-ddns check "$$DDNS_HOST" "$$DDNS_DOMAIN" 2>/dev/null)" || got=""; if [ "$$got" = "__EXPECTED_IP__" ]; then exit 0; fi; if [ "$$attempt" -lt 24 ]; then sleep 5; fi; done; exit 1'
+
+[Install]
+WantedBy=multi-user.target

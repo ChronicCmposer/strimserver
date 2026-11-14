@@ -118,6 +118,32 @@ Parameters:
       tools/openssh/sshd_config; default 2222). Only used when
       EnableExperimentalSsh=true.
 
+  NvidiaDriverFloor:
+    Type: String
+    Default: "620.70.06"
+    AllowedPattern: '^[0-9]+([.][0-9]+)*$'
+    Description: >
+      NVIDIA driver floor baked into the AMI. MUST equal NVIDIA_DRIVER_FLOOR in
+      deploy/aws/lib/nvidia.sh; deploy_infra_test.sh enforces that equality, so
+      a floor bump updates the tag and the component together. It is also the
+      value of the strimserver:nvidia-driver AMI tag.
+
+  NvidiaFloorMachineryUrl:
+    Type: String
+    Default: "https://raw.githubusercontent.com/ChronicCmposer/strimserver/dev/deploy/aws/lib/nvidia.sh"
+    Description: >
+      Location of the repo's lib/nvidia.sh -- the single source of truth for the
+      driver floor and the stage-then-swap upgrade. The Image Builder component
+      sources it instead of duplicating the floor logic. Point this at the exact
+      revision you are deploying (a fork or a release tag).
+
+  OpensshExperimentalRpmUrl:
+    Type: String
+    Default: "https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental.rpm"
+    Description: >
+      The pinned @openssh_dist openssh-experimental RPM (see MODULE.bazel
+      s3_key "openssh/openssh-experimental.rpm") baked into the image.
+
 # Guard: if you are not creating a network, you must supply an existing VPC.
 Rules:
   RequireVpcWhenNotCreating:
@@ -267,18 +293,29 @@ Resources:
           - - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
           - !Ref AWS::NoValue
       Policies:
-        !If
+        # The baked-AMI SSM parameter is the one piece of state the instance
+        # role may read: deploy/aws/launch resolves it before the DLAMI
+        # fallback. Scope to the single parameter, never a wildcard.
+        - PolicyName: SsmBakedAmiRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/strimserver/ami/baked/latest"
+        - !If
           - HasBucket
-          - - PolicyName: DeploymentBucketRead
-              PolicyDocument:
-                Version: "2012-10-17"
-                Statement:
-                  - Effect: Allow
-                    Action: ["s3:GetObject"]
-                    Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}/*"
-                  - Effect: Allow
-                    Action: ["s3:ListBucket"]
-                    Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}"
+          - PolicyName: DeploymentBucketRead
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action: ["s3:GetObject"]
+                  Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}/*"
+                - Effect: Allow
+                  Action: ["s3:ListBucket"]
+                  Resource: !Sub "arn:aws:s3:::${DeploymentBucketName}"
           - !Ref AWS::NoValue
       Tags:
         - Key: Project
@@ -467,6 +504,9 @@ Resources:
             Resource:
               - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
               - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/deeplearning/ami/arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
+              # launch reads the baked-AMI parameter before the DLAMI fallback;
+              # the operator identity is the only one that runs launch.
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/strimserver/ami/baked/latest"
           - Sid: SelfKeyRotation
             Effect: Allow
             Action:
@@ -498,6 +538,293 @@ Resources:
       FromPort: !Ref ExperimentalSshPort
       ToPort: !Ref ExperimentalSshPort
       CidrIp: !Ref OperatorCidr
+
+  # ----------------------------------------------------------------------------
+  # Baked-AMI pipeline (EC2 Image Builder, fully defined in this template)
+  # ----------------------------------------------------------------------------
+  # Builds a strimserver base AMI from the pinned DLAMI so launch does not
+  # reinstall the driver/tools on every boot. Bake scope: the NVIDIA driver at
+  # the floor (via the repo's own floor machinery), htop, the bundled
+  # openssh-experimental RPM, the canonical containerd root/state config, and
+  # nvidia-persistenced enabled. App container images, env and config are NOT
+  # baked; deploy.sh still owns those.
+  #
+  # Trigger: MANUAL only (the pipeline carries no Schedule). TODO: add a monthly
+  # rebuild schedule once the baked image is the default launch path, and a
+  # rebuild on a NvidiaDriverFloor bump.
+  BakedImageComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: strimserver-baked-base
+      Description: strimserver baked base (driver floor, htop, openssh, containerd)
+      Platform: Linux
+      Version: "1.0.0"
+      ChangeDescription: initial baked base
+      # Fn::Sub interpolates ONLY the two URL parameters; the sourced nvidia.sh
+      # owns the floor version and the stage-then-swap logic, so a threshold
+      # bump is a one-line change in deploy/aws/lib/nvidia.sh.
+      Data: !Sub |
+        name: strimserver-baked-base
+        description: strimserver baked base
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallBaseTools
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      # Canonical containerd root/state (deploy/aws/lib/deploy.sh
+                      # deploy_prepend_containerd_root_state). Strip any existing
+                      # pair first so a re-run never duplicates the TOML keys.
+                      mkdir -p /etc/containerd
+                      if [ -f /etc/containerd/config.toml ]; then
+                        grep -vE '^[[:space:]]*(root|state)[[:space:]]*=' /etc/containerd/config.toml > /tmp/containerd.toml || true
+                      else
+                        : > /tmp/containerd.toml
+                      fi
+                      {
+                        printf "root='/mnt/nvme/containerd'\n"
+                        printf "state='/mnt/nvme/containerd-state'\n\n"
+                        cat /tmp/containerd.toml
+                      } > /etc/containerd/config.toml
+                      dnf install -y htop
+                      systemctl enable nvidia-persistenced
+              - name: EstablishNvidiaDriverFloor
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      # Single source of truth: deploy/aws/lib/nvidia.sh. The
+                      # floor and the safe stage-then-swap upgrade live there;
+                      # never duplicate NVIDIA_DRIVER_FLOOR in this template.
+                      curl -fsSL "${NvidiaFloorMachineryUrl}" -o /tmp/nvidia.sh
+                      # shellcheck disable=SC1091
+                      . /tmp/nvidia.sh
+                      SUDO="" nvidia_ensure_driver_floor
+              - name: InstallExperimentalOpenSsh
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      curl -fsSL "${OpensshExperimentalRpmUrl}" -o /tmp/openssh-experimental.rpm
+                      dnf install -y /tmp/openssh-experimental.rpm
+
+  BakedImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: strimserver-baked-recipe
+      Version: "1.0.0"
+      ParentImage: ami-0198b63ccfac121e8
+      Components:
+        - ComponentArn: !Ref BakedImageComponent
+      Tags:
+        Project: !Ref ProjectName
+        "strimserver:nvidia-driver": !Ref NvidiaDriverFloor
+
+  # Build-instance role/profile: the service launches this profile and runs the
+  # component steps on the build host.
+  BakedImageBuilderInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  BakedImageBuilderInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref BakedImageBuilderInstanceRole]
+
+  # Service execution role assumed by imagebuilder.amazonaws.com. Least
+  # privilege: imagebuilder reads its own resources, EC2 lifecycle + tagging for
+  # the throwaway build instance, iam:PassRole constrained to EC2, and
+  # ssm:PutParameter on the single baked-AMI parameter (plus build logs).
+  BakedImageBuilderExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: imagebuilder.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ImageBuilderAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ImageBuilderResources
+                Effect: Allow
+                Action:
+                  - imagebuilder:GetComponent
+                  - imagebuilder:GetImageRecipe
+                  - imagebuilder:GetInfrastructureConfiguration
+                  - imagebuilder:GetDistributionConfiguration
+                  - imagebuilder:GetImagePipeline
+                  - imagebuilder:GetImage
+                  - imagebuilder:ListImageBuildVersions
+                  - imagebuilder:CreateImage
+                  - imagebuilder:StartImagePipelineExecution
+                Resource: !Sub "arn:aws:imagebuilder:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: BuildInstanceLifecycle
+                Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                  - ec2:DescribeInstances
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstanceStatus
+                  - ec2:DescribeInstanceTypes
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcs
+                Resource: "*"
+              - Sid: PassImageBuilderInstanceRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt BakedImageBuilderInstanceRole.Arn
+                Condition:
+                  StringEquals:
+                    "iam:PassedToService": ec2.amazonaws.com
+              - Sid: PublishBakedAmiId
+                Effect: Allow
+                Action: ssm:PutParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/strimserver/ami/baked/latest"
+              - Sid: BuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/imagebuilder/*"
+
+  BakedInfrastructureConfiguration:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: strimserver-baked-infra
+      InstanceProfileName: !Ref BakedImageBuilderInstanceProfile
+      InstanceTypes:
+        - g4dn.xlarge
+      TerminateInstanceOnFailure: true
+      Tags:
+        Project: !Ref ProjectName
+
+  BakedDistributionConfiguration:
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Name: strimserver-baked-dist
+      Distributions:
+        - Region: us-east-2
+          AmiDistributionConfiguration:
+            Name: "strimserver-baked-{{ imagebuilder:buildDate }}"
+            AmiTags:
+              Project: !Ref ProjectName
+              "strimserver:nvidia-driver": !Ref NvidiaDriverFloor
+      Tags:
+        Project: !Ref ProjectName
+
+  BakedImagePipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties:
+      Name: strimserver-baked
+      Description: Manual rebuild of the strimserver baked base AMI
+      ImageRecipeArn: !Ref BakedImageRecipe
+      InfrastructureConfigurationArn: !Ref BakedInfrastructureConfiguration
+      DistributionConfigurationArn: !Ref BakedDistributionConfiguration
+      ImageTestsConfiguration:
+        ImageTestsEnabled: false
+      Status: ENABLED
+
+  # Publish the produced AMI id to SSM when an Image Builder build becomes
+  # AVAILABLE. The automation reads the AMI id from the Image Builder state
+  # change event, so every pipeline run (manual or a future schedule) refreshes
+  # /strimserver/ami/baked/latest without a rebuild of this stack.
+  BakedAmiPublishDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Automation
+      Content:
+        schemaVersion: "0.3"
+        description: Publish the baked strimserver AMI id to SSM.
+        parameters:
+          AmiId:
+            type: String
+            description: AMI id produced by the Image Builder pipeline.
+        mainSteps:
+          - name: putBakedAmiParameter
+            action: aws:executeAwsApi
+            inputs:
+              Service: ssm
+              Api: PutParameter
+              Name: /strimserver/ami/baked/latest
+              Value: "{{ AmiId }}"
+              Type: String
+              Overwrite: true
+
+  BakedAmiPublishRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+                - ssm.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PublishBakedAmi
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: StartBakedAmiAutomation
+                Effect: Allow
+                Action: ssm:StartAutomationExecution
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${BakedAmiPublishDocument}:*"
+              - Sid: WriteBakedAmiParameter
+                Effect: Allow
+                Action: ssm:PutParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/strimserver/ami/baked/latest"
+
+  BakedAmiPublishRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Publish the baked AMI id when the Image Builder image is AVAILABLE
+      EventPattern:
+        source:
+          - aws.imagebuilder
+        detail-type:
+          - "EC2 Image Builder Image State Change"
+        detail:
+          state:
+            status:
+              - AVAILABLE
+      Targets:
+        - Id: PublishBakedAmiParameter
+          Arn: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${BakedAmiPublishDocument}:$DEFAULT"
+          RoleArn: !GetAtt BakedAmiPublishRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              ami: "$.detail.outputResources.amis[0].image"
+            InputTemplate: '{"AmiId": <ami>}'
 
 Outputs:
   SecurityGroupId:

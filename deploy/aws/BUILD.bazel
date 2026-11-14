@@ -8,6 +8,7 @@ exports_files(
         "prompt_login.fish",
         "setup-gpu.sh",
         "strim-ddns.service.template",
+        "strim-ddns-verify.service.template",
         "strim-ddns.timer",
     ],
     # deploy.sh is consumed by //core:security_hygiene_test.
@@ -97,6 +98,50 @@ sh_test(
     ],
 )
 
+# Baked-AMI deploy fast path. These execute deploy/aws/deploy.sh end-to-end
+# against testutil_fake_gpu.sh's deploy sandbox (fake sudo/sysroot + ctr/
+# nvidia-ctk/systemctl), so no root or /mnt/nvme is required:
+#   * deploy_floor_check_test -- below-floor driver fails fast with remediation;
+#     floor met generates the amd64 CDI spec at deploy time; setup-gpu.sh is
+#     never invoked.
+#   * deploy_ddns_async_test  -- the DDNS verify loop moves into an armed
+#     oneshot unit (no 24x5s block in deploy.sh).
+#   * deploy_budget_test      -- full fast path: no sleep/dnf/setup-gpu,
+#     compare-before-restart containerd, parallel image imports with a barrier.
+sh_test(
+    name = "deploy_floor_check_test",
+    srcs = ["deploy_floor_check_test.sh"],
+    data = [
+        "//deploy/aws/lib:deploy.sh",
+        "//deploy/aws/lib:nvidia.sh",
+        "deploy.sh",
+        "testutil_fake_gpu.sh",
+    ],
+)
+
+sh_test(
+    name = "deploy_ddns_async_test",
+    srcs = ["deploy_ddns_async_test.sh"],
+    data = [
+        "//deploy/aws/lib:deploy.sh",
+        "//deploy/aws/lib:nvidia.sh",
+        "deploy.sh",
+        "strim-ddns-verify.service.template",
+        "testutil_fake_gpu.sh",
+    ],
+)
+
+sh_test(
+    name = "deploy_budget_test",
+    srcs = ["deploy_budget_test.sh"],
+    data = [
+        "//deploy/aws/lib:deploy.sh",
+        "//deploy/aws/lib:nvidia.sh",
+        "deploy.sh",
+        "testutil_fake_gpu.sh",
+    ],
+)
+
 # fish_deploy_test.sh sources fish-deploy.sh (FISH_DEPLOY_LIB_ONLY=1) and drives
 # fish_write_system_config through a recording fake sudo. Regression for the
 # umask 077 / 0700-parent bug that truncated config.fish to the prompt body.
@@ -179,6 +224,22 @@ sh_test(
         "//deploy/aws/lib:aws_profile.sh",
         "launch",
         "terminate",
+        "testutil_fake_aws.sh",
+    ],
+    tags = ["manual"],
+)
+
+# launch_ssm_test.sh drives deploy/aws/launch end-to-end against
+# testutil_fake_aws.sh and asserts the baked-AMI SSM resolution/fallback. Like
+# aws_profile_test it resolves the repo root by walking up and cd's there, so it
+# is a `manual` (non-sandboxed) test; the standalone run is authoritative:
+#   bash deploy/aws/launch_ssm_test.sh
+sh_test(
+    name = "launch_ssm_test",
+    srcs = ["launch_ssm_test.sh"],
+    data = [
+        "launch",
+        "known_hosts.py",
         "testutil_fake_aws.sh",
     ],
     tags = ["manual"],

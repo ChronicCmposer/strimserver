@@ -165,6 +165,7 @@ go_test(
 go_library(
     name = "check_deps_lib",
     srcs = [
+        "bakedami.go",
         "cache.go",
         "classify.go",
         "extract.go",
@@ -193,6 +194,7 @@ go_test(
     name = "check_deps_test",
     srcs = [
         "app_e2e_test.go",
+        "bakedami_test.go",
         "check_deps_test.go",
         "classify_test.go",
         "enforce_test.go",

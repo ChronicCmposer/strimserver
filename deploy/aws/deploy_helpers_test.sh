@@ -74,6 +74,15 @@ printf 'chown %s\n' "$*" >> "${FAKE_SUDO_LOG:?}"
 exit 0
 SHIM
 chmod +x "$FAKE_SUDO_BINDIR/chown"
+# deploy_apply_containerd_config restarts containerd through `sudo systemctl`;
+# record the call so the no-restart-on-unchanged contract is observable.
+cat >"$FAKE_SUDO_BINDIR/systemctl" <<'SHIM'
+#!/usr/bin/env bash
+# No logging: the recording fake sudo already records the `sudo systemctl ...`
+# argv, so logging again here would double-count the restart assertion.
+exit 0
+SHIM
+chmod +x "$FAKE_SUDO_BINDIR/systemctl"
 PATH="$FAKE_SUDO_BINDIR:$PATH"
 export PATH
 
@@ -234,6 +243,38 @@ logs_wrong_root_rejected() {
   [ ! -d "$wrong" ]
 }
 check "a directory that is not the expected root is rejected" logs_wrong_root_rejected
+
+# --- deploy_apply_containerd_config -----------------------------------------
+# (a) on-disk config already equals the canonical form: no restart and the
+#     file is left byte-for-byte untouched.
+containerd_unchanged_no_restart() {
+  local cfg="$tmp/canonical.toml" before state
+  printf "root='/mnt/nvme/containerd'\nstate='/mnt/nvme/containerd-state'\n\n" >"$cfg"
+  before="$(cksum "$cfg")"
+  : >"$FAKE_SUDO_LOG"
+  state="$(deploy_apply_containerd_config "$cfg" "$tmp/canon-out.toml" sudo)" || return 1
+  [ "$state" = "unchanged" ] || return 1
+  ! grep -q 'systemctl restart containerd' "$FAKE_SUDO_LOG" || return 1
+  [ "$before" = "$(cksum "$cfg")" ] || return 1
+  [ ! -e "$tmp/canon-out.toml" ]
+}
+check "canonical containerd config is left untouched without a restart" containerd_unchanged_no_restart
+
+# (b) a differing config is rewritten exactly once and containerd restarted
+#     exactly once.
+containerd_changed_one_restart() {
+  local cfg="$tmp/changed.toml" state
+  printf "version = 2\nroot = '/stale'\n[plugins]\n  keep = true\n" >"$cfg"
+  : >"$FAKE_SUDO_LOG"
+  state="$(deploy_apply_containerd_config "$cfg" "$tmp/changed-out.toml" sudo)" || return 1
+  [ "$state" = "changed" ] || return 1
+  [ "$(grep -c 'systemctl restart containerd.service' "$FAKE_SUDO_LOG")" -eq 1 ] || return 1
+  grep -qx "root='/mnt/nvme/containerd'" "$cfg" || return 1
+  grep -qx "state='/mnt/nvme/containerd-state'" "$cfg" || return 1
+  grep -q 'keep = true' "$cfg" || return 1
+  [ ! -e "$tmp/changed-out.toml" ]
+}
+check "a changed containerd config is rewritten with exactly one restart" containerd_changed_one_restart
 
 # --- deploy.sh static check -------------------------------------------------
 deploy_sh_has_no_passphrase_print() {

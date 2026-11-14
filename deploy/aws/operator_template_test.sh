@@ -71,6 +71,12 @@ check "operator policy covers both x86_64 + arm64 DLAMI SSM params" \
   bash -c 'grep -Fq "deeplearning/ami/x86_64/" <<<"$1" && grep -Fq "deeplearning/ami/arm64/" <<<"$1"' _ "$operator_policy"
 check "operator policy grants ec2:DescribeImages (check-deps DLAMI metadata)" \
   bash -c 'grep -Fq "ec2:DescribeImages" <<<"$1"' _ "$operator_policy"
+# launch reads the baked-AMI SSM parameter BEFORE falling back to the DLAMI, so
+# the operator identity (the only identity that runs launch) must be granted
+# ssm:GetParameter on it or the lookup returns AccessDenied and the baked image
+# is never used.
+check "operator policy covers the baked-AMI SSM parameter /strimserver/ami/baked/latest" \
+  bash -c 'grep -Fq "/strimserver/ami/baked/latest" <<<"$1"' _ "$operator_policy"
 check "exactly ONE managed policy attaches to the user (Users: appears once)" \
   bash -c '[ "$(grep -c "Users:" "$1")" -eq 1 ]' _ "$template"
 
@@ -240,6 +246,40 @@ check "no route53 anywhere in the template" \
 # --- regression: instance plumbing still present ------------------------------
 check "InstanceRole still present" bash -c 'grep -Fq "InstanceRole:" "$1"' _ "$template"
 check "InstanceProfile still present" bash -c 'grep -Fq "InstanceProfile:" "$1"' _ "$template"
+
+# --- baked-AMI read grant on the instance role -------------------------------
+# The instance role already carries only scoped grants; the baked-AMI lookup
+# must stay scoped to the single parameter, never a wildcard ssm:GetParameter.
+instance_role="$(extract_resource InstanceRole)"
+check "instance role can read the baked-AMI SSM parameter" \
+  bash -c 'grep -Fq "/strimserver/ami/baked/latest" <<<"$1"' _ "$instance_role"
+check "instance role baked-AMI read is scoped (no parameter/* wildcard)" \
+  bash -c '! grep -Fq "parameter/*" <<<"$1"' _ "$instance_role"
+
+# --- baked-AMI Image Builder execution role (least privilege) ----------------
+execution_role="$(extract_resource BakedImageBuilderExecutionRole)"
+check "baked-AMI pipeline execution role exists (AWS::IAM::Role)" \
+  bash -c 'grep -Fq "Type: AWS::IAM::Role" <<<"$1"' _ "$execution_role"
+check "pipeline execution role is assumable by imagebuilder.amazonaws.com" \
+  bash -c 'grep -Fq "imagebuilder.amazonaws.com" <<<"$1"' _ "$execution_role"
+check "pipeline execution role grants imagebuilder actions" \
+  bash -c 'grep -Fq "imagebuilder:" <<<"$1"' _ "$execution_role"
+check "pipeline execution role grants ssm:PutParameter on the baked AMI parameter" \
+  bash -c 'grep -Fq "ssm:PutParameter" <<<"$1" && grep -Fq "/strimserver/ami/baked/latest" <<<"$1"' _ "$execution_role"
+check "pipeline execution role grants ec2:CreateTags (AMI tagging)" \
+  bash -c 'grep -Fq "ec2:CreateTags" <<<"$1"' _ "$execution_role"
+check "pipeline execution role passes only the Image Builder instance role" \
+  bash -c 'grep -Fq "iam:PassRole" <<<"$1" && grep -Fq "ec2.amazonaws.com" <<<"$1"' _ "$execution_role"
+
+# --- no hardcoded AMI ids beyond the recipe base + launch fallback -----------
+# The ImageRecipe base and launch's DEFAULT_AMI_ID are the only two places the
+# pinned DLAMI id may appear. Any other literal would be a stale bake target.
+pinned_ami="ami-0198b63ccfac121e8"
+check "template hardcodes only the pinned recipe-base AMI id" \
+  bash -c 'ids="$(grep -o "ami-[0-9a-f]\{8,\}" "$1" | sort -u)"; [ "$ids" = "$2" ]' _ "$template" "$pinned_ami"
+check "launch keeps only the pinned fallback AMI constant" \
+  bash -c 'ids="$(grep -o "ami-[0-9a-f]\{8,\}" "$1" | sort -u)"; [ "$ids" = "$2" ]' _ "$script_dir/launch" "$pinned_ami"
+
 
 # --- mutation check: CreateTags without aws:TagKeys must FAIL ------------------
 # Guard against the fix3 assertion silently rotting: strip the

@@ -200,3 +200,45 @@ deploy_prepare_logs_directory() {
   }
   return 0
 }
+
+# Sync the canonical root/state containerd config to <config>, restarting
+# containerd ONLY when the content actually changes.
+#
+# The baked AMI already ships the canonical config, so a fast-path deploy must
+# not bounce containerd for an identical file. Prints exactly one of
+#   changed     config was rewritten and containerd restarted
+#   unchanged   config already matched; no write, no restart
+# and leaves no scratch file behind. <out> is a caller-owned temp path beside
+# which the canonical content is assembled atomically by
+# deploy_prepend_containerd_root_state.
+deploy_apply_containerd_config() {
+  local config="$1" out="$2" sudo_cmd="${3:-}"
+
+  if [ -z "$config" ] || [ -z "$out" ]; then
+    printf '[containerd] ERROR: config and out arguments are required\n' >&2
+    return 1
+  fi
+
+  deploy_prepend_containerd_root_state "$config" "$out" "$sudo_cmd" || return 1
+
+  if deploy__run "$sudo_cmd" test -e "$config" \
+      && deploy__run "$sudo_cmd" cmp -s "$out" "$config"; then
+    rm -f "$out"
+    printf 'unchanged\n'
+    return 0
+  fi
+
+  if ! deploy__run "$sudo_cmd" install -m 644 "$out" "$config"; then
+    rm -f "$out"
+    printf '[containerd] ERROR: cannot install %s\n' "$config" >&2
+    return 1
+  fi
+  rm -f "$out"
+
+  if ! deploy__run "$sudo_cmd" systemctl restart containerd.service; then
+    printf '[containerd] ERROR: cannot restart containerd.service\n' >&2
+    return 1
+  fi
+  printf 'changed\n'
+  return 0
+}

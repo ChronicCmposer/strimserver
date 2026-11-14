@@ -1525,3 +1525,161 @@ fake_gpu_cleanup() {
   [[ -n "${FAKE_GPU_STATE:-}" ]] && "$rm_bin" -rf "$FAKE_GPU_STATE"
   return 0
 }
+
+# --- optional deploy.sh sandbox harness -------------------------------------
+# Deploy-flow tests call fake_gpu_install first, then fake_deploy_install to
+# layer the extra doubles deploy.sh needs: a `sudo` that records calls and
+# redirects absolute system paths into a hermetic sysroot, plus ctr,
+# hostnamectl, sleep and an nvidia-ctk that writes its --output file. None of
+# these are installed by fake_gpu_install alone, so the NVIDIA-only suites are
+# unaffected. deploy.sh is made relocatable with DEPLOY_ROOT (payload) and
+# DEPLOY_LOGS_ROOT (logs) so no /mnt/nvme write is required.
+#
+# Knobs:
+#   FAKE_CTR_DELAY       seconds (real /bin/sleep) spent inside fake `ctr import`
+#   FAKE_CTR_FAIL_IMAGE  controller|ffmpeg|mediamtx|strim-ddns -> that import fails
+#   FAKE_PUBLIC_IP       value the seeded IMDS stub reports (default 203.0.113.10)
+fake_deploy_install() {
+  FAKE_DEPLOY_BINDIR="$(mktemp -d)"
+  FAKE_DEPLOY_ROOT="$(mktemp -d)"
+  FAKE_SYSROOT="$(mktemp -d)"
+  FAKE_DEPLOY_SLEEP_LOG="$(mktemp)"
+  FAKE_CTR_STARTS="$(mktemp)"
+  export FAKE_DEPLOY_BINDIR FAKE_DEPLOY_ROOT FAKE_SYSROOT \
+    FAKE_DEPLOY_SLEEP_LOG FAKE_CTR_STARTS
+  : >"$FAKE_DEPLOY_SLEEP_LOG"
+  : >"$FAKE_CTR_STARTS"
+
+  cat >"$FAKE_DEPLOY_BINDIR/sudo" <<'SHIM'
+#!/usr/bin/env bash
+printf 'sudo %s\n' "$*" >>"${FAKE_GPU_CALLS:?}"
+# Drop owner/group flags so install(1) works for a non-root test user.
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|-g) shift; [ "$#" -gt 0 ] && shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+if [ "${args[0]:-}" = "chown" ]; then
+  exit 0
+fi
+# Redirect absolute system paths into the hermetic sysroot before exec.
+remapped=()
+for a in "${args[@]}"; do
+  case "$a" in
+    /etc/*|/var/*|/run/*|/usr/local/*|/lib/*) a="${FAKE_SYSROOT}${a}" ;;
+  esac
+  remapped+=("$a")
+done
+exec "${remapped[@]}"
+SHIM
+
+  cat >"$FAKE_DEPLOY_BINDIR/chown" <<'SHIM'
+#!/usr/bin/env bash
+exit 0
+SHIM
+
+  cat >"$FAKE_DEPLOY_BINDIR/hostnamectl" <<'SHIM'
+#!/usr/bin/env bash
+printf 'hostnamectl %s\n' "$*" >>"${FAKE_GPU_CALLS:?}"
+exit 0
+SHIM
+
+  cat >"$FAKE_DEPLOY_BINDIR/sleep" <<'SHIM'
+#!/usr/bin/env bash
+printf 'sleep %s\n' "$*" >>"${FAKE_DEPLOY_SLEEP_LOG:?}"
+exit 0
+SHIM
+
+  cat >"$FAKE_DEPLOY_BINDIR/ctr" <<'SHIM'
+#!/usr/bin/env bash
+printf 'ctr %s\n' "$*" >>"${FAKE_GPU_CALLS:?}"
+img=""
+for a in "$@"; do
+  case "$a" in
+    *controller-container.tar) img=controller ;;
+    *ffmpeg-container.tar) img=ffmpeg ;;
+    *mediamtx-container.tar) img=mediamtx ;;
+    *strim-ddns-container.tar) img=strim-ddns ;;
+  esac
+done
+case "$*" in
+  *' i import '*)
+    printf '%s\n' "$(date +%s%N 2>/dev/null)" >>"${FAKE_CTR_STARTS:?}" ;;
+esac
+if [ -n "${FAKE_CTR_DELAY:-}" ]; then /bin/sleep "$FAKE_CTR_DELAY"; fi
+if [ -n "${FAKE_CTR_FAIL_IMAGE:-}" ] && [ "$img" = "${FAKE_CTR_FAIL_IMAGE}" ]; then
+  printf 'ctr: failed to import %s\n' "$img" >&2
+  exit 1
+fi
+exit 0
+SHIM
+
+  cat >"$FAKE_DEPLOY_BINDIR/nvidia-ctk" <<'SHIM'
+#!/usr/bin/env bash
+printf 'nvidia-ctk %s\n' "$*" >>"${FAKE_GPU_CALLS:?}"
+out=""
+for a in "$@"; do
+  case "$a" in
+    --output=*) out="${a#--output=}" ;;
+  esac
+done
+if [ -n "$out" ]; then
+  target="$out"
+  case "$out" in
+    /etc/*|/var/*|/run/*) target="${FAKE_SYSROOT}${out}" ;;
+  esac
+  "${FAKE_REAL_MKDIR:-mkdir}" -p "$(dirname "$target")" 2>/dev/null || true
+  printf '{"cdiVersion":"0.5.0","devices":[],"containerEdits":{}}\n' \
+    >"$target" 2>/dev/null || true
+fi
+exit 0
+SHIM
+
+  chmod +x "$FAKE_DEPLOY_BINDIR"/*
+  PATH="$FAKE_DEPLOY_BINDIR:$PATH"
+  export PATH
+  DEPLOY_ROOT="$FAKE_DEPLOY_ROOT"
+  DEPLOY_LOGS_ROOT="$FAKE_DEPLOY_ROOT/logs"
+  export DEPLOY_ROOT DEPLOY_LOGS_ROOT
+}
+
+# Seed a standard deploy payload + canonical containerd config. Tests adjust
+# individual files afterwards (e.g. ENABLE_DDNS, the loaded driver version).
+fake_deploy_seed_baseline() {
+  local root="$FAKE_DEPLOY_ROOT" sys="$FAKE_SYSROOT"
+  "${FAKE_REAL_MKDIR:-mkdir}" -p "$root/config" "$root/bin" \
+    "$sys/etc/containerd" "$sys/etc/systemd/system" "$sys/etc/cdi" \
+    "$sys/var/run/cdi" "$sys/etc/strim-ddns"
+  cat >"$root/imdslib.sh" <<'EOF'
+get_public_ip() { printf '%s\n' "${FAKE_PUBLIC_IP:-203.0.113.10}"; }
+get_instance_type() { printf '%s\n' "g4dn.xlarge"; }
+EOF
+  : >"$root/fish-deploy.sh"
+  : >"$root/bin/transcode.sh"
+  : >"$root/bin/notify"
+  : >"$root/strimserver.service"
+  : >"$root/strimserver-offline-2160p60.mp4"
+  : >"$root/controller-container.tar"
+  : >"$root/ffmpeg-container.tar"
+  : >"$root/mediamtx-container.tar"
+  : >"$root/strim-ddns.service"
+  : >"$root/strim-ddns.timer"
+  printf 'ENABLE_DDNS=false\nDDNS_HOST=strim\nDDNS_DOMAIN=\n' \
+    >"$root/config/strimserver.env"
+  printf "root='/mnt/nvme/containerd'\nstate='/mnt/nvme/containerd-state'\n\n" \
+    >"$sys/etc/containerd/config.toml"
+  : >"$sys/etc/resolv.conf"
+  : >"$sys/etc/hosts"
+}
+
+fake_deploy_cleanup() {
+  local rm_bin="${FAKE_REAL_RM:-rm}"
+  [[ -n "${FAKE_DEPLOY_BINDIR:-}" ]] && "$rm_bin" -rf "$FAKE_DEPLOY_BINDIR"
+  [[ -n "${FAKE_DEPLOY_ROOT:-}" ]] && "$rm_bin" -rf "$FAKE_DEPLOY_ROOT"
+  [[ -n "${FAKE_SYSROOT:-}" ]] && "$rm_bin" -rf "$FAKE_SYSROOT"
+  [[ -n "${FAKE_DEPLOY_SLEEP_LOG:-}" ]] && "$rm_bin" -f "$FAKE_DEPLOY_SLEEP_LOG"
+  [[ -n "${FAKE_CTR_STARTS:-}" ]] && "$rm_bin" -f "$FAKE_CTR_STARTS"
+  return 0
+}
