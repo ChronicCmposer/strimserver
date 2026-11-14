@@ -344,6 +344,7 @@ recipe_block="$(extract_template_resource BakedImageRecipe)"
 infra_config_block="$(extract_template_resource BakedInfrastructureConfiguration)"
 distribution_block="$(extract_template_resource BakedDistributionConfiguration)"
 pipeline_block="$(extract_template_resource BakedImagePipeline)"
+publish_rule_block="$(extract_template_resource BakedAmiPublishRule)"
 
 check "Image Builder component exists (AWS::ImageBuilder::Component)" \
   bash -c 'grep -Fq "Type: AWS::ImageBuilder::Component" <<<"$1"' _ "$component_block"
@@ -392,6 +393,11 @@ check "InfrastructureConfiguration references the operator's instance profile na
   bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" <<<"$1"' _ "$infra_config_block"
 check "SSM publish document has a deterministic Name" \
   bash -c 'grep -A6 "Type: AWS::SSM::Document" "$1" | grep -Fq "Name:"' _ "$infra_template"
+
+check "BakedAmiPublishRule has the deterministic ProjectName-derived RuleName" \
+  bash -c 'grep -Fq "RuleName: !Sub \"\${ProjectName}-baked-ami-publish\"" <<<"$1"' _ "$publish_rule_block"
+check "publish RuleName matches the operator policy's events rule scope" \
+  bash -c 'grep -Fq "RuleName: !Sub \"\${ProjectName}-baked-ami-publish\"" <<<"$1" && grep -Fq "rule/\${ProjectName}-baked-ami-publish" "$2"' _ "$publish_rule_block" "$operator_template"
 
 check "infra declares DeploymentBucketName" \
   bash -c 'grep -Eq "^  DeploymentBucketName:" "$1"' _ "$infra_template"

@@ -408,6 +408,12 @@ Resources:
               - imagebuilder:CreateImagePipeline
               - imagebuilder:UpdateImagePipeline
               - imagebuilder:DeleteImagePipeline
+              # CloudFormation issues TagResource after creating a tagged Image
+              # Builder resource (live failure on the infrastructure- and
+              # distribution-configuration creates) and UntagResource on update;
+              # without these the first tagged create is denied.
+              - imagebuilder:TagResource
+              - imagebuilder:UntagResource
             Resource: !Sub "arn:aws:imagebuilder:*:${AWS::AccountId}:*"
           # D.3: the EventBridge rule that publishes the baked-AMI id. Scoped to
           # the one rule the infra stack owns.

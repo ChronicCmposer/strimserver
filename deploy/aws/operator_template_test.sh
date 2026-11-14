@@ -212,8 +212,14 @@ check "Image Builder lifecycle statement covers the other resource types" \
   bash -c 'for a in CreateImageRecipe DeleteImageRecipe CreateInfrastructureConfiguration CreateDistributionConfiguration CreateImagePipeline UpdateImagePipeline DeleteImagePipeline; do grep -Fq "imagebuilder:$a" <<<"$1" || exit 1; done' _ "$ib_lifecycle_stmt"
 check "Image Builder lifecycle is scoped to the account's imagebuilder resources" \
   bash -c 'grep -Fq "arn:aws:imagebuilder:*:\${AWS::AccountId}:" <<<"$1"' _ "$ib_lifecycle_stmt"
+check "Image Builder lifecycle grants TagResource/UntagResource (CFN tags on create)" \
+  bash -c 'for a in TagResource UntagResource; do grep -Fq "imagebuilder:$a" <<<"$1" || exit 1; done' _ "$ib_lifecycle_stmt"
+check "Image Builder TagResource/UntagResource stay on the imagebuilder ARN scope" \
+  bash -c 'grep -Fq "arn:aws:imagebuilder:*:\${AWS::AccountId}:" <<<"$1"' _ "$ib_lifecycle_stmt"
 check "Events lifecycle is scoped to the baked-AMI publish rule" \
   bash -c 'for a in PutRule PutTargets RemoveTargets DeleteRule DescribeRule ListTargetsByRule EnableRule DisableRule; do grep -Fq "events:$a" <<<"$1" || exit 1; done; grep -Fq "rule/\${ProjectName}-baked-ami-publish" <<<"$1"' _ "$events_stmt"
+check "Events rule scope still matches the deterministic publish rule name" \
+  bash -c 'grep -Fq "rule/\${ProjectName}-baked-ami-publish" <<<"$1"' _ "$events_stmt"
 check "SSM document lifecycle is granted (CreateDocument has no resource scope)" \
   bash -c 'for a in CreateDocument UpdateDocument DeleteDocument DescribeDocument GetDocument; do grep -Fq "ssm:$a" <<<"$1" || exit 1; done; grep -Fq "Resource: \"*\"" <<<"$1"' _ "$ssm_doc_stmt"
 
