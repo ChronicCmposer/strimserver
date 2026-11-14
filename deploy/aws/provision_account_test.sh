@@ -16,6 +16,11 @@
 #   7. the identity assertion retries a transient InvalidClientTokenId.
 #   8. a persistent InvalidClientTokenId fails loud after bounded retries.
 #   9. --stack-name / --region / --profile override the defaults.
+#  10. an inherited CFN_STACK_NAME=strimserver (the INFRA stack, as .env.example
+#      sets) does NOT leak into the operator stack name (regression).
+#  11. OPERATOR_STACK_NAME overrides the default operator stack name.
+#  12. an operator stack name equal to the infra stack name dies loud and never
+#      deploys (both OPERATOR_STACK_NAME and --stack-name).
 #
 # Usage: provision_account_test.sh <provision-account>
 
@@ -272,5 +277,72 @@ deploy9="$(grep -m1 '^cloudformation deploy' "$c9/calls" || true)"
 grep -q '^\[profile ops\]$' "$c9/.aws/config" || fail "--profile not used for the config section"
 grep -q '^\[ops\]$' "$c9/.aws/credentials" || fail "--profile not used for the credentials section"
 ok "--stack-name / --region / --profile override the defaults"
+
+# ---------------------------------------------------------------------------
+# Case 10 -- an inherited CFN_STACK_NAME=strimserver does not leak
+# ---------------------------------------------------------------------------
+# .env.example assigns CFN_STACK_NAME="strimserver" to the INFRA stack. Operators
+# source it, so provision-account must NOT inherit it for the operator stack
+# (doing so once deployed the operator template into the infra stack).
+c10="$work/c10"; mkdir -p "$c10/state" "$c10/.aws"
+EXTRA_ENV=(CFN_STACK_NAME=strimserver)
+run_provision "$c10/state" "$c10/calls" "$c10/.aws/credentials" "$c10/.aws/config" \
+  --yes >"$c10/out" 2>&1 \
+  || fail "an inherited CFN_STACK_NAME must not break provisioning; output:\n$(cat "$c10/out")"
+EXTRA_ENV=()
+deploy10="$(grep -m1 '^cloudformation deploy' "$c10/calls" || true)"
+[[ "$deploy10" == *"--stack-name strimserver-operator"* ]] \
+  || fail "CFN_STACK_NAME leaked into the operator stack name: $deploy10"
+[[ "$deploy10" != *"--stack-name strimserver "* ]] \
+  || fail "operator template deployed into the infra stack 'strimserver': $deploy10"
+grep -q 'stack          : strimserver-operator' "$c10/out" \
+  || fail "summary did not report the operator stack:\n$(cat "$c10/out")"
+ok "an inherited CFN_STACK_NAME=strimserver does not leak into the operator stack"
+
+# ---------------------------------------------------------------------------
+# Case 11 -- OPERATOR_STACK_NAME overrides the default
+# ---------------------------------------------------------------------------
+c11="$work/c11"; mkdir -p "$c11/state" "$c11/.aws"
+EXTRA_ENV=(OPERATOR_STACK_NAME=custom-op)
+run_provision "$c11/state" "$c11/calls" "$c11/.aws/credentials" "$c11/.aws/config" \
+  --yes >"$c11/out" 2>&1 \
+  || fail "OPERATOR_STACK_NAME override must succeed; output:\n$(cat "$c11/out")"
+EXTRA_ENV=()
+deploy11="$(grep -m1 '^cloudformation deploy' "$c11/calls" || true)"
+[[ "$deploy11" == *"--stack-name custom-op"* ]] \
+  || fail "OPERATOR_STACK_NAME not honored: $deploy11"
+grep -q 'stack          : custom-op' "$c11/out" \
+  || fail "summary did not report the custom operator stack:\n$(cat "$c11/out")"
+ok "OPERATOR_STACK_NAME overrides the default operator stack name"
+
+# ---------------------------------------------------------------------------
+# Case 12 -- an operator stack named like the infra stack dies loud, no deploy
+# ---------------------------------------------------------------------------
+c12="$work/c12"; mkdir -p "$c12/state" "$c12/.aws"
+EXTRA_ENV=(OPERATOR_STACK_NAME=strimserver)
+rc=0
+run_provision "$c12/state" "$c12/calls" "$c12/.aws/credentials" "$c12/.aws/config" \
+  --yes >"$c12/out" 2>&1 || rc=$?
+EXTRA_ENV=()
+(( rc != 0 )) || fail "OPERATOR_STACK_NAME=strimserver must die"
+grep -qi 'infra stack' "$c12/out" \
+  || fail "tripwire message did not explain the infra-stack collision:\n$(cat "$c12/out")"
+grep -qi 'OPERATOR_STACK_NAME\|--stack-name' "$c12/out" \
+  || fail "tripwire message did not point at OPERATOR_STACK_NAME/--stack-name:\n$(cat "$c12/out")"
+if [ -f "$c12/calls" ] && grep -q '^cloudformation deploy' "$c12/calls"; then
+  fail "tripwire deployed instead of dying"
+fi
+
+c12b="$work/c12b"; mkdir -p "$c12b/state" "$c12b/.aws"
+rc=0
+run_provision "$c12b/state" "$c12b/calls" "$c12b/.aws/credentials" "$c12b/.aws/config" \
+  --yes --stack-name strimserver >"$c12b/out" 2>&1 || rc=$?
+(( rc != 0 )) || fail "--stack-name strimserver must die"
+grep -qi 'infra stack' "$c12b/out" \
+  || fail "flag tripwire message did not explain the infra-stack collision:\n$(cat "$c12b/out")"
+if [ -f "$c12b/calls" ] && grep -q '^cloudformation deploy' "$c12b/calls"; then
+  fail "flag tripwire deployed instead of dying"
+fi
+ok "an operator stack named like the infra stack dies loud without deploying"
 
 printf 'PASS: provision_account_test\n'

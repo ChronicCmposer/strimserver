@@ -37,6 +37,8 @@
 # AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE are honored (defaults
 # $HOME/.aws/credentials and $HOME/.aws/config). PROVISION_ASSERT_RETRY_DELAY
 # overrides the assertion backoff (seconds) so tests run fast.
+# OPERATOR_STACK_NAME overrides the operator stack name (default
+# strimserver-operator); CFN_STACK_NAME is the INFRA stack name and is ignored.
 #
 # Usage:
 #   deploy/aws/provision-account [--stack-name S] [--region R] [--profile P]
@@ -51,7 +53,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${SCRIPT_DIR}/strimserver-operator.yaml"
 
 IAM_USER="strimserver"
-STACK_NAME="${CFN_STACK_NAME:-strimserver-operator}"
+# The INFRA stack name: the literal that .env.example assigns to CFN_STACK_NAME.
+# The operator stack must never reuse it (they are different stacks/templates).
+INFRA_STACK_NAME="strimserver"
+# Deliberately does NOT read CFN_STACK_NAME: operators source .env.example, which
+# sets CFN_STACK_NAME to the INFRA stack, and inheriting it here once deployed the
+# operator template into the infra stack. Only OPERATOR_STACK_NAME overrides this.
+STACK_NAME="${OPERATOR_STACK_NAME:-strimserver-operator}"
 PROJECT_NAME="${PROJECT_NAME:-strimserver}"
 REGION="${AWS_REGION:-us-east-2}"
 PROFILE="${AWS_PROFILE:-strimserver}"
@@ -79,13 +87,20 @@ credentials. Idempotent: a second run reuses the existing access key and leaves
 the profile untouched.
 
 Options:
-  --stack-name S   CloudFormation stack name (default: strimserver-operator)
+  --stack-name S   CloudFormation operator stack name
+                   (default: strimserver-operator, or OPERATOR_STACK_NAME)
   --region R       AWS region (default: us-east-2)
   --profile P      AWS profile to install (default: strimserver)
   --rotate         mint a new access key, update the profile, then delete the
                    old key (default: reuse the existing key)
   --yes            skip the admin-identity confirmation prompt
   -h, --help       show this help
+
+Environment:
+  OPERATOR_STACK_NAME  operator stack name (default: strimserver-operator).
+                       CFN_STACK_NAME (the INFRA stack name from .env.example) is
+                       intentionally ignored here. The operator stack name must
+                       NOT equal the infra stack name ('strimserver').
 
 Deploys ONLY the account-global operator template (IAM user, operator policy,
 instance role/profile and Image Builder roles). The regional network/Image
@@ -136,6 +151,13 @@ parse_args() {
 validate_assert_retry_delay() {
   [[ "$ASSERT_RETRY_DELAY" =~ ^[0-9]+$ ]] \
     || die "PROVISION_ASSERT_RETRY_DELAY must be a non-negative integer (got '${ASSERT_RETRY_DELAY}')"
+}
+
+# reject_infra_stack_name: the operator stack and the infra stack are different
+# templates and must never share a name. This guards against the historical leak
+# (CFN_STACK_NAME from .env.example) and against a mistyped override.
+reject_infra_stack_name() {
+  [ "$STACK_NAME" != "$INFRA_STACK_NAME" ] || die "operator stack must not share the infra stack name '${INFRA_STACK_NAME}'; set OPERATOR_STACK_NAME or pass --stack-name to a distinct operator stack name"
 }
 
 gate_admin_identity() {
@@ -385,6 +407,7 @@ print_summary() {
 main() {
   parse_args "$@"
   validate_assert_retry_delay
+  reject_infra_stack_name
   require_cmd aws
 
   mkdir -p "$(dirname "$CREDENTIALS_FILE")" "$(dirname "$CONFIG_FILE")"
