@@ -82,7 +82,13 @@ property_value() { # property_value <resource-block> <key>
 }
 
 service_user="$(extract_resource "$operator_template" StrimserverServiceUser)"
-operator_policy="$(extract_resource "$operator_template" StrimserverOperatorPolicy)"
+operator_policy_block="$(extract_resource "$operator_template" StrimserverOperatorPolicy)"
+infra_lifecycle_policy_block="$(extract_resource "$operator_template" StrimserverOperatorInfraLifecyclePolicy)"
+# The identity/deploy/launch and infra-lifecycle policies are two halves of the
+# operator's effective permissions. Every action/allowlist assertion below runs
+# against BOTH merged documents so the split cannot silently drop a grant.
+operator_policy="$operator_policy_block
+$infra_lifecycle_policy_block"
 instance_role="$(extract_resource "$operator_template" InstanceRole)"
 boundary_policy="$(extract_resource "$operator_template" StrimserverOperatorBoundary)"
 
@@ -97,6 +103,168 @@ extract_statement() {
 }
 
 contains() { grep -Fq -- "$2" <<<"$1"; }
+
+# managed_policy_names: print every top-level resource whose Type is
+# AWS::IAM::ManagedPolicy (the policy-size quota applies to each one).
+managed_policy_names() {
+  awk '
+    /^  [A-Za-z0-9]+:/ { name=$1; sub(/:$/, "", name) }
+    /^    Type: AWS::IAM::ManagedPolicy[[:space:]]*$/ { print name }
+  ' "$operator_template"
+}
+
+# policy_document_size: JSON-serialize a resource block'"'"'s PolicyDocument the
+# way IAM stores it (compact, no whitespace) and print the byte length. PyYAML
+# is not available in the build image, so this is a stdlib-only YAML subset
+# parser covering the constructs the templates use (block mappings/sequences,
+# quoted/plain scalars and CloudFormation intrinsic tags). Fn::If branches that
+# resolve to AWS::NoValue are dropped and the remaining branch is measured, so
+# the result matches the deployed (conditional) document.
+policy_document_size() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+
+def parse_scalar(token):
+    token = token.strip()
+    for tag in ("!Sub", "!Ref", "!GetAtt", "!GetAZs", "!ImportValue",
+                "!Base64", "!Select", "!Split", "!Join"):
+        if token == tag:
+            return token
+        if token.startswith(tag + " "):
+            token = token[len(tag) + 1:].strip()
+            break
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        token = token[1:-1]
+    if token in ("true", "false", "True", "False"):
+        return token.lower() == "true"
+    if token in ("null", "~", "Null"):
+        return None
+    return token
+
+
+def parse_nodes(lines, index):
+    if index >= len(lines):
+        return None, index
+    indent, text = lines[index]
+    if text.startswith("- "):
+        return parse_sequence(lines, index, indent)
+    return parse_mapping(lines, index, indent)
+
+
+def parse_mapping(lines, index, indent):
+    result = {}
+    while index < len(lines):
+        line_indent, text = lines[index]
+        if line_indent != indent or text.startswith("- "):
+            break
+        key, separator, value = text.partition(":")
+        if not separator:
+            raise SystemExit("not a mapping entry: %r" % text)
+        index += 1
+        if value.strip() == "":
+            if index < len(lines) and lines[index][0] > indent:
+                parsed, index = parse_nodes(lines, index)
+            else:
+                parsed = None
+        else:
+            parsed = parse_scalar(value)
+        result[key.strip()] = parsed
+    return result, index
+
+
+def parse_sequence(lines, index, indent):
+    result = []
+    while index < len(lines):
+        line_indent, text = lines[index]
+        if line_indent != indent or not text.startswith("- "):
+            break
+        item = text[2:].strip()
+        if item == "":
+            parsed, index = parse_nodes(lines, index + 1)
+            result.append(parsed)
+            continue
+        if item == "!If":
+            parsed, index = parse_nodes(lines, index + 1)
+            result.append({"!If": parsed})
+            continue
+        if ":" in item and not item.startswith(("!", "\"", "'")):
+            map_indent = line_indent + 2
+            virtual = [(map_indent, item)]
+            following = index + 1
+            while following < len(lines) and lines[following][0] > line_indent:
+                virtual.append(lines[following])
+                following += 1
+            parsed, _ = parse_mapping(virtual, 0, map_indent)
+            result.append(parsed)
+            index = following
+            continue
+        result.append(parse_scalar(item))
+        index += 1
+    return result, index
+
+
+def is_no_value(node):
+    if node is None:
+        return True
+    if isinstance(node, str) and node in ("AWS::NoValue", "!Ref AWS::NoValue"):
+        return True
+    return isinstance(node, dict) and node.get("!Ref") == "AWS::NoValue"
+
+
+def resolve(node):
+    if isinstance(node, list):
+        return [resolve(item) for item in node if not is_no_value(item)]
+    if isinstance(node, dict):
+        if list(node.keys()) == ["!If"]:
+            branch = node["!If"]
+            if not isinstance(branch, list) or len(branch) < 2:
+                return resolve(branch)
+            if len(branch) >= 3 and not is_no_value(branch[2]):
+                # Both branches exist: measure the larger (safe upper bound).
+                candidates = [resolve(branch[1]), resolve(branch[2])]
+                return max(candidates,
+                           key=lambda c: len(json.dumps(c, separators=(",", ":"))))
+            return resolve(branch[1])
+        return {key: resolve(value) for key, value in node.items()
+                if not is_no_value(value)}
+    return node
+
+
+def measure(block):
+    raw_lines = block.splitlines()
+    start = None
+    base_indent = None
+    for number, line in enumerate(raw_lines):
+        if line.strip() == "PolicyDocument:":
+            start = number
+            base_indent = len(line) - len(line.lstrip())
+            break
+    if start is None:
+        raise SystemExit("no PolicyDocument in resource block")
+
+    document_lines = []
+    for line in raw_lines[start + 1:]:
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= base_indent:
+            break
+        text = line.strip()
+        if text.startswith("#"):
+            continue
+        document_lines.append((indent, text))
+    if not document_lines:
+        raise SystemExit("empty PolicyDocument")
+
+    document, _ = parse_nodes(document_lines, 0)
+    print(len(json.dumps(resolve(document), separators=(",", ":"))))
+
+
+measure(sys.argv[1])
+PY
+}
 
 # --- split boundary -----------------------------------------------------------
 check "operator template owns the service user named after ProjectName" \
@@ -150,16 +318,45 @@ check "operator policy grants ec2:Describe* (covers check-deps DLAMI metadata)" 
   bash -c 'grep -Fq "ec2:Describe*" <<<"$1"' _ "$operator_policy"
 check "operator policy covers the ProjectName-derived baked-AMI SSM parameter" \
   bash -c 'grep -Fq "parameter/\${ProjectName}/ami/baked/latest" <<<"$1"' _ "$operator_policy"
-check "exactly ONE managed policy attaches to the user (Users: appears once)" \
-  bash -c '[ "$(grep -c "Users:" "$1")" -eq 1 ]' _ "$operator_template"
+check "exactly TWO managed policies attach to the user (Users: appears twice)" \
+  bash -c '[ "$(grep -c "Users:" "$1")" -eq 2 ]' _ "$operator_template"
+# Two AWS::IAM::ManagedPolicy resources attached to one user: each must name
+# the service user, otherwise only half of the operator surface is granted.
+check "both operator policies attach to the service user" \
+  bash -c 'grep -Fq "Users:" <<<"$1" && grep -Fq "StrimserverServiceUser" <<<"$1"' _ "$operator_policy_block"
+check "infra-lifecycle policy attaches to the service user" \
+  bash -c 'grep -Fq "Users:" <<<"$1" && grep -Fq "StrimserverServiceUser" <<<"$1"' _ "$infra_lifecycle_policy_block"
 
 # --- operator policy identity -------------------------------------------------
 check "operator policy exists (AWS::IAM::ManagedPolicy)" \
-  bash -c 'grep -Fq "Type: AWS::IAM::ManagedPolicy" <<<"$1"' _ "$operator_policy"
+  bash -c 'grep -Fq "Type: AWS::IAM::ManagedPolicy" <<<"$1"' _ "$operator_policy_block"
 check "operator policy name derives from ProjectName" \
-  bash -c 'grep -Fq "ManagedPolicyName: !Sub \"\${ProjectName}-operator\"" <<<"$1"' _ "$operator_policy"
+  bash -c 'grep -Fq "ManagedPolicyName: !Sub \"\${ProjectName}-operator\"" <<<"$1"' _ "$operator_policy_block"
 check "operator policy attached to the service user" \
-  bash -c 'grep -Fq "StrimserverServiceUser" <<<"$1"' _ "$operator_policy"
+  bash -c 'grep -Fq "StrimserverServiceUser" <<<"$1"' _ "$operator_policy_block"
+check "infra-lifecycle policy exists (AWS::IAM::ManagedPolicy)" \
+  bash -c 'grep -Fq "Type: AWS::IAM::ManagedPolicy" <<<"$1"' _ "$infra_lifecycle_policy_block"
+check "infra-lifecycle policy name derives from ProjectName" \
+  bash -c 'grep -Fq "ManagedPolicyName: !Sub \"\${ProjectName}-operator-infra-lifecycle\"" <<<"$1"' _ "$infra_lifecycle_policy_block"
+
+# --- policy split: statements live in exactly one of the two policies --------
+deploy_launch_sids="CloudFormationReadStack CloudFormationGetTemplateSummary \
+CloudFormationDeployStack SsmDlamiLookup SelfKeyRotation PassStrimserverRole \
+PassImageBuilderRoles GetImageBuilderInstanceProfile ImageBuilderServiceLinkedRole \
+Ec2Describe Ec2RunInstances Ec2RunInstancesDependencies Ec2CreateTags \
+Ec2TerminateInstances S3BucketConfig S3Objects"
+infra_lifecycle_sids="Ec2VpcLifecycle ImageBuilderRead ImageBuilderLifecycle \
+ImageBuilderRebuild BakedAmiEventsLifecycle SsmDocumentLifecycle"
+for sid in $deploy_launch_sids; do
+  check "$sid stays in the identity/deploy/launch policy" \
+    bash -c 'grep -Fq -- "- Sid: $2" <<<"$1"' _ "$operator_policy_block" "$sid"
+done
+for sid in $infra_lifecycle_sids; do
+  check "$sid moved to the infra-lifecycle policy" \
+    bash -c 'grep -Fq -- "- Sid: $2" <<<"$1"' _ "$infra_lifecycle_policy_block" "$sid"
+  check "$sid is not duplicated in the identity/deploy/launch policy" \
+    bash -c '! grep -Fq -- "- Sid: $2" <<<"$1"' _ "$operator_policy_block" "$sid"
+done
 
 # Regression: the IAM CreatePolicy Description regex
 # [\p{L}\p{M}\p{Z}\p{S}\p{N}\p{P}]* rejects control chars, and a YAML folded
@@ -493,6 +690,18 @@ check "operator template hardcodes no AMI id" \
   bash -c '! grep -q "ami-[0-9a-f]\{8,\}" "$1"' _ "$operator_template"
 check "launch keeps only the pinned fallback AMI constant" \
   bash -c 'ids="$(grep -o "ami-[0-9a-f]\{8,\}" "$1" | sort -u)"; [ "$ids" = "$2" ]' _ "$script_dir/launch" "$pinned_ami"
+
+# --- IAM managed-policy size quota (6144 chars) ------------------------------
+# AWS rejects a managed policy whose JSON document exceeds 6144 characters.
+# Keep every managed policy in this template comfortably under that ceiling;
+# 6000 leaves headroom for IAM's own serialization quirks.
+while read -r policy_name; do
+  [[ -n "$policy_name" ]] || continue
+  policy_block="$(extract_resource "$operator_template" "$policy_name")"
+  policy_size="$(policy_document_size "$policy_block")"
+  check "managed policy $policy_name PolicyDocument is under 6000 chars (measured ${policy_size})" \
+    bash -c '[ "$1" -lt 6000 ] || { echo "  $2 PolicyDocument size=$1 >= 6000" >&2; exit 1; }' _ "$policy_size" "$policy_name"
+done < <(managed_policy_names)
 
 # --- mutation check: CreateTags without aws:TagKeys must FAIL ------------------
 # Guard against the allowlist assertion silently rotting: strip the

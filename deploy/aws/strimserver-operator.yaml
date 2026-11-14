@@ -132,9 +132,11 @@ Resources:
   # identity, so the policy covers the scoped CloudFormation deploy lifecycle and
   # the Image Builder rebuild surface without granting account-wide IAM
   # administration. It also serves the check-deps DLAMI resolver via the
-  # SsmDlamiLookup + Ec2Describe grants. This is the SINGLE managed policy
-  # attached to the user (CloudFormation cannot reliably manage two
-  # AWS::IAM::ManagedPolicy resources attached to one user).
+  # SsmDlamiLookup + Ec2Describe grants. This is the identity/deploy/launch half
+  # of the operator surface; the regional-resource lifecycle grants live in the
+  # sibling StrimserverOperatorInfraLifecyclePolicy below. Both are attached to
+  # the service user because one managed policy would exceed the 6144-character
+  # IAM PolicySize quota.
   StrimserverOperatorPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -396,6 +398,29 @@ Resources:
             Action:
               - iam:CreateServiceLinkedRole
             Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/imagebuilder.amazonaws.com/AWSServiceRoleForImageBuilder"
+
+  # ----------------------------------------------------------------------------
+  # Operator infra-lifecycle policy: the second half of the operator surface.
+  # ----------------------------------------------------------------------------
+  # A single AWS::IAM::ManagedPolicy would exceed the 6144-character PolicySize
+  # quota once the audit fixes landed (ServiceLimitExceeded on operator stack
+  # update), so the regional-resource lifecycle grants live in this sibling
+  # managed policy. It is attached to the same service user; together the two
+  # documents grant exactly the same permissions as the former single policy.
+  StrimserverOperatorInfraLifecyclePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-operator-infra-lifecycle"
+      Description: >-
+        Infra resource lifecycle for the strimserver operator: the self-contained
+        VPC network, the Image Builder component/recipe/pipeline lifecycle, the
+        baked-AMI publish EventBridge rule and SSM document. Attached alongside
+        the operator policy to the same service user.
+      Users:
+        - !Ref StrimserverServiceUser
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
           # Manual baked-AMI rebuild: trigger the one pipeline the infra stack
           # owns.
           - Sid: ImageBuilderRebuild
