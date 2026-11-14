@@ -196,6 +196,8 @@ vpc_stmt="$(extract_statement Ec2VpcLifecycle)"
 ib_lifecycle_stmt="$(extract_statement ImageBuilderLifecycle)"
 events_stmt="$(extract_statement BakedAmiEventsLifecycle)"
 ssm_doc_stmt="$(extract_statement SsmDocumentLifecycle)"
+get_instance_profile_stmt="$(extract_statement GetImageBuilderInstanceProfile)"
+create_slr_stmt="$(extract_statement ImageBuilderServiceLinkedRole)"
 publish_rule_block="$(extract_resource "$infra_template" BakedAmiPublishRule)"
 
 check "CloudFormation deploy statement exists" \
@@ -221,6 +223,23 @@ check "iam:PassRole covers the AMI-publish role" \
   bash -c 'grep -Fq "baked-publish-role" <<<"$1"' _ "$pass_ib_stmt"
 check "iam:PassRole uses deterministic !Sub role ARNs" \
   bash -c 'grep -Fq "arn:\${AWS::Partition}:iam::\${AWS::AccountId}:role/" <<<"$1"' _ "$pass_ib_stmt"
+# Image Builder's distribution-configuration handler may pass a role to the
+# VM Import/Export service, so vmie.amazonaws.com joins the PassedToService set.
+check "iam:PassRole condition includes vmie.amazonaws.com (distribution handler)" \
+  bash -c 'grep -Fq "vmie.amazonaws.com" <<<"$1"' _ "$pass_ib_stmt"
+# CreateInfrastructureConfiguration/Update read the instance profile under the
+# caller's identity, so the operator needs iam:GetInstanceProfile scoped to the
+# one baked Image Builder profile.
+check "operator policy grants iam:GetInstanceProfile for the baked Image Builder profile" \
+  bash -c 'grep -Fq "iam:GetInstanceProfile" <<<"$1"' _ "$get_instance_profile_stmt"
+check "iam:GetInstanceProfile is scoped to the exact baked instance-profile ARN" \
+  bash -c 'grep -Fq "arn:\${AWS::Partition}:iam::\${AWS::AccountId}:instance-profile/\${ProjectName}-baked-imagebuilder-instance-profile" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$get_instance_profile_stmt"
+# Image Builder's first-ever use in an account must create its service-linked
+# role; tightly scoped to exactly that SLR ARN.
+check "operator policy grants iam:CreateServiceLinkedRole for Image Builder" \
+  bash -c 'grep -Fq "iam:CreateServiceLinkedRole" <<<"$1"' _ "$create_slr_stmt"
+check "iam:CreateServiceLinkedRole is scoped to the imagebuilder SLR role ARN" \
+  bash -c 'grep -Fq "arn:\${AWS::Partition}:iam::\${AWS::AccountId}:role/aws-service-role/imagebuilder.amazonaws.com/AWSServiceRoleForImageBuilder" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$create_slr_stmt"
 check "ImageBuilder rebuild statement triggers the BakedImagePipeline" \
   bash -c 'grep -Fq "imagebuilder:StartImagePipelineExecution" <<<"$1"' _ "$ib_rebuild_stmt"
 check "ImageBuilder rebuild is scoped to the ProjectName pipeline ARN" \
@@ -257,10 +276,19 @@ check "infra publish rule has no invalid RuleName property" \
   bash -c '! grep -Fxq "RuleName" <<<"$1"' _ "$(properties_keys "$publish_rule_block")"
 check "SSM document lifecycle is granted (CreateDocument has no resource scope)" \
   bash -c 'for a in CreateDocument UpdateDocument DeleteDocument DescribeDocument GetDocument; do grep -Fq "ssm:$a" <<<"$1" || exit 1; done; grep -Fq "Resource: \"*\"" <<<"$1"' _ "$ssm_doc_stmt"
+# CloudFormation's SSM document UpdateHandler calls UpdateDocumentDefaultVersion
+# when the document content changes.
+check "SSM document lifecycle grants UpdateDocumentDefaultVersion (CFN UpdateHandler)" \
+  bash -c 'grep -Fq "ssm:UpdateDocumentDefaultVersion" <<<"$1"' _ "$ssm_doc_stmt"
 
 # --- EC2 network lifecycle (the infra stack creates the VPC) ------------------
 check "VPC lifecycle statement grants the full self-contained network action set" \
   bash -c 'for a in CreateVpc DeleteVpc ModifyVpcAttribute CreateSubnet DeleteSubnet ModifySubnetAttribute CreateInternetGateway DeleteInternetGateway AttachInternetGateway DetachInternetGateway CreateRouteTable DeleteRouteTable AssociateRouteTable DisassociateRouteTable CreateRoute DeleteRoute CreateSecurityGroup DeleteSecurityGroup AuthorizeSecurityGroupIngress RevokeSecurityGroupIngress CreateTags DeleteTags; do grep -Fq "ec2:$a" <<<"$1" || exit 1; done' _ "$vpc_stmt"
+# The GPU security group declares explicit egress rules; the infra stack's
+# route wiring updates associations and routes in place. All target resources
+# are already in this statement's ARN scope (security-group/*, route-table/*).
+check "VPC lifecycle grants SG egress + route/association update actions" \
+  bash -c 'for a in AuthorizeSecurityGroupEgress RevokeSecurityGroupEgress ReplaceRouteTableAssociation ReplaceRoute UpdateSecurityGroupRuleDescriptionsIngress UpdateSecurityGroupRuleDescriptionsEgress; do grep -Fq "ec2:$a" <<<"$1" || exit 1; done' _ "$vpc_stmt"
 check "VPC lifecycle scopes the network resource types with a region wildcard" \
   bash -c 'for r in "vpc/*" "subnet/*" "internet-gateway/*" "route-table/*" "security-group/*"; do grep -Fq "$r" <<<"$1" || exit 1; done; grep -Fq "arn:aws:ec2:*:\${AWS::AccountId}:" <<<"$1"' _ "$vpc_stmt"
 check "VPC lifecycle CreateTags/DeleteTags stay UNCONDITIONED (CFN reserved keys)" \
@@ -308,6 +336,12 @@ check "RunInstancesDependencies covers volume/ENI/key-pair/SG/subnet" \
   bash -c 'for r in "volume/*" "network-interface/*" "key-pair/*" "security-group/*" "subnet/*"; do grep -Fq "$r" <<<"$1" || exit 1; done' _ "$run_deps_stmt"
 check "RunInstancesDependencies covers the empty-account public image ARN (region wildcard)" \
   bash -c 'grep -Fq "arn:aws:ec2:*::image/*" <<<"$1"' _ "$run_deps_stmt"
+# The baked AMI is private to this account, so its ARN carries the account id.
+# The public-AMI grant (empty account) cannot authorize it: both must be present.
+check "RunInstancesDependencies covers the account-owned baked image ARN" \
+  bash -c 'grep -Fq "arn:aws:ec2:*:\${AWS::AccountId}:image/*" <<<"$1"' _ "$run_deps_stmt"
+check "RunInstancesDependencies keeps BOTH public and account-owned image ARNs" \
+  bash -c 'grep -Fq "arn:aws:ec2:*::image/*" <<<"$1" && grep -Fq "arn:aws:ec2:*:\${AWS::AccountId}:image/*" <<<"$1"' _ "$run_deps_stmt"
 check "RunInstancesDependencies is UNCONDITIONED (no RequestTag / InstanceType)" \
   bash -c '! grep -Fq "aws:RequestTag" <<<"$1" && ! grep -Fq "ec2:InstanceType" <<<"$1"' _ "$run_deps_stmt"
 
@@ -432,6 +466,13 @@ check "pipeline execution role grants ec2:CreateTags (AMI tagging)" \
   bash -c 'grep -Fq "ec2:CreateTags" <<<"$1"' _ "$execution_role"
 check "pipeline execution role passes only the Image Builder instance role" \
   bash -c 'grep -Fq "iam:PassRole" <<<"$1" && grep -Fq "ec2.amazonaws.com" <<<"$1"' _ "$execution_role"
+# The bake workflow (SSM SendCommand, EC2 CreateImage/RegisterImage/DeregisterImage,
+# snapshots, workflow reads) relies on AWS's documented execution policy; the
+# inline statements remain for the project-scoped extras.
+check "pipeline execution role attaches the EC2ImageBuilderExecutionPolicy managed policy" \
+  bash -c 'grep -Fq "arn:aws:iam::aws:policy/EC2ImageBuilderExecutionPolicy" <<<"$1"' _ "$execution_role"
+check "pipeline execution role keeps its inline policy alongside the managed policy" \
+  bash -c 'grep -Fq "Policies:" <<<"$1" && grep -Fq "ssm:PutParameter" <<<"$1"' _ "$execution_role"
 
 # --- infra template: ExecutionRole wiring + AvailabilityZone -----------------
 pipeline_block="$(extract_resource "$infra_template" BakedImagePipeline)"

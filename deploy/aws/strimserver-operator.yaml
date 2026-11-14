@@ -254,7 +254,13 @@ Resources:
               - !Sub "arn:aws:ec2:*:${AWS::AccountId}:key-pair/*"
               - !Sub "arn:aws:ec2:*:${AWS::AccountId}:security-group/*"
               - !Sub "arn:aws:ec2:*:${AWS::AccountId}:subnet/*"
+              # Public (AWS-owned) AMIs live in the empty-account ARN namespace,
+              # e.g. the DLAMI fallback launch uses before a bake exists.
               - !Sub "arn:aws:ec2:*::image/*"
+              # The baked AMI is private to this account, so its ARN carries
+              # ${AWS::AccountId}. Without this entry every post-bake launch
+              # would be denied: the public-AMI grant above cannot match it.
+              - !Sub "arn:aws:ec2:*:${AWS::AccountId}:image/*"
           # Instance tag-on-create (launch's --tag-specifications) needs
           # ec2:CreateTags/DeleteTags on instance ARNs. ec2:CreateAction ==
           # RunInstances binds the grant to tag-on-create: a standalone
@@ -371,6 +377,25 @@ Resources:
                   - imagebuilder.amazonaws.com
                   - events.amazonaws.com
                   - ssm.amazonaws.com
+                  # The distribution-configuration handler may pass the role to
+                  # VM Import/Export during AMI distribution.
+                  - vmie.amazonaws.com
+          # CreateInfrastructureConfiguration/Update read the referenced
+          # instance profile under the caller's identity, so the operator needs
+          # iam:GetInstanceProfile scoped to the one baked Image Builder profile.
+          - Sid: GetImageBuilderInstanceProfile
+            Effect: Allow
+            Action:
+              - iam:GetInstanceProfile
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/${ProjectName}-baked-imagebuilder-instance-profile"
+          # Image Builder creates this service-linked role on first-ever use in
+          # an account. Scoped to exactly that SLR ARN so the operator can never
+          # create arbitrary service-linked roles.
+          - Sid: ImageBuilderServiceLinkedRole
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/imagebuilder.amazonaws.com/AWSServiceRoleForImageBuilder"
           # Manual baked-AMI rebuild: trigger the one pipeline the infra stack
           # owns.
           - Sid: ImageBuilderRebuild
@@ -444,6 +469,9 @@ Resources:
               - ssm:DeleteDocument
               - ssm:DescribeDocument
               - ssm:GetDocument
+              # CloudFormation's SSM document UpdateHandler calls this when the
+              # document content changes; without it the deploy's update fails.
+              - ssm:UpdateDocumentDefaultVersion
             Resource: "*"
           # The self-contained VPC (VPC + public subnet + IGW + route table +
           # GPU security group) strimserver-infra.yaml creates. Resource-scoped
@@ -479,6 +507,18 @@ Resources:
               - ec2:DeleteSecurityGroup
               - ec2:AuthorizeSecurityGroupIngress
               - ec2:RevokeSecurityGroupIngress
+              # The GPU security group declares explicit egress rules, so the
+              # infra stack authorizes/revokes egress (not just ingress).
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupEgress
+              # The template's route wiring updates associations and routes in
+              # place rather than recreating them on every deploy.
+              - ec2:ReplaceRouteTableAssociation
+              - ec2:ReplaceRoute
+              # CloudFormation's security-group rule updates refresh the
+              # descriptions on existing ingress/egress rules.
+              - ec2:UpdateSecurityGroupRuleDescriptionsIngress
+              - ec2:UpdateSecurityGroupRuleDescriptionsEgress
               - ec2:CreateTags
               - ec2:DeleteTags
             Resource:
@@ -533,6 +573,13 @@ Resources:
             Principal:
               Service: imagebuilder.amazonaws.com
             Action: sts:AssumeRole
+      # AWS's documented EC2 Image Builder execution baseline: the bake workflow
+      # itself (SSM SendCommand, EC2 CreateImage/RegisterImage/DeregisterImage/
+      # CopyImage, snapshot handling, workflow reads). Without it the bake fails
+      # at workflow execution. The inline policy below stays for the scoped
+      # project extras that AWS's baseline does not (and should not) cover.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/EC2ImageBuilderExecutionPolicy
       Policies:
         - PolicyName: ImageBuilderAccess
           PolicyDocument:
