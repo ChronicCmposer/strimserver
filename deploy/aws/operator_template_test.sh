@@ -58,29 +58,6 @@ extract_resource() {
   ' "$1"
 }
 
-# Properties parsing without PyYAML: only 6-space keys are direct children of
-# Properties; nested keys are deeper and ignored. This catches an invalid
-# property that a raw token grep would happily accept (the live RuleName bug).
-properties_keys() {
-  awk '
-    /^    Properties:[[:space:]]*$/ { inprops=1; next }
-    inprops && /^    [^[:space:]]/ { inprops=0 }
-    inprops && /^      [A-Za-z0-9]+:/ { key=$1; sub(/:$/, "", key); print key }
-  ' <<<"$1"
-}
-
-property_value() { # property_value <resource-block> <key>
-  awk -v want="$2" '
-    /^    Properties:[[:space:]]*$/ { inprops=1; next }
-    inprops && /^    [^[:space:]]/ { inprops=0 }
-    inprops && index($0, "      " want ":") == 1 {
-      sub("^      " want ":[[:space:]]*", "")
-      print
-      exit
-    }
-  ' <<<"$1"
-}
-
 service_user="$(extract_resource "$operator_template" StrimserverServiceUser)"
 operator_policy_block="$(extract_resource "$operator_template" StrimserverOperatorPolicy)"
 infra_lifecycle_policy_block="$(extract_resource "$operator_template" StrimserverOperatorInfraLifecyclePolicy)"
@@ -272,7 +249,7 @@ check "operator template owns the service user named after ProjectName" \
 check "operator template owns the EC2 instance role + profile" \
   bash -c 'grep -Fq "InstanceRole:" "$1" && grep -Fq "InstanceProfile:" "$1"' _ "$operator_template"
 check "operator template owns the Image Builder roles" \
-  bash -c 'for r in BakedImageBuilderInstanceRole BakedImageBuilderInstanceProfile BakedImageBuilderExecutionRole BakedAmiPublishRole; do grep -Fq "$r:" "$1" || exit 1; done' _ "$operator_template"
+  bash -c 'for r in BakedImageBuilderInstanceRole BakedImageBuilderInstanceProfile BakedImageBuilderExecutionRole; do grep -Fq "$r:" "$1" || exit 1; done' _ "$operator_template"
 check "operator template is account identity only (no VPC/subnet/security group)" \
   bash -c '! grep -Eq "AWS::EC2::(VPC|Subnet|SecurityGroup|InternetGateway|RouteTable|Route)" "$1"' _ "$operator_template"
 check "operator template has no Image Builder build resources" \
@@ -295,12 +272,8 @@ check "infra template owns the Image Builder pipeline" \
 # (movienight convention: no cross-stack ImportValue for IAM).
 check "infra references the operator's Image Builder instance profile by fixed name" \
   bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" "$1"' _ "$infra_template"
-check "infra references the operator's AMI-publish role by fixed name" \
-  bash -c 'grep -Fq -- "-baked-publish-role" "$1"' _ "$infra_template"
 check "operator declares the same Image Builder instance profile name" \
   bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" "$1"' _ "$operator_template"
-check "operator declares the same AMI-publish role name" \
-  bash -c 'grep -Fq -- "-baked-publish-role" "$1"' _ "$operator_template"
 check "every infra ImportValue has a matching operator Export" \
   bash -c '
     imports="$(grep -oE "!ImportValue[[:space:]]+[A-Za-z0-9_.:-]+" "$1" | awk "{print \$2}" || true)"
@@ -346,7 +319,7 @@ PassImageBuilderRoles GetImageBuilderInstanceProfile ImageBuilderServiceLinkedRo
 Ec2Describe Ec2RunInstances Ec2RunInstancesDependencies Ec2CreateTags \
 Ec2TerminateInstances S3BucketConfig S3Objects"
 infra_lifecycle_sids="Ec2VpcLifecycle ImageBuilderRead ImageBuilderLifecycle \
-ImageBuilderRebuild BakedAmiEventsLifecycle SsmDocumentLifecycle"
+ImageBuilderRebuild"
 for sid in $deploy_launch_sids; do
   check "$sid stays in the identity/deploy/launch policy" \
     bash -c 'grep -Fq -- "- Sid: $2" <<<"$1"' _ "$operator_policy_block" "$sid"
@@ -391,11 +364,8 @@ ib_rebuild_stmt="$(extract_statement ImageBuilderRebuild)"
 ib_read_stmt="$(extract_statement ImageBuilderRead)"
 vpc_stmt="$(extract_statement Ec2VpcLifecycle)"
 ib_lifecycle_stmt="$(extract_statement ImageBuilderLifecycle)"
-events_stmt="$(extract_statement BakedAmiEventsLifecycle)"
-ssm_doc_stmt="$(extract_statement SsmDocumentLifecycle)"
 get_instance_profile_stmt="$(extract_statement GetImageBuilderInstanceProfile)"
 create_slr_stmt="$(extract_statement ImageBuilderServiceLinkedRole)"
-publish_rule_block="$(extract_resource "$infra_template" BakedAmiPublishRule)"
 
 check "CloudFormation deploy statement exists" \
   bash -c 'grep -Fq "cloudformation:CreateStack" <<<"$1" && grep -Fq "cloudformation:UpdateStack" <<<"$1"' _ "$cfn_deploy_stmt"
@@ -416,8 +386,6 @@ check "CloudFormation read statement covers DescribeStacks/DescribeStackEvents/G
 
 check "iam:PassRole covers both Image Builder roles" \
   bash -c 'grep -Fq "iam:PassRole" <<<"$1" && grep -Fq "baked-imagebuilder-instance-role" <<<"$1" && grep -Fq "baked-imagebuilder-execution-role" <<<"$1"' _ "$pass_ib_stmt"
-check "iam:PassRole covers the AMI-publish role" \
-  bash -c 'grep -Fq "baked-publish-role" <<<"$1"' _ "$pass_ib_stmt"
 check "iam:PassRole uses deterministic !Sub role ARNs" \
   bash -c 'grep -Fq "arn:\${AWS::Partition}:iam::\${AWS::AccountId}:role/" <<<"$1"' _ "$pass_ib_stmt"
 # Image Builder's distribution-configuration handler may pass a role to the
@@ -463,20 +431,20 @@ check "Image Builder TagResource/UntagResource stay on the imagebuilder ARN scop
   bash -c 'grep -Fq "arn:aws:imagebuilder:*:\${AWS::AccountId}:" <<<"$1"' _ "$ib_lifecycle_stmt"
 check "Image Builder lifecycle keeps its enumerated Create/Delete/Tag actions" \
   bash -c 'for a in CreateComponent DeleteComponent CreateImageRecipe DeleteImageRecipe CreateImagePipeline DeleteImagePipeline TagResource UntagResource; do grep -Fq "imagebuilder:$a" <<<"$1" || exit 1; done' _ "$ib_lifecycle_stmt"
-check "Events lifecycle is scoped to the baked-AMI publish rule" \
-  bash -c 'for a in PutRule PutTargets RemoveTargets DeleteRule DescribeRule ListTargetsByRule EnableRule DisableRule; do grep -Fq "events:$a" <<<"$1" || exit 1; done; grep -Fq "rule/\${ProjectName}-baked-ami-publish" <<<"$1"' _ "$events_stmt"
-check "Events rule scope still matches the deterministic publish rule name" \
-  bash -c 'grep -Fq "rule/\${ProjectName}-baked-ami-publish" <<<"$1"' _ "$events_stmt"
-check "infra publish rule sets Properties.Name (Events Rule property is Name, not RuleName)" \
-  test "$(property_value "$publish_rule_block" Name)" = '!Sub "${ProjectName}-baked-ami-publish"'
-check "infra publish rule has no invalid RuleName property" \
-  bash -c '! grep -Fxq "RuleName" <<<"$1"' _ "$(properties_keys "$publish_rule_block")"
-check "SSM document lifecycle is granted (CreateDocument has no resource scope)" \
-  bash -c 'for a in CreateDocument UpdateDocument DeleteDocument DescribeDocument GetDocument; do grep -Fq "ssm:$a" <<<"$1" || exit 1; done; grep -Fq "Resource: \"*\"" <<<"$1"' _ "$ssm_doc_stmt"
-# CloudFormation's SSM document UpdateHandler calls UpdateDocumentDefaultVersion
-# when the document content changes.
-check "SSM document lifecycle grants UpdateDocumentDefaultVersion (CFN UpdateHandler)" \
-  bash -c 'grep -Fq "ssm:UpdateDocumentDefaultVersion" <<<"$1"' _ "$ssm_doc_stmt"
+
+# The EventBridge -> SSM automation publish chain is gone: publishing happens
+# natively in the Image Builder distribution phase. No operator policy may
+# retain its lifecycle grants.
+check "operator template has no AMI-publish role" \
+  bash -c '! grep -Fq "BakedAmiPublishRole" "$1"' _ "$operator_template"
+check "no operator policy grants ssm:StartAutomationExecution" \
+  bash -c '! grep -Fq "ssm:StartAutomationExecution" <<<"$1"' _ "$operator_policy"
+check "no operator policy references an automation-definition ARN" \
+  bash -c '! grep -Fq "automation-definition/" <<<"$1"' _ "$operator_policy"
+check "no operator policy grants EventBridge rule lifecycle actions" \
+  bash -c '! grep -Eq "events:(PutRule|PutTargets|DeleteRule|RemoveTargets|DescribeRule)" <<<"$1"' _ "$operator_policy"
+check "no operator policy retains the dead publish lifecycle statements" \
+  bash -c '! grep -Eq "BakedAmiEventsLifecycle|SsmDocumentLifecycle" <<<"$1"' _ "$operator_policy"
 
 # --- EC2 network lifecycle (the infra stack creates the VPC) ------------------
 check "VPC lifecycle statement grants the full self-contained network action set" \
@@ -659,6 +627,12 @@ check "pipeline execution role grants imagebuilder actions" \
   bash -c 'grep -Fq "imagebuilder:" <<<"$1"' _ "$execution_role"
 check "pipeline execution role grants ssm:PutParameter on the baked AMI parameter" \
   bash -c 'grep -Fq "ssm:PutParameter" <<<"$1" && grep -Fq "parameter/\${ProjectName}/ami/baked/latest" <<<"$1"' _ "$execution_role"
+check "pipeline execution role grants ssm:GetParameter on the baked AMI parameter" \
+  bash -c 'grep -Fq "ssm:GetParameter" <<<"$1" && grep -Fq "parameter/\${ProjectName}/ami/baked/latest" <<<"$1"' _ "$execution_role"
+check "pipeline execution role's SSM grant uses the ProjectName parameter ARN convention" \
+  bash -c 'grep -Fq "arn:aws:ssm:*:\${AWS::AccountId}:parameter/\${ProjectName}/ami/baked/latest" <<<"$1"' _ "$execution_role"
+check "pipeline execution role's SSM grant is inline (managed policy only covers imagebuilder/*)" \
+  bash -c 'grep -Fq "Policies:" <<<"$1" && grep -Fq "PublishBakedAmiId" <<<"$1"' _ "$execution_role"
 check "pipeline execution role grants ec2:CreateTags (AMI tagging)" \
   bash -c 'grep -Fq "ec2:CreateTags" <<<"$1"' _ "$execution_role"
 check "pipeline execution role passes only the Image Builder instance role" \

@@ -316,41 +316,20 @@ extract_template_resource() {
   ' "$infra_template"
 }
 
-# PyYAML is absent from the build image, so parse the resource's Properties
-# block structurally: only 6-space keys are direct children of Properties;
-# nested keys are deeper and therefore ignored. This is deliberately stricter
-# than grepping raw tokens (the old RuleName guard passed on an invalid
-# property that CFN silently ignored).
-properties_keys() {
-  awk '
-    /^    Properties:[[:space:]]*$/ { inprops=1; next }
-    inprops && /^    [^[:space:]]/ { inprops=0 }
-    inprops && /^      [A-Za-z0-9]+:/ { key=$1; sub(/:$/, "", key); print key }
-  ' <<<"$1"
-}
-
-property_value() { # property_value <resource-block> <key>
+# The distribution's SSM publishing block must be a SIBLING of
+# AmiDistributionConfiguration inside the regional Distribution entry (10-space
+# indent), never nested inside it. These extractors make that nesting explicit
+# instead of grepping raw tokens that would pass at any depth.
+# extract_indented_child <block> <key>: the key's value block, delimited by the
+# first following non-blank line at or above the key's indentation.
+extract_indented_child() {
   awk -v want="$2" '
-    /^    Properties:[[:space:]]*$/ { inprops=1; next }
-    inprops && /^    [^[:space:]]/ { inprops=0 }
-    inprops && index($0, "      " want ":") == 1 {
-      sub("^      " want ":[[:space:]]*", "")
+    $0 ~ ("^ *" want ":[[:space:]]*$") { p=1; next }
+    p {
+      if ($0 ~ /^[[:space:]]*$/) { print; next }
+      match($0, /^[ ]*/)
+      if (RLENGTH <= 10) { p=0; next }
       print
-      exit
-    }
-  ' <<<"$1"
-}
-
-# input_template_scalar <resource-block>: print the raw YAML scalar assigned to
-# the target's InputTemplate. It is a single-quoted YAML string holding JSON, so
-# the surrounding quotes are stripped to expose the JSON template EventBridge
-# actually interpolates.
-input_template_scalar() {
-  awk '
-    /^[[:space:]]*InputTemplate:[[:space:]]*/ {
-      sub(/^[[:space:]]*InputTemplate:[[:space:]]*/, "")
-      print
-      exit
     }
   ' <<<"$1"
 }
@@ -367,8 +346,6 @@ check "operator template owns the IAM user/policy" \
   bash -c 'grep -Fq "StrimserverServiceUser:" "$1" && grep -Fq "StrimserverOperatorPolicy:" "$1"' _ "$operator_template"
 check "infra references the operator's Image Builder instance profile by fixed name" \
   bash -c 'grep -Fq -- "-baked-imagebuilder-instance-profile" "$1"' _ "$infra_template"
-check "infra references the operator's AMI-publish role by fixed name" \
-  bash -c 'grep -Fq -- "-baked-publish-role" "$1"' _ "$infra_template"
 check "every infra ImportValue has a matching operator Export" \
   bash -c '
     imports="$(grep -oE "!ImportValue[[:space:]]+[A-Za-z0-9_.:-]+" "$1" | awk "{print \$2}" || true)"
@@ -383,7 +360,6 @@ recipe_block="$(extract_template_resource BakedImageRecipe)"
 infra_config_block="$(extract_template_resource BakedInfrastructureConfiguration)"
 distribution_block="$(extract_template_resource BakedDistributionConfiguration)"
 pipeline_block="$(extract_template_resource BakedImagePipeline)"
-publish_rule_block="$(extract_template_resource BakedAmiPublishRule)"
 
 check "Image Builder component exists (AWS::ImageBuilder::Component)" \
   bash -c 'grep -Fq "Type: AWS::ImageBuilder::Component" <<<"$1"' _ "$component_block"
@@ -437,64 +413,29 @@ check "InfrastructureConfiguration launches into the stack-managed subnet" \
   bash -c 'grep -Fq "SubnetId: !Ref ManagedSubnet" <<<"$1"' _ "$infra_config_block"
 check "InfrastructureConfiguration attaches the stack instance security group" \
   bash -c 'grep -Fq "SecurityGroupIds: [!Ref InstanceSecurityGroup]" <<<"$1"' _ "$infra_config_block"
-document_block="$(extract_template_resource BakedAmiPublishDocument)"
-check "SSM publish document sets Properties.Name (valid AWS::SSM::Document property)" \
-  test "$(property_value "$document_block" Name)" = '!Sub "${ProjectName}-baked-ami-publish"'
-# Replace (the default) makes a Content change require replacement, which CFN
-# rejects for a custom-named resource. NewVersion updates in place and promotes
-# the new version to $DEFAULT, which is the version the rule target invokes.
-check "SSM publish document updates in place with UpdateMethod NewVersion" \
-  test "$(property_value "$document_block" UpdateMethod)" = 'NewVersion'
+# Image Builder publishes the produced AMI id natively during the DISTRIBUTION
+# phase. SsmParameterConfigurations is a SIBLING of AmiDistributionConfiguration
+# on the regional Distribution entry -- not a child of it, and there is no
+# SsmParameterName property. Parse the indentation rather than grepping tokens.
+ssm_publish_block="$(extract_indented_child "$distribution_block" SsmParameterConfigurations)"
+ami_dist_block="$(extract_indented_child "$distribution_block" AmiDistributionConfiguration)"
+check "distribution declares SsmParameterConfigurations at the AmiDistributionConfiguration sibling level" \
+  bash -c '[ "$(grep -cE "^          SsmParameterConfigurations:[[:space:]]*$" <<<"$1")" -eq 1 ]' _ "$distribution_block"
+check "SsmParameterConfigurations is NOT nested inside AmiDistributionConfiguration" \
+  bash -c '! grep -Fq "SsmParameterConfigurations" <<<"$1"' _ "$ami_dist_block"
+check "native publish targets /strimserver/ami/baked/latest" \
+  bash -c 'grep -Eq "^            - ParameterName: /strimserver/ami/baked/latest$" <<<"$1"' _ "$ssm_publish_block"
+check "native publish DataType is aws:ec2:image" \
+  bash -c 'grep -Eq "^              DataType: aws:ec2:image$" <<<"$1"' _ "$ssm_publish_block"
 
-# The automation must ASSUME the operator-owned publish role. Without an
-# assumeRole binding the steps run with no assumed identity, so the
-# ssm:PutParameter step is denied even though EventBridge started the execution.
-automation_role_param="$(awk '
-  /^          AutomationAssumeRole:[[:space:]]*$/ {p=1; next}
-  p && /^          [A-Za-z0-9]+:/ {p=0}
-  p {print}
-' <<<"$document_block")"
-check "publish document declares the AutomationAssumeRole parameter" \
-  bash -c 'grep -Fq "AutomationAssumeRole:" <<<"$1"' _ "$document_block"
-check "AutomationAssumeRole parameter is a String" \
-  bash -c 'grep -Fq "type: String" <<<"$1"' _ "$automation_role_param"
-check "AutomationAssumeRole defaults to the ProjectName-derived publish role ARN" \
-  bash -c 'grep -Fq -- "$2" <<<"$1"' _ "$automation_role_param" \
-    'default: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-baked-publish-role"'
-check "publish document binds the top-level assumeRole to AutomationAssumeRole" \
-  bash -c 'grep -Fxq "        assumeRole: \"{{ AutomationAssumeRole }}\"" <<<"$1"' _ "$document_block"
-
-# The role binding is additive: the parameter and step that actually publish
-# the AMI id must survive unchanged.
-check "publish document keeps the AmiId String parameter" \
-  bash -c 'grep -Fq "AmiId:" <<<"$1"' _ "$document_block"
-check "publish document keeps the executeAwsApi PutParameter step" \
-  bash -c 'grep -Fq "name: putBakedAmiParameter" <<<"$1" && grep -Fq "Api: PutParameter" <<<"$1"' _ "$document_block"
-
-publish_rule_name="$(property_value "$publish_rule_block" Name)"
-publish_rule_keys="$(properties_keys "$publish_rule_block")"
-
-check "BakedAmiPublishRule sets Properties.Name to the deterministic ProjectName-derived name" \
-  test "$publish_rule_name" = '!Sub "${ProjectName}-baked-ami-publish"'
-check "BakedAmiPublishRule has no invalid RuleName property (Events Rule property is Name)" \
-  bash -c '! grep -Fxq "RuleName" <<<"$1"' _ "$publish_rule_keys"
-
-# The target's InputTemplate is JSON with an EventBridge <ami> placeholder. An
-# unquoted placeholder makes EventBridge emit {"AmiId": ami-...} (invalid JSON),
-# so StartAutomationExecution fails at target invocation. Pin both the quoted
-# placeholder and end-to-end JSON validity after substitution.
-sample_ami="ami-0123456789abcdef0"
-publish_input_template="$(input_template_scalar "$publish_rule_block")"
-publish_input_template="${publish_input_template#\'}"
-publish_input_template="${publish_input_template%\'}"
-check "BakedAmiPublishRule InputTemplate contains the QUOTED <ami> placeholder" \
-  bash -c 'grep -Fq -- "$2" <<<"$1"' _ "$publish_input_template" '"<ami>"'
-check "BakedAmiPublishRule InputTemplate renders valid JSON once <ami> is substituted" \
-  bash -c 'printf "%s" "$1" | sed "s/<ami>/$2/" | python3 -c "import json, sys; json.load(sys.stdin)"' \
-    _ "$publish_input_template" "$sample_ami"
-
-check "publish Name matches the operator policy's events rule scope" \
-  bash -c 'grep -Fq "rule/\${ProjectName}-baked-ami-publish" "$1"' _ "$operator_template"
+# The EventBridge -> SSM automation publish chain is gone wholesale; publishing
+# is a native Image Builder distribution responsibility now.
+check "infra template creates NO EventBridge rule (publish is native)" \
+  bash -c '! grep -Fq "AWS::Events::Rule" "$1"' _ "$infra_template"
+check "infra template creates NO SSM automation document (publish is native)" \
+  bash -c '! grep -Fq "AWS::SSM::Document" "$1"' _ "$infra_template"
+check "infra template has no leftover automation/publish-rule machinery" \
+  bash -c '! grep -Eq "BakedAmiPublish|StartAutomationExecution|automation-definition|baked-publish-role" "$1"' _ "$infra_template"
 
 check "infra declares DeploymentBucketName" \
   bash -c 'grep -Eq "^  DeploymentBucketName:" "$1"' _ "$infra_template"
@@ -507,8 +448,6 @@ check "infra declares the HasAvailabilityZone condition" \
 
 check "produced AMI id is published to /strimserver/ami/baked/latest" \
   bash -c 'grep -Fq "/strimserver/ami/baked/latest" "$1"' _ "$infra_template"
-check "an SSM automation document writes the baked AMI id (PutParameter)" \
-  bash -c 'grep -Fq "AWS::SSM::Document" "$1" && grep -Fq "PutParameter" "$1"' _ "$infra_template"
 
 if [[ "$failures" -eq 0 ]]; then
   echo "PASS: deploy-infra profile-run behaviour OK"

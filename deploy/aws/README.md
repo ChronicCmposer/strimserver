@@ -360,16 +360,16 @@ operator/infra convention:
    once per account by `provision-account` with admin credentials. It owns the
    project IAM user, the single project-scoped `${ProjectName}-operator`
    managed policy, the max-permissions `${ProjectName}-boundary` policy, the EC2
-   instance role/profile launched instances assume, and every Image Builder role
-   (build instance role/profile, service execution role, AMI-publish role). IAM
-   lives here so the operator policy can `iam:PassRole` those roles without a
-   circular dependency.
+   instance role/profile launched instances assume, and the Image Builder roles
+   (build instance role/profile and service execution role). IAM lives here so
+   the operator policy can `iam:PassRole` those roles without a circular
+   dependency.
 * **`deploy/aws/strimserver-infra.yaml`** — regional resources, deployed by
   `deploy-infra` as the `[strimserver]` identity: the security group, optional
-  VPC/subnet/networking, the baked-AMI Image Builder component/recipe/
-  infrastructure/distribution/pipeline, and the EventBridge→SSM automation that
-  publishes the baked AMI id. It creates no IAM and references the operator's
-  roles/profile by deterministic `${ProjectName}-…` names.
+  VPC/subnet/networking, and the baked-AMI Image Builder component/recipe/
+  infrastructure/distribution/pipeline. AMI publishing happens natively in the
+  distribution phase (see below). It creates no IAM and references the
+  operator's roles/profile by deterministic `${ProjectName}-…` names.
 
 The operator policy is a single managed policy because CloudFormation cannot
 reliably manage two `AWS::IAM::ManagedPolicy` resources attached to the same
@@ -394,13 +394,46 @@ inventoried operator surface:
   AMI in any region where it exists;
 * self access-key rotation, the Image Builder pipeline trigger + reads, the
   Image Builder component/recipe/infrastructure/distribution/pipeline lifecycle,
-  the baked-AMI EventBridge rule and SSM automation document lifecycle, and
-  `iam:PassRole` on the operator-owned roles.
+  and `iam:PassRole` on the operator-owned roles.
 
 It carries no account-wide IAM administration and no DNS-zone access. The
 instance role also carries the `${ProjectName}-boundary` permissions boundary
 (the SSM agent action set plus project-scoped SSM/S3 reads), so an inline policy
 added later cannot lift its effective permissions above that ceiling.
+
+### Baked-AMI publish path
+
+Image Builder publishes the produced AMI id **natively during the DISTRIBUTION
+phase**. The distribution configuration's regional `Distribution` entry carries
+an `SsmParameterConfigurations` list — a sibling of
+`AmiDistributionConfiguration`, not a child of it (there is no
+`SsmParameterName` property):
+
+```yaml
+Distributions:
+  - Region: us-east-2
+    AmiDistributionConfiguration: { ... }
+    SsmParameterConfigurations:
+      - ParameterName: /strimserver/ami/baked/latest
+        DataType: aws:ec2:image
+```
+
+Every successful pipeline run (manual today, scheduled later) overwrites
+`/strimserver/ami/baked/latest`. There is no EventBridge rule and no SSM
+automation document; that former chain has been removed wholesale.
+
+IAM placement matters here. The write is performed by the Image Builder
+**execution role** (`BakedImageBuilderExecutionRole`), so that role carries an
+inline `ssm:PutParameter` + `ssm:GetParameter` grant on
+`parameter/${ProjectName}/ami/baked/latest`. The AWS-managed
+`EC2ImageBuilderExecutionPolicy` alone is insufficient: it only allows
+`parameter/imagebuilder/*`, which never matches this custom path. `GetParameter`
+backs the `aws:ec2:image` DataType validation (`ec2:DescribeImages` is likewise
+needed only for that DataType and is already on the execution role). The
+operator caller (`[strimserver]`) needs `ssm:GetParameter` on the parameter only
+if it already pre-exists when CloudFormation validates the template; the
+existing `SsmDlamiLookup` statement covers it, and `launch` uses it to resolve
+the baked AMI before falling back to the DLAMI.
 
 Deploy in two steps. `provision-account` is the only admin-run script: it
 deploys the operator stack, mints the service account's access key into the

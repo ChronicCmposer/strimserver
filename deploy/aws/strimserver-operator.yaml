@@ -360,25 +360,22 @@ Resources:
               StringEquals:
                 "iam:PassedToService": ec2.amazonaws.com
           # deploy-infra re-deploys the regional template, which wires these
-          # roles into Image Builder, the instance profile and the EventBridge
-          # target. CloudFormation must therefore be able to pass exactly those
-          # roles (never an arbitrary role) to their services. The roles live in
-          # THIS template, so their ARNs are constructed deterministically from
-          # the fixed names below -- no cross-stack reference and no cycle.
+          # roles into Image Builder and the instance profile. CloudFormation
+          # must therefore be able to pass exactly those roles (never an
+          # arbitrary role) to their services. The roles live in THIS template,
+          # so their ARNs are constructed deterministically from the fixed names
+          # below -- no cross-stack reference and no cycle.
           - Sid: PassImageBuilderRoles
             Effect: Allow
             Action: iam:PassRole
             Resource:
               - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-baked-imagebuilder-instance-role"
               - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-baked-imagebuilder-execution-role"
-              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-baked-publish-role"
             Condition:
               StringEquals:
                 "iam:PassedToService":
                   - ec2.amazonaws.com
                   - imagebuilder.amazonaws.com
-                  - events.amazonaws.com
-                  - ssm.amazonaws.com
                   # The distribution-configuration handler may pass the role to
                   # VM Import/Export during AMI distribution.
                   - vmie.amazonaws.com
@@ -413,9 +410,8 @@ Resources:
       ManagedPolicyName: !Sub "${ProjectName}-operator-infra-lifecycle"
       Description: >-
         Infra resource lifecycle for the strimserver operator: the self-contained
-        VPC network, the Image Builder component/recipe/pipeline lifecycle, the
-        baked-AMI publish EventBridge rule and SSM document. Attached alongside
-        the operator policy to the same service user.
+        VPC network and the Image Builder component/recipe/pipeline lifecycle.
+        Attached alongside the operator policy to the same service user.
       Users:
         - !Ref StrimserverServiceUser
       PolicyDocument:
@@ -468,36 +464,6 @@ Resources:
               - imagebuilder:TagResource
               - imagebuilder:UntagResource
             Resource: !Sub "arn:aws:imagebuilder:*:${AWS::AccountId}:*"
-          # D.3: the EventBridge rule that publishes the baked-AMI id. Scoped to
-          # the one rule the infra stack owns.
-          - Sid: BakedAmiEventsLifecycle
-            Effect: Allow
-            Action:
-              - events:PutRule
-              - events:PutTargets
-              - events:RemoveTargets
-              - events:DeleteRule
-              - events:DescribeRule
-              - events:ListTargetsByRule
-              - events:EnableRule
-              - events:DisableRule
-            Resource: !Sub "arn:aws:events:*:${AWS::AccountId}:rule/${ProjectName}-baked-ami-publish"
-          # D.3: the SSM automation document that writes the baked-AMI id.
-          # ssm:CreateDocument does NOT support resource-level permissions, so
-          # this statement must stay Resource:"*" (the read/update/delete
-          # actions are folded in here rather than split for simplicity).
-          - Sid: SsmDocumentLifecycle
-            Effect: Allow
-            Action:
-              - ssm:CreateDocument
-              - ssm:UpdateDocument
-              - ssm:DeleteDocument
-              - ssm:DescribeDocument
-              - ssm:GetDocument
-              # CloudFormation's SSM document UpdateHandler calls this when the
-              # document content changes; without it the deploy's update fails.
-              - ssm:UpdateDocumentDefaultVersion
-            Resource: "*"
           # The self-contained VPC (VPC + public subnet + IGW + route table +
           # GPU security group) strimserver-infra.yaml creates. Resource-scoped
           # where EC2 supports it; ec2:CreateTags/DeleteTags cover the Project/
@@ -646,7 +612,14 @@ Resources:
                     "iam:PassedToService": ec2.amazonaws.com
               - Sid: PublishBakedAmiId
                 Effect: Allow
-                Action: ssm:PutParameter
+                # Native distribution-phase publish writes the AMI id here.
+                # GetParameter backs the aws:ec2:image DataType validation. The
+                # AWS-managed EC2ImageBuilderExecutionPolicy only covers
+                # parameter/imagebuilder/*, so this custom path MUST be granted
+                # inline (the managed policy alone is insufficient).
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
                 Resource: !Sub "arn:aws:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/ami/baked/latest"
               - Sid: BuildLogs
                 Effect: Allow
@@ -655,36 +628,6 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/imagebuilder/*"
-
-  # Publish role: started by the infra stack's EventBridge rule to run the SSM
-  # automation document that writes the baked AMI id. The document lives in the
-  # infra stack with a deterministic name, so this role can scope to its ARN.
-  BakedAmiPublishRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "${ProjectName}-baked-publish-role"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - events.amazonaws.com
-                - ssm.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: PublishBakedAmi
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: StartBakedAmiAutomation
-                Effect: Allow
-                Action: ssm:StartAutomationExecution
-                Resource: !Sub "arn:aws:ssm:*:${AWS::AccountId}:automation-definition/${ProjectName}-baked-ami-publish:*"
-              - Sid: WriteBakedAmiParameter
-                Effect: Allow
-                Action: ssm:PutParameter
-                Resource: !Sub "arn:aws:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/ami/baked/latest"
 
   # Permissions boundary (M2 residual): a MAX-permissions cap that the global
   # instance role must carry. It is derived from the global InstanceRole above
@@ -834,9 +777,3 @@ Outputs:
     Value: !GetAtt BakedImageBuilderExecutionRole.Arn
     Export:
       Name: !Sub "${AWS::StackName}-BakedImageBuilderExecutionRoleArn"
-
-  BakedAmiPublishRoleArn:
-    Description: ARN of the AMI-publish role used by the EventBridge rule.
-    Value: !GetAtt BakedAmiPublishRole.Arn
-    Export:
-      Name: !Sub "${AWS::StackName}-BakedAmiPublishRoleArn"

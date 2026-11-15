@@ -4,14 +4,14 @@ Description: >
   strimserver regional infrastructure: an OPTIONAL self-contained networking
   layer (VPC + public subnet + internet gateway), the security group for
   ephemeral GPU streaming instances, and the baked-AMI Image Builder pipeline
-  (component/recipe/infra/distribution/pipeline) plus the EventBridge->SSM
-  automation that publishes the baked AMI id. Instances are created and
-  terminated imperatively by deploy/aws/launch and deploy/aws/terminate, which
-  read this stack's outputs. The IAM user, operator policy, EC2 instance
-  role/profile and Image Builder roles live in the account-global
-  strimserver-operator stack (deployed first by provision-account); this
-  regional stack references them by deterministic names. No EC2 launch template
-  is created or required.
+  (component/recipe/infra/distribution/pipeline) which publishes the baked AMI
+  id natively via its distribution configuration's SSM parameter publishing.
+  Instances are created and terminated imperatively by deploy/aws/launch and
+  deploy/aws/terminate, which read this stack's outputs. The IAM user, operator
+  policy, EC2 instance role/profile and Image Builder roles live in the
+  account-global strimserver-operator stack (deployed first by
+  provision-account); this regional stack references them by deterministic
+  names. No EC2 launch template is created or required.
 
 Parameters:
   ProjectName:
@@ -419,6 +419,14 @@ Resources:
             AmiTags:
               Project: !Ref ProjectName
               "strimserver:nvidia-driver": !Ref NvidiaDriverFloor
+          # Native publish: during the DISTRIBUTION phase Image Builder writes
+          # the output AMI id to this parameter. SsmParameterConfigurations is a
+          # SIBLING of AmiDistributionConfiguration (not nested inside it); the
+          # execution role performs the write and carries an inline
+          # ssm:PutParameter/GetParameter grant for this parameter path.
+          SsmParameterConfigurations:
+            - ParameterName: /strimserver/ami/baked/latest
+              DataType: aws:ec2:image
       Tags:
         Project: !Ref ProjectName
 
@@ -437,82 +445,6 @@ Resources:
       ImageTestsConfiguration:
         ImageTestsEnabled: false
       Status: ENABLED
-
-  # Publish the produced AMI id to SSM when an Image Builder build becomes
-  # AVAILABLE. The automation reads the AMI id from the Image Builder state
-  # change event, so every pipeline run (manual or a future schedule) refreshes
-  # /strimserver/ami/baked/latest without a rebuild of this stack.
-  BakedAmiPublishDocument:
-    Type: AWS::SSM::Document
-    Properties:
-      # Deterministic name: the AMI-publish ROLE lives in the operator stack and
-      # scopes ssm:StartAutomationExecution to this ARN without a cross-stack
-      # !Ref, so the name must be stable and ProjectName-derived.
-      Name: !Sub "${ProjectName}-baked-ami-publish"
-      DocumentType: Automation
-      # Replace is the default: a Content change then needs replacement, which
-      # CloudFormation refuses for a custom-named resource. NewVersion updates
-      # the document in place (new version promoted to the default), so the
-      # EventBridge target's ":$DEFAULT" keeps pointing at the current content.
-      UpdateMethod: NewVersion
-      Content:
-        schemaVersion: "0.3"
-        description: Publish the baked strimserver AMI id to SSM.
-        # The automation MUST assume a role. StartAutomationExecution runs the
-        # steps with no implicit identity, so without assumeRole the
-        # executeAwsApi ssm:PutParameter step is Denied even though EventBridge
-        # successfully started the execution. The operator stack owns the role
-        # (deterministic name, trusted by ssm.amazonaws.com, scoped to this
-        # document + parameter), so bind it here by ARN.
-        assumeRole: "{{ AutomationAssumeRole }}"
-        parameters:
-          AutomationAssumeRole:
-            type: String
-            description: Role the automation assumes to publish the parameter.
-            default: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-baked-publish-role"
-          AmiId:
-            type: String
-            description: AMI id produced by the Image Builder pipeline.
-        mainSteps:
-          - name: putBakedAmiParameter
-            action: aws:executeAwsApi
-            inputs:
-              Service: ssm
-              Api: PutParameter
-              Name: /strimserver/ami/baked/latest
-              Value: "{{ AmiId }}"
-              Type: String
-              Overwrite: true
-
-  BakedAmiPublishRule:
-    Type: AWS::Events::Rule
-    Properties:
-      # Deterministic name: the operator policy scopes events:* to
-      # rule/${ProjectName}-baked-ami-publish. AWS::Events::Rule has no settable
-      # RuleName property (that is only a GetAtt attribute); the valid property
-      # is Name. Without it, CloudFormation auto-generates
-      # strimserver-BakedAmiPublishRule-<hash>, which never matches that scope
-      # (live denial on events:DescribeRule).
-      Name: !Sub "${ProjectName}-baked-ami-publish"
-      Description: Publish the baked AMI id when the Image Builder image is AVAILABLE
-      EventPattern:
-        source:
-          - aws.imagebuilder
-        detail-type:
-          - "EC2 Image Builder Image State Change"
-        detail:
-          state:
-            status:
-              - AVAILABLE
-      Targets:
-        - Id: PublishBakedAmiParameter
-          Arn: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${ProjectName}-baked-ami-publish:$DEFAULT"
-          # The role is created by the operator stack; use its deterministic ARN.
-          RoleArn: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-baked-publish-role"
-          InputTransformer:
-            InputPathsMap:
-              ami: "$.detail.outputResources.amis[0].image"
-            InputTemplate: '{"AmiId": "<ami>"}'
 
 Outputs:
   SecurityGroupId:
