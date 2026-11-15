@@ -1,8 +1,12 @@
 .env
+deploy/aws/.env.*
+!deploy/aws/.env.example
 core/strimserver.env
 tools/local-encoder/local-encoder.env
 deploy/aws/twitch-stream-key
 deploy/aws/*.key
+# Phase 0 read-only inventory report (may embed infra identifiers).
+deploy/aws/phase0-inventory.txt
 
 # Bazel output symlinks (point outside the repo; nothing here to commit).
 /bazel-*

@@ -10,6 +10,7 @@ exports_files(
         "imdslib.sh",
         "prompt_login.fish",
         "setup-gpu.sh",
+        "stackctl-phase0-inventory.sh",
         "stackctl-setup.sh",
         "stackctl.sh",
         "strim-ddns.service.template",
