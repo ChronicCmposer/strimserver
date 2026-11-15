@@ -29,6 +29,7 @@ check() {
     failures=$((failures + 1))
   fi
 }
+skip() { printf 'skip: %s\n' "$1"; }
 has_call() { grep -Eq "$1" "${FAKE_GPU_CALLS:?}"; }
 not_called() { ! grep -Eq "$1" "${FAKE_GPU_CALLS:?}"; }
 call_index() { awk -v pat="$1" '$0 ~ pat { print NR; exit }' "${FAKE_GPU_CALLS:?}"; }
@@ -117,8 +118,10 @@ static_checks() {
   grep -q 'strim-ddns-verify.service 9<&-' "$deploy_sh" || return 1
   grep -qF 'exec tee -a --output-error=warn "$DEPLOY_LOG"' "$deploy_sh" || return 1
   grep -q 'exec 9<&-; exec tee' "$deploy_sh" || return 1
-  # A live in-flight import orphan is rejected with exit 5 after flock.
-  grep -qF "timeout -k 5 5 pgrep -f 'ctr .* i import'" "$deploy_sh" || return 1
+  # A live in-flight import orphan is rejected with exit 5 after flock. The
+  # `i[ ]import` character class defeats pgrep -f self-matching the timeout
+  # wrapper's own argv (which contains this pattern text).
+  grep -qF "timeout -k 5 5 pgrep -f 'ctr .* i[ ]import'" "$deploy_sh" || return 1
   # The withdrawn fd-9-in-children claim must be gone.
   ! grep -q 'children keep fd 9' "$deploy_sh" || return 1
   ! grep -q 'still holds the deploy lock' "$deploy_sh" || return 1
@@ -147,7 +150,7 @@ static_checks() {
   # The orphan-import guard runs after the flock and before consuming work.
   local flock_line pgrep_line mount_line
   flock_line="$(line_of 'flock -n 9' "$deploy_sh")"
-  pgrep_line="$(line_of 'pgrep -f ' "$deploy_sh")"
+  pgrep_line="$(line_of 'timeout -k 5 5 pgrep -f ' "$deploy_sh")"
   mount_line="$(line_of 'mountpoint -q /mnt/nvme' "$deploy_sh")"
   [ -n "$flock_line" ] && [ -n "$pgrep_line" ] && [ -n "$mount_line" ] \
     && [ "$flock_line" -lt "$pgrep_line" ] && [ "$pgrep_line" -lt "$mount_line" ]
@@ -157,6 +160,37 @@ check "static: no bare systemctl start/stop/disable" \
   bash -c 'awk "/systemctl (start|stop|disable)/ && !/printf/ && !/sudo timeout -k 5 [0-9]+ systemctl (start|stop|disable)/ { bad=1 } END { exit bad ? 1 : 0 }" "$1"' _ "$deploy_sh"
 check "static: every IMDS curl is bounded by --max-time 5" \
   bash -c 'n=$(grep -Ec "(^|[^[:alnum:]_])curl " "$1"); b=$(grep -E "(^|[^[:alnum:]_])curl " "$1" | grep -c -- "--max-time 5"); [ "$n" -gt 0 ] && [ "$n" -eq "$b" ]' _ "$script_dir/imdslib.sh"
+
+# ===========================================================================
+# 0. orphan-import guard must not self-match its own timeout wrapper
+# ===========================================================================
+# The guard runs under `timeout`, whose argv contains the pgrep pattern text
+# (the shell strips the quotes). With a plain 'ctr .* i import' pattern,
+# pgrep -f matches the wrapper itself, so the guard fires on every run and the
+# deploy always exits 5. The `i[ ]import` character class breaks that
+# self-match while still matching a real `ctr -n strimserver i import` cmdline.
+# Run the guard line for real (no shims), with no import running, and assert
+# it does NOT fire. Missing pgrep is a known accepted fail-open limitation.
+orphan_import_guard_no_self_match_case() {
+  if ! command -v pgrep >/dev/null 2>&1; then
+    skip "orphan-import guard self-match (pgrep unavailable; fail-open accepted)"
+    return
+  fi
+  local guard_line guard_cond rc
+  guard_line="$(sed -n "$(line_of 'timeout -k 5 5 pgrep -f ' "$deploy_sh")p" "$deploy_sh")"
+  guard_cond="${guard_line#if }"
+  guard_cond="${guard_cond%; then}"
+  if [ -z "$guard_cond" ] || [ "$guard_cond" = "$guard_line" ]; then
+    check "orphan-import guard line is extractable from deploy.sh" false
+    return
+  fi
+  ( eval "$guard_cond" ) >/dev/null 2>&1
+  rc=$?
+  check "orphan-import guard does not self-match its timeout wrapper (rc=$rc)" \
+    test "$rc" -ne 0
+}
+check "orphan-import guard ignores its own timeout wrapper" \
+  orphan_import_guard_no_self_match_case
 
 # ===========================================================================
 # 1. enabled happy path
@@ -238,7 +272,7 @@ ddns_enabled_happy_case() {
   check "enabled: tee wrote to the pre-created log (log dir usable)" \
     grep -q 'M2: DDNS verified' "$(ls -1t "$FAKE_DEPLOY_ROOT"/logs/deploy-*.log | head -1)"
   check "enabled: orphan-import guard ran before consuming work" \
-    has_call '^pgrep -f ctr .* i import$'
+    has_call '^pgrep -f ctr \.\* i\[ \]import$'
   check "enabled: success cleanup removed deploy.sh" \
     test ! -f "$FAKE_DEPLOY_ROOT/deploy.sh"
   check "enabled: disabled-path disables were not run" \

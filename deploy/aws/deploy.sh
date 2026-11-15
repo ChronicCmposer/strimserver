@@ -126,7 +126,11 @@ lock_held=1
 # sudo closes fds >= 3, so an orphaned `ctr i import` does NOT inherit the lock
 # descriptor. Detect it explicitly (bounded) so a rerun cannot race a
 # half-finished import on the same containerd state.
-if timeout -k 5 5 pgrep -f 'ctr .* i import' >/dev/null 2>&1; then
+# The `i[ ]import` character class is required: pgrep -f scans the argv of the
+# `timeout` wrapper too, and that argv contains this pattern text (the shell
+# strips the quotes). A literal ' i import' would therefore match the wrapper
+# itself and fire on every run; `[ ]` still matches a real `ctr ... i import`.
+if timeout -k 5 5 pgrep -f 'ctr .* i[ ]import' >/dev/null 2>&1; then
    printf 'another deploy is running\n'
    exit 5
 fi
