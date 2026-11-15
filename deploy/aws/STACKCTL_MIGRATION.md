@@ -41,14 +41,18 @@ Session Manager is **not carried over**: the old stack set
 `AmazonSSMManagedInstanceCore`. SSH from `OPERATOR_CIDR` is the access path.
 Ingress mapping (slots start at 0 because the SSH rule is separate):
 
-- `INGRESS_TCP=4000:<operator-cidr>,2222:<operator-cidr>` -- controller and
+- `INGRESS_TCP=4000:104.218.148.0/24,2222:104.218.148.0/24` -- controller and
   experimental OpenSSH, both operator-restricted.
-- `INGRESS_UDP=9000` -- SRT ingest. **Decide deliberately**: the current live
-  SG restricts UDP 9000 to the operator CIDR (`IngestCidr=104.218.148.0/24`
-  in the old stack), while the default here (CIDR omitted) is world-open.
-  Use `9000:104.218.148.0/24` to match today's exposure.
+- `INGRESS_UDP=9000:104.218.148.0/24` -- SRT ingest. **Settled (operator)**:
+  scoped to the operator CIDR to match today's exposure exactly (the old stack
+  had `IngestCidr=104.218.148.0/24`, not world-open). Widen only deliberately.
 - Ordinary SSH (22) stays the template's conditional `SshIngress` from
   `OPERATOR_CIDR`.
+
+Settled decisions (operator, 2026-11-15): UDP 9000 scoped as above; Session
+Manager loss accepted (SSH from `OPERATOR_CIDR` is the access path); first
+stackctl release tag is **`v1.0.80`** (next in the repo's existing `v1.0.x`
+annotated-tag sequence, latest `v1.0.79`).
 
 ## Phase checklist
 
@@ -104,10 +108,11 @@ Ingress mapping (slots start at 0 because the SSH rule is separate):
 
 ### Phase 2 -- First release and new infra stack
 
-- [ ] Push an annotated release tag (provenance gate requires it):
+- [ ] Push an annotated release tag (provenance gate requires it). First
+      stackctl release: **`v1.0.80`**:
 
-      git tag -a vX.Y.Z -m "strimserver vX.Y.Z"
-      git push origin vX.Y.Z
+      git tag -a v1.0.80 -m "strimserver v1.0.80"
+      git push origin v1.0.80
 
 - [ ] Build the release targets so the freshness gate passes:
 
