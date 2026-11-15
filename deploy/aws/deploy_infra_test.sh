@@ -440,6 +440,11 @@ check "InfrastructureConfiguration attaches the stack instance security group" \
 document_block="$(extract_template_resource BakedAmiPublishDocument)"
 check "SSM publish document sets Properties.Name (valid AWS::SSM::Document property)" \
   test "$(property_value "$document_block" Name)" = '!Sub "${ProjectName}-baked-ami-publish"'
+# Replace (the default) makes a Content change require replacement, which CFN
+# rejects for a custom-named resource. NewVersion updates in place and promotes
+# the new version to $DEFAULT, which is the version the rule target invokes.
+check "SSM publish document updates in place with UpdateMethod NewVersion" \
+  test "$(property_value "$document_block" UpdateMethod)" = 'NewVersion'
 
 # The automation must ASSUME the operator-owned publish role. Without an
 # assumeRole binding the steps run with no assumed identity, so the

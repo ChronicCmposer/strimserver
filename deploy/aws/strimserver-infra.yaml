@@ -450,6 +450,11 @@ Resources:
       # !Ref, so the name must be stable and ProjectName-derived.
       Name: !Sub "${ProjectName}-baked-ami-publish"
       DocumentType: Automation
+      # Replace is the default: a Content change then needs replacement, which
+      # CloudFormation refuses for a custom-named resource. NewVersion updates
+      # the document in place (new version promoted to the default), so the
+      # EventBridge target's ":$DEFAULT" keeps pointing at the current content.
+      UpdateMethod: NewVersion
       Content:
         schemaVersion: "0.3"
         description: Publish the baked strimserver AMI id to SSM.
