@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -27,7 +28,23 @@ const (
 	// dlamiSSMParamArm64 is the arm64 sibling parameter the launch script's
 	// arm64 path floats on.
 	dlamiSSMParamArm64 = "/aws/service/deeplearning/ami/arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id"
+	// awsRegion is the region the DLAMI parameters and images live in; every
+	// aws call passes it explicitly so the result never depends on the
+	// caller's ambient region configuration.
+	awsRegion = "us-east-2"
+	// awsProfileDefault is the AWS CLI profile used when AWS_PROFILE is unset.
+	awsProfileDefault = "strimserver"
 )
+
+// awsProfile returns the profile every aws call passes explicitly:
+// AWS_PROFILE when set, otherwise the deploy profile. Missing credentials
+// remain an unknown result, never an identity gate.
+func awsProfile() string {
+	if profile := os.Getenv("AWS_PROFILE"); profile != "" {
+		return profile
+	}
+	return awsProfileDefault
+}
 
 // amiIDRe matches an EC2 ami id: the literal "ami-" prefix plus 8 or 17 hex
 // digits (older ids are 8, current ids are 17).
@@ -144,8 +161,8 @@ type dlamiLatestIDs struct {
 }
 
 // awscliDLAMIID shells out to the aws CLI to resolve the current DLAMI ids for
-// both CPU architectures from the public SSM parameters, relying on the
-// default region from the user's ~/.aws/config. A missing binary, missing
+// both CPU architectures from the public SSM parameters, passing the explicit
+// profile and us-east-2 region. A missing binary, missing
 // credentials, a timeout, or a nonzero exit all fail closed with an error;
 // both queries must fail for the resolution to be unknown, and a single-arch
 // failure is carried in the result so the caller reports the other arch's id
@@ -160,14 +177,16 @@ func awscliDLAMIID(timeout time.Duration) (dlamiLatestIDs, error) {
 }
 
 // awscliSSMParamID shells out to the aws CLI to resolve one public SSM
-// parameter's ami id, relying on the default region from the user's
-// ~/.aws/config. A missing binary, missing credentials, a timeout, or a
+// parameter's ami id, passing the explicit profile and us-east-2 region. A
+// missing binary, missing credentials, a timeout, or a
 // nonzero exit all fail closed with an error; the resolver reports unknown
 // (never a crash).
 func awscliSSMParamID(timeout time.Duration, param string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "aws", "ssm", "get-parameter",
+		"--profile", awsProfile(),
+		"--region", awsRegion,
 		"--name", param,
 		"--query", "Parameter.Value",
 		"--output", "text")
@@ -215,14 +234,16 @@ func appendArchQueryErrors(infos []string, ids dlamiLatestIDs) []string {
 }
 
 // awsDescribeImage shells out to the aws CLI to read one image's release Name
-// and CreationDate, relying on the same default-region credentials as the SSM
-// query. A missing binary, missing credentials, a timeout, or a nonzero exit
-// all fail closed with an error. Callers treat the result as best-effort
-// metadata and omit it on failure.
+// and CreationDate, passing the same explicit profile and us-east-2 region as
+// the SSM query. A missing binary, missing credentials, a timeout, or a
+// nonzero exit all fail closed with an error. Callers treat the result as
+// best-effort metadata and omit it on failure.
 func awsDescribeImage(timeout time.Duration, id string) (name, created string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "aws", "ec2", "describe-images",
+		"--profile", awsProfile(),
+		"--region", awsRegion,
 		"--image-ids", id,
 		"--query", "Images[0].[Name,CreationDate]",
 		"--output", "text")

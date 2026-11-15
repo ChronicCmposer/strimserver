@@ -72,7 +72,7 @@ below_floor_case() {
   local rc
   rc="$(run_deploy)"
 
-  check "below floor: deploy.sh exits non-zero" test "$rc" -ne 0
+  check "below floor: deploy.sh exits 1" test "$rc" -eq 1
   check "below floor: names the baked AMI" grep -q 'baked AMI' "$case_out"
   check "below floor: names the SSM parameter" \
     grep -q '/strimserver/ami/baked/latest' "$case_out"
@@ -106,6 +106,12 @@ floor_met_cdi_case() {
   check "floor met: clears stale YAML before generating" \
     bash -c 'a=$(awk "/rm .*nvidia.yaml/{print NR; exit}" "$1"); b=$(awk "/nvidia-ctk cdi generate/{print NR; exit}" "$1"); [[ -n "$a" && -n "$b" && "$a" -lt "$b" ]]' \
     _ "$FAKE_GPU_CALLS"
+  local dropin="$FAKE_SYSROOT/etc/systemd/system/containerd.service.d/10-strimserver-nvme.conf"
+  check "floor met: installs the canonical containerd NVMe drop-in" test -f "$dropin"
+  check "floor met: drop-in bytes match the repo file" \
+    bash -c 'cmp -s "$1" "$2"' _ "$dropin" "$script_dir/containerd-nvme.conf"
+  check "floor met: daemon-reload after the drop-in install" \
+    has_call 'systemctl daemon-reload'
   end_case
 }
 check "floor met: amd64 CDI spec generated at deploy time" floor_met_cdi_case
@@ -116,6 +122,9 @@ fast_path_static_checks() {
   ! grep -qE '^[[:space:]]*bash[[:space:]]+\./setup-gpu\.sh' "$deploy_sh" || return 1
   ! grep -q 'nvidia_ensure_driver_floor' "$deploy_sh" || return 1
   grep -q 'NVIDIA_DRIVER_FLOOR' "$deploy_sh" || return 1
+  # The NVMe drop-in is installed from the repo file with compare-before-apply.
+  grep -q 'containerd-nvme.conf' "$deploy_sh" || return 1
+  grep -q 'cmp -s "\$DEPLOY_ROOT/containerd-nvme.conf"' "$deploy_sh" || return 1
 }
 check "static: deploy.sh asserts the floor without setup-gpu.sh" fast_path_static_checks
 

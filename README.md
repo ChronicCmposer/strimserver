@@ -1149,16 +1149,29 @@ tar.
 It then places the deployment bundle on the box (HTTPS
 download, S3 pull, or scp upload, per `DEPLOYMENT_SRC`),
 unpacks it, and runs `deploy.sh`, which stages config/bin/video-file directories
-under `/mnt/nvme`, configures and restarts containerd,
+under `/mnt/nvme`, applies the containerd config (restarting only on change) and
+ensures containerd is running,
 installs the generated systemd unit from the bundle
 (`install -D -m 644 strimserver.service /etc/systemd/system/strimserver.service`,
 then `systemctl daemon-reload` and `systemctl enable strimserver.service` —
 the first start stays an operator action),
-**imports all three OCI images**
+**imports the OCI images**
 (`controller-container.tar`, `ffmpeg-container.tar`,
-`mediamtx-container.tar`) into the `strimserver` containerd
+`mediamtx-container.tar`, plus `strim-ddns-container.tar` when DDNS is
+enabled) into the `strimserver` containerd
 namespace, generates the SRT passphrase, and creates the
 logs and video-files directories.
+
+`deploy.sh` reports two milestones: `M1: service ready (<Xs>)` as the last line
+before the blocking DDNS stages (a 60s target that only warns on overrun), and
+`M2: DDNS verified, deploy complete (<Ys>)` (or
+`M2: deploy complete (DDNS disabled)`) as the literal last line before exit `0`.
+Its exit code is meaningful: `0` M2 reached; `1` pre-M1 failure; `3` DDNS stage
+failed (message names refresh or verify); `4` DDNS backstop timeout; `5` another
+deploy holds the lock; `129`/`130`/`143` signalled; `255` ssh connection lost
+(`setup_strimserver` only). The deploy log and last exit code are on the host at
+`/mnt/nvme/logs/deploy-<UTC>.log` and `/mnt/nvme/logs/deploy-last.rc`; see
+`deploy/aws/README.md` for recovery.
 
 When setup completes, it prints the generated SRT passphrase
 and a suggested local encoder configuration command. Start

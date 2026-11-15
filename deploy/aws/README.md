@@ -695,7 +695,10 @@ not a pass. Representative exact failure texts:
   instance store. A mounted EBS-backed `/mnt/nvme` is therefore kept; migration
   is explicit (see §6).
 - Mounted non-ext4: refused, naming the occupying source.
-- Unmounted but non-empty directory: refused; back up or move the contents.
+- Unmounted (first-time launch or after a reboot): `setup_strimserver` runs a
+  fail-closed exact-name allowlist wipe before mounting (see *Self-healing wipe*
+  in §6). Anything that survives the wipe and is not on the allowlist still
+  refuses.
 
 `--format` refuses when `/mnt/nvme` is already mounted, requires an interactive
 terminal, prints the selected device and a `WIPING` banner, and requires an
@@ -724,52 +727,142 @@ bundled defaults (DDNS disabled) stay in effect.
 
 1. Inject `TWITCH_STREAM_KEY` into `config/strimserver.env` (then scrub the
    transfer file). No key → warning, egress disabled until one is set.
-2. **NVIDIA runtime: run `setup-gpu.sh` before the containerd restart** — it
-   enforces the `620.70.06` driver floor first (upgrade/recovery before the
-   `nvidia-smi` guard, failing closed if the floor is unmet), then on amd64
+2. **NVIDIA runtime: assert the baked driver floor.** `deploy.sh` sources
+   `lib/nvidia.sh` and calls `nvidia__proc_at_floor` (a strict
+   `/proc/driver/nvidia/version` read). A below-floor or unloaded driver is
+   fatal (`exit 1`) with guidance to launch a current baked AMI, or to run
+   `setup-gpu.sh` once on a legacy host. `deploy.sh` does **not** run the driver
+   upgrade itself and does **not** invoke `setup-gpu.sh`. On amd64 it then
    generates the JSON CDI spec the controller's
    `cdi.WithCDIDevices("nvidia.com/gpu=0")` request consumes (containerd 2.x,
    config v3). It does **not** run `nvidia-ctk runtime configure --set-as-default`:
    the default runtime stays plain `runc`, and on arm64 the raw-API assembly
    controller produces no CDI spec at all. It also enables
    `nvidia-persistenced`.
-3. Prepend `root='/mnt/nvme/containerd'` / `state='/mnt/nvme/containerd-state'`
-   to `/etc/containerd/config.toml`, restart containerd.
+3. **containerd.** Install the canonical `deploy/aws/containerd-config.toml`
+   (`root='/mnt/nvme/containerd'`, `state='/mnt/nvme/containerd-state'`) and the
+   `/etc/systemd/system/containerd.service.d/10-strimserver-nvme.conf` mount
+   condition, both compare-before-apply: containerd restarts only when the
+   config content changes and `daemon-reload` runs only when the drop-in
+   changes. A separate preamble guard ensures containerd is running — if it is
+   inactive, `deploy.sh` runs `sudo timeout -k 5 30 systemctl start containerd`
+   and re-checks `is-active`, exiting `1` on a start failure, timeout, or a
+   still-inactive unit. There is no manual "start containerd" step.
 4. Install the bundle's generated systemd unit to
    `/etc/systemd/system/strimserver.service` (`install -D -m 644`), then
    `systemctl daemon-reload` and `systemctl enable strimserver.service`. The
    first start stays an explicit operator action (the container images are
    imported in the next step).
-5. Import the three images into the `strimserver` namespace:
-   `ctr -n strimserver i import {controller,ffmpeg,mediamtx}-container.tar`.
+5. Import the images into the `strimserver` namespace in one parallel `wait`
+   barrier: `ctr -n strimserver i import {controller,ffmpeg,mediamtx}-container.tar`,
+   plus `strim-ddns-container.tar` when DDNS is enabled. The barrier names any
+   failing image and aborts before any downstream step. Because `strim-ddns` is
+   imported here, the post-M1 DDNS block performs no imports.
 6. Generate a 70-char SRT read passphrase into `/mnt/nvme/srt-passphrase`
    (root:root `0600`, created once and kept on re-run). The value is **never
    printed**: the deploy log names the file only, and the operator reads it on
    the host with `sudo cat /mnt/nvme/srt-passphrase`.
 7. `fish-deploy.sh` — skipped loudly on aarch64 (pinned fish 4.3.1 is
    x86_64-only; fish is an operator convenience shell, not a dependency).
-8. `dnf install htop`; install `openssh-experimental.rpm` when present — on
-   arm64 expect the skip warning until an arm64 RPM is published (Section 7).
+8. Host tools are baked: `htop` and the experimental OpenSSH RPM ship in the
+   AMI, so the runtime path installs neither (`host tools are baked into the
+   AMI; skipping runtime package installs`). There is no `dnf` on the fast path.
 9. Set hostname, create `/mnt/nvme/{video-files,logs}`, move the offline
-   segment into `video-files`. The logs directory is prepared as `0750`
-   root:root with the three expected log files pre-created `0640`
-   (containerd's shim creates them, so a process umask cannot set their mode),
-   and any existing regular file under it is normalized to `0640` root:root.
-10. Configure Namecheap Dynamic DNS (`$DDNS_HOST.$DDNS_DOMAIN`, from the
-    operator settings injected above): install the transferred password to
-    `/etc/strim-ddns/password` (root:root `0600`, transfer file scrubbed),
-    install + enable the `strim-ddns.timer` (6h,
-    `Persistent=true`), import `strim-ddns-container.tar`, run a one-shot
-    refresh passing `ip=$PUBLIC_IP`, then verify — retrying ~24 times with 5s
-    sleeps, up to a few minutes worst-case, failing loudly on mismatch —
-    that `strim.example.com` resolves to the box's public IP. Each check is a
-    direct authoritative query to the domain's nameservers, run **inside** the
-    `strim-ddns` container via its `check` subcommand (the container's c-ares
-    DNS client discovers the NS via the resolver, then queries the
-    authoritative NS directly for the A record; there is no per-query timeout
-    env — the DNS client has its own internal timeout), so it is immune to the
-    box's local resolver cache and needs no bind-utils/dnsutils on the box.
+   segment into `video-files`. The logs directory is `0755` root:root
+   (traversable by the deploy user, not writable) with the three expected log
+   files (`mediamtx.log`, `normalize.log`, `egress.log`) pre-created `0640`
+   (containerd's shim creates them, so a process umask cannot set their mode).
+   Every other regular file under it is normalized to `0640` root:root, but
+   `deploy-*` files (`deploy-<timestamp>.log`, `deploy-last.rc`) are excluded so
+   the running deploy keeps writing them as `ec2-user`.
+10. Configure Namecheap Dynamic DNS **before** M1 (`$DDNS_HOST.$DDNS_DOMAIN`,
+    from the operator settings injected above): install the transferred password
+    to `/etc/strim-ddns/password` (root:root `0600`, transfer file scrubbed),
+    install the `strim-ddns.service` and `strim-ddns.timer` units, render and
+    install `strim-ddns-verify.service` from its template with the expected IP
+    substituted, disable any old async verify enablement
+    (`sudo timeout -k 5 10 systemctl disable strim-ddns-verify.service`), then
+    `sudo systemctl enable --now strim-ddns.timer` (6h, `Persistent=true`). The
+    timer is armed only after `strimserver.env` holds the operator's settings, so
+    a timer-triggered start sees the right values.
 11. Print the next-step commands (SSH service start, encoder configuration).
+
+### Completion contract (M1/M2)
+
+Every deploy ends with two named milestones, timed from a single `deploy.sh`
+start clock:
+
+- **M1 — service ready.** `deploy.sh` prints `M1: service ready (<Xs>)` as the
+  last line **before** the DDNS block. M1 means all deploy work except the two
+  bounded DDNS starts, the success-only payload cleanup, and the M2 print is
+  done: images imported (including `strim-ddns`), `strimserver.service`
+  installed and enabled, and every host configuration step applied. The 60s
+  target is **warn-only** — an overrun prints `M1: service ready (<Xs>, over 60s
+  target)` and never changes the exit code.
+- **M2 — deploy complete.** `deploy.sh` exits `0` only after DDNS verification
+  passes (or DDNS is disabled). With DDNS enabled it prints
+  `M2: DDNS verified, deploy complete (<Ys>)`; when disabled it prints
+  `M2: deploy complete (DDNS disabled)`. The M2 line is **literally the last
+  output line before `exit 0`** (the SRT-passphrase note and the success-only
+  payload cleanup precede it).
+
+With DDNS enabled the DDNS block contains **only** the two bounded unit starts
+plus their journal follower — every install, render, reload, enable, and disable
+ran before M1. So a DDNS-block failure can only be a stage failure or a backstop
+timeout, and every exit `1` is a pre-M1 failure.
+
+**DDNS verification semantics.** The refresh stage runs
+`sudo timeout -k 5 40 systemctl start strim-ddns.service`
+(`strim-ddns.service` has `TimeoutStartSec=30`). The verify stage then runs
+`sudo timeout -k 5 150 systemctl start strim-ddns-verify.service`; the oneshot
+unit owns retry semantics (`TimeoutStartSec=140`, each attempt wrapped in
+`timeout 30`, `sleep 5` between attempts, no fixed attempt count) and logs
+`attempt N: observed <ip|none> expected <ip>` and
+`verified after N attempts (<Xs>)`. The `check` binary itself does not count
+attempts. Verification is per-nameserver: each discovered NS hostname is
+queried separately through its own IPv4 A-record addresses (per-phase concurrent
+in one c-ares event loop, 4000 ms × 2 tries), and it passes only when **every**
+NS returns the expected IP via at least one of its own IPs. One unreachable or
+disagreeing NS means "not yet". The binary prints one line per NS on stderr
+(`check <fqdn> ns <host> -> <ip|none>`) and the single agreed IPv4 on stdout.
+The update path pins IPv4 egress (`CURLOPT_IPRESOLVE=CURL_IPRESOLVE_V4`) and,
+because `DDNS_IP` is empty by default, sends no `ip=` parameter — Namecheap
+records the requester's IPv4. Disabling DDNS on a host that previously enabled
+it disables the timer and verify unit and stops any running DDNS units (bounded
+and tolerant); the unit files stay on disk.
+
+### `deploy.sh` exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | M2 reached: DDNS verified, or DDNS disabled. |
+| `1` | Failure before M1: missing DDNS configuration, missing `/mnt/nvme` mountpoint, IMDS public-IP failure, containerd start failure, or any other pre-M1 error. Nothing after M1 has run. |
+| `3` | DDNS stage failed; the message names the stage — refresh (`strim-ddns.service`) or verify (`strim-ddns-verify.service`). Rerun the deploy after fixing the DDNS configuration (see `ddns-setup.md`). |
+| `4` | DDNS backstop timeout: the wrapper returned `124` or `137`; the in-flight DDNS unit stop was attempted. If that stop also failed, a warning says the unit may still be running — inspect `systemctl status <unit>`. |
+| `5` | Another deploy is running (lock held, or an orphaned image import detected). |
+| `129` / `130` / `143` | The deploy was signalled (`128+n` for HUP / INT / TERM); any in-flight DDNS unit was stopped. |
+| `255` | `ssh` connection lost while `setup_strimserver` was driving the host; remote state is unknown. Produced by `setup_strimserver` only, never by `deploy.sh`. |
+
+`setup_strimserver` propagates `deploy.sh`'s exit code verbatim and prints the
+one-line meaning above for a non-zero code. On exits `3` and `4` it also prints
+the DNS-unverified hint (how to start the service manually if that is
+acceptable) and never starts the service itself.
+
+### Deploy log and recovery
+
+`deploy.sh` tees its output from preamble step 3 onward to
+`/mnt/nvme/logs/deploy-<UTC>.log`; the newest 10 `deploy-*.log` files are
+retained and older ones pruned. An `EXIT` trap writes the final exit status to
+`/mnt/nvme/logs/deploy-last.rc` on every path except `SIGKILL` and the pre-log
+preamble failures (lock held, exit `5`; missing mountpoint, exit `1`, both
+stdout-only).
+
+After an `ssh` drop (exit `255`) there is no other channel: read
+`/mnt/nvme/logs/deploy-last.rc` for the outcome and the matching
+`deploy-<UTC>.log` for the detail. Because `deploy.sh` re-imports all images and
+cleans up its own payload on success, the recovery entry point is to rerun
+`setup_strimserver` (a bundle upload plus one more M1 and the DDNS stage), not a
+seconds-long config compare.
 
 `deploy.sh` deliberately leaves the service stopped — the unit is installed and
 enabled, but the first start stays an explicit operator action. Start it with
@@ -857,12 +950,14 @@ task attached to the GPU via CDI.
 sudo ctr -n strimserver run --rm --net-host \
   --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
   --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
-  docker.io/library/strim-ddns:latest strim-ddns /strim-ddns check strim example.com
+  docker.io/library/strim-ddns:latest strim-ddns /strim-ddns check strim example.com <expected-ip>
 ```
 
-`deploy.sh` verified the record at deploy time the same way — in-container,
-a direct authoritative query to the domain's nameservers (via the
-container's c-ares DNS client) — so the box needs no bind-utils/dnsutils.
+The `<expected-ip>` argument (or `DDNS_EXPECTED_IP`) is **required**; the check
+passes only when every discovered nameserver returns it. `deploy.sh` verified
+the record at deploy time the same way — in-container, a direct authoritative
+query to the domain's nameservers (via the container's c-ares DNS client),
+per-NS with agreement required — so the box needs no bind-utils/dnsutils.
 
 **Build-time gates on the arm64 build:**
 
@@ -900,6 +995,38 @@ operator-side script obtained from the git tag, not a member of the deployment
 tar. Stopping the instance therefore also **loses the staged `nvidia-rpm`
 closure** (the stage lives under `/mnt/nvme`); a stage that exists only on the
 host is never a durable rollback artifact.
+
+**Self-healing wipe (unmounted branch only).** When `/mnt/nvme` is not mounted —
+a fresh launch from a dirty image, or after a reboot — `setup_strimserver` wipes
+exactly the allowlist `nvidia-rpm`, `containerd`, and `containerd-state` under
+`/mnt/nvme`, **regardless of their contents**, before it mounts the real volume
+(anything there in the unmounted state lives on the root EBS volume and would be
+shadowed once the volume mounts). The steps run in a fixed order, each logged:
+
+1. Stop the repo units in order (`strimserver.service`, `strim-ddns.timer`,
+   `strim-ddns.service`, `strim-ddns-verify.service`), then verify the AL2023
+   `containerd` unit has `KillMode=process`. Without it a shim survives the
+   containerd stop and keeps the overlay snapshot and bind mounts busy, so a
+   different `KillMode` fails closed. Before stopping containerd, kill and delete
+   every task in the `strimserver` namespace (`ctr -n strimserver tasks list`,
+   then `tasks kill -s KILL` and `containers delete` per task, each bounded by
+   `timeout -k 5 10`), then stop `containerd.service` and `containerd.socket`.
+   If any `containerd-shim` is still alive afterwards the wipe refuses with
+   "reboot the instance, then rerun setup_strimserver".
+2. Enumerate `findmnt -rn -o TARGET` and consider only targets beginning
+   `/mnt/nvme/`. Refuse if any is outside the allowlist, unmount the allowlisted
+   ones deepest-first (reverse-sorted path order), fail closed on any unmount
+   error, then re-enumerate and require that nothing under `/mnt/nvme/` remains.
+3. `rm -rf --one-file-system` each allowlisted name, then re-check that all three
+   are gone and `/mnt/nvme` is empty (or absent). Unknown entries or leftovers
+   refuse **before** anything is mounted.
+4. Mount the real volume.
+
+The mounted branch never wipes, and unknown directories always fail closed. The
+driver-upgrade resume marker `/var/lib/strimserver/driver-upgrade.state` is
+never touched: if it is present the wipe warns loudly that the upgrade is
+half-done and that a `setup-gpu.sh` rerun will re-download the `nvidia-rpm`
+stage, then proceeds.
 
 **Staging preflight:** before any drain/uninstall/install, run the read-only
 stage-only mode as the deploying user (`NVIDIA_STAGE_ONLY=1 ./setup-gpu.sh` or

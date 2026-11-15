@@ -10,8 +10,9 @@
 #     re-run;
 #   * the containerd root/state rewrite must read the existing config, fail
 #     closed when it is unreadable, and be idempotent;
-#   * the logs directory must reject a symlink, be 0750, and pre-create the
-#     three logs at 0640 root:root.
+#   * the logs directory must reject a symlink, be 0755 (traversable by the
+#     unprivileged tee / EXIT-trap writer), and pre-create the three logs at
+#     0640 root:root while leaving deploy-* artifacts alone.
 #
 # Privileged ownership cannot be asserted directly as a non-root test user, so
 # the fake `sudo` records the requested argv and strips `-o/-g` before running
@@ -90,6 +91,19 @@ tmp="$(mktemp -d)"
 cleanup() { rm -rf "$tmp" "$FAKE_SUDO_BINDIR" "$FAKE_SUDO_LOG"; }
 trap cleanup EXIT INT TERM
 
+# The canonical containerd config is the ACTUAL repo artifact
+# deploy/aws/containerd-config.toml (64 bytes: root assignment, state
+# assignment, one blank separator line). It is a Bazel `data` runfile, so the
+# suite compares helper output against the real file rather than a synthetic
+# must-as-well fixture; this catches a drift between the helper and the
+# installed artifact.
+canonical_containerd_config="$script_dir/containerd-config.toml"
+[ -s "$canonical_containerd_config" ] || {
+  printf 'FATAL: canonical containerd config %s is missing\n' \
+    "$canonical_containerd_config" >&2
+  exit 1
+}
+
 owned_as_root_or_requested() {
   local path="$1"
   if [ "$(id -u)" -eq 0 ]; then
@@ -163,8 +177,10 @@ state   =   "/stale/state"
   keep = true
 CFG
 containerd_idempotent() {
-  deploy_prepend_containerd_root_state "$containerd_cfg" "$containerd_cfg" sudo || return 1
-  deploy_prepend_containerd_root_state "$containerd_cfg" "$containerd_cfg" sudo || return 1
+  deploy_prepend_containerd_root_state "$containerd_cfg" "$containerd_cfg" sudo \
+    "$canonical_containerd_config" || return 1
+  deploy_prepend_containerd_root_state "$containerd_cfg" "$containerd_cfg" sudo \
+    "$canonical_containerd_config" || return 1
   has_exactly_one "$containerd_cfg" '^root=' 1 || return 1
   has_exactly_one "$containerd_cfg" '^state=' 1 || return 1
   grep -qx "root='/mnt/nvme/containerd'" "$containerd_cfg" || return 1
@@ -178,7 +194,8 @@ check "containerd rewrite strips stale root/state, preserves keys, one pair afte
 
 containerd_missing_ok() {
   local out="$tmp/missing-out.toml" err
-  err="$(deploy_prepend_containerd_root_state "$tmp/does-not-exist.toml" "$out" sudo 2>&1)" || return 1
+  err="$(deploy_prepend_containerd_root_state "$tmp/does-not-exist.toml" "$out" sudo \
+    "$canonical_containerd_config" 2>&1)" || return 1
   [ -f "$out" ] || return 1
   grep -q "no existing config" <<<"$err" || return 1
   has_exactly_one "$out" '^root=' 1 || return 1
@@ -186,27 +203,102 @@ containerd_missing_ok() {
 }
 check "missing config is treated as empty and logged" containerd_missing_ok
 
-containerd_unreadable_ok() {
-  # Root bypasses DAC, so this case is meaningful only for a non-root user.
-  [ "$(id -u)" -ne 0 ] || return 0
+# A missing (or empty) config must be emitted as EXACTLY the actual repo
+# artifact deploy/aws/containerd-config.toml (64 bytes): root line, state line,
+# blank separator, trailing newline.
+containerd_missing_is_canonical_64_bytes() {
+  local out="$tmp/canonical-missing.toml"
+  deploy_prepend_containerd_root_state "$tmp/does-not-exist.toml" "$out" sudo \
+    "$canonical_containerd_config" 2>/dev/null || return 1
+  cmp -s "$out" "$canonical_containerd_config" || return 1
+  cmp -s "$out" "$script_dir/containerd-config.toml" || return 1
+  [ "$(wc -c <"$out")" -eq 64 ]
+}
+check "missing/empty config emits the actual repo canonical 64 bytes exactly" containerd_missing_is_canonical_64_bytes
+
+# The canonical text is installed from a source file, not generated inline: a
+# helper given a different canonical source must reproduce those bytes verbatim.
+containerd_installs_canonical_source() {
+  local source="$tmp/other-canonical.toml" out="$tmp/other-canonical-out.toml"
+  printf "root='/custom/containerd'\nstate='/custom/containerd-state'\n\n" \
+    >"$source"
+  deploy_prepend_containerd_root_state "$tmp/no-existing.toml" "$out" sudo \
+    "$source" 2>/dev/null || return 1
+  cmp -s "$out" "$source"
+}
+check "the helper installs its canonical source file byte-for-byte" containerd_installs_canonical_source
+
+# Default source resolution must point at the repo/bundle sibling file, so a
+# call site that passes no source still installs deploy/aws/containerd-config.toml.
+containerd_default_source_is_repo_sibling() {
+  local resolved
+  resolved="$(deploy__canonical_containerd_config)" || return 1
+  [ "$(realpath -m -- "$resolved")" = \
+    "$(realpath -m -- "$script_dir/containerd-config.toml")" ]
+}
+check "default canonical source is the repo sibling containerd-config.toml" containerd_default_source_is_repo_sibling
+
+# An existing config with unrelated settings must be preserved in full: no key
+# loss, and exactly one canonical root/state pair after the separator.
+containerd_preserves_existing_keys() {
+  local cfg="$tmp/preserve.toml"
+  cat >"$cfg" <<'CFG'
+version = 2
+root = '/stale/root'
+state = '/stale/state'
+oom_score_adj = -999
+[plugins."io.containerd.grpc.v1.cri"]
+  sandbox_image = "registry.example/pause:3.9"
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+    runtime_type = "io.containerd.runc.v2"
+CFG
+  deploy_prepend_containerd_root_state "$cfg" "$cfg" sudo \
+    "$canonical_containerd_config" || return 1
+  has_exactly_one "$cfg" '^root=' 1 || return 1
+  has_exactly_one "$cfg" '^state=' 1 || return 1
+  grep -qx 'version = 2' "$cfg" || return 1
+  grep -qx 'oom_score_adj = -999' "$cfg" || return 1
+  grep -qx '  sandbox_image = "registry.example/pause:3.9"' "$cfg" || return 1
+  grep -qx '    runtime_type = "io.containerd.runc.v2"' "$cfg" || return 1
+  ! grep -qE '^[[:space:]]+(root|state)[[:space:]]*=' "$cfg" || return 1
+  grep -qx "root='/mnt/nvme/containerd'" "$cfg" || return 1
+  grep -qx "state='/mnt/nvme/containerd-state'" "$cfg"
+}
+check "existing unrelated config keys survive with one canonical root/state pair" containerd_preserves_existing_keys
+
+# An existing config whose read fails must abort without writing <out>.
+#
+# Root bypasses DAC so chmod 000 is not a real denial for uid 0; rather than
+# short-circuit to a vacuous pass, inject the failure at the exact syscall the
+# helper makes: a `sudo` shim that fails `cat <config>` with a non-zero status,
+# which is precisely what an unreadable file (or a denied sudo read) produces.
+# This exercises the fail-closed branch honestly for root and non-root alike.
+containerd_unreadable_fails_without_writing() {
   local cfg="$tmp/unreadable.toml" out="$tmp/unreadable-out.toml"
-  printf "root = '/x'\n" >"$cfg"
-  chmod 000 "$cfg"
-  deploy_prepend_containerd_root_state "$cfg" "$out" sudo >/dev/null 2>&1 && {
-    chmod 600 "$cfg"
-    return 1
-  }
-  chmod 600 "$cfg"
+  local fail_sudo="$tmp/failing-read-sudo"
+  printf "root = '/x'\n" >"$cfg" || return 1
+  cat >"$fail_sudo" <<'SHIM'
+#!/usr/bin/env bash
+if [ "${1:-}" = "cat" ]; then
+  exit 1
+fi
+exec "$@"
+SHIM
+  chmod +x "$fail_sudo" || return 1
+  deploy_prepend_containerd_root_state "$cfg" "$out" "$fail_sudo" \
+    "$canonical_containerd_config" >/dev/null 2>&1 && return 1
   [ ! -e "$out" ]
 }
-check "existing-but-unreadable config fails without writing the output" containerd_unreadable_ok
+check "existing-but-unreadable config fails without writing the output" containerd_unreadable_fails_without_writing
 
 # --- deploy_prepare_logs_directory ------------------------------------------
 logs_root="$tmp/logs"
 logs_ok() {
   DEPLOY_LOGS_ROOT="$logs_root" deploy_prepare_logs_directory "$logs_root" sudo || return 1
   [ -d "$logs_root" ] || return 1
-  [ "$(mode_of "$logs_root")" = "750" ] || return 1
+  # 0755 (not 0750): the unprivileged tee process substitution and the EXIT-trap
+  # deploy-last.rc write must be able to traverse the directory.
+  [ "$(mode_of "$logs_root")" = "755" ] || return 1
   owned_as_root_or_requested "$logs_root"
   local log
   for log in mediamtx.log normalize.log egress.log; do
@@ -214,7 +306,7 @@ logs_ok() {
     [ "$(mode_of "$logs_root/$log")" = "640" ] || return 1
   done
 }
-check "logs dir is 0750 with three 0640 logs" logs_ok
+check "logs dir is 0755 with three 0640 logs" logs_ok
 
 logs_normalize_ok() {
   ( umask 022; : >"$logs_root/late.log" )
@@ -223,9 +315,29 @@ logs_normalize_ok() {
   [ "$(mode_of "$logs_root/late.log")" = "640" ] || return 1
   # Idempotent.
   DEPLOY_LOGS_ROOT="$logs_root" deploy_prepare_logs_directory "$logs_root" sudo || return 1
-  [ "$(mode_of "$logs_root")" = "750" ]
+  [ "$(mode_of "$logs_root")" = "755" ]
 }
 check "a newly created log is normalized to 0640 and the helper is idempotent" logs_normalize_ok
+
+# deploy.sh pre-creates deploy-<timestamp>.log and deploy-last.rc owned by the
+# deploy user (0640). Normalization must leave those deploy-* artifacts alone
+# while still normalizing every other regular file to root:root 0640.
+logs_deploy_artifacts_excluded() {
+  local deploy_log="$logs_root/deploy-20260101T000000Z.log"
+  local deploy_rc="$logs_root/deploy-last.rc"
+  ( umask 077; : >"$deploy_log"; : >"$deploy_rc" )
+  [ "$(mode_of "$deploy_log")" = "600" ] || return 1
+  [ "$(mode_of "$deploy_rc")" = "600" ] || return 1
+  : >"$FAKE_SUDO_LOG"
+  DEPLOY_LOGS_ROOT="$logs_root" deploy_prepare_logs_directory "$logs_root" sudo || return 1
+  # Deploy artifacts keep the caller's mode (ec2-user 0600/0640), not root 0640.
+  [ "$(mode_of "$deploy_log")" = "600" ] || return 1
+  [ "$(mode_of "$deploy_rc")" = "600" ] || return 1
+  # And no chown/chmod normalization was requested for them.
+  ! grep -q 'deploy-20260101T000000Z.log' "$FAKE_SUDO_LOG" || return 1
+  ! grep -q 'deploy-last.rc' "$FAKE_SUDO_LOG"
+}
+check "deploy-* artifacts are excluded from log normalization" logs_deploy_artifacts_excluded
 
 logs_symlink_rejected() {
   local real="$tmp/real-logs" link="$tmp/link-logs"
@@ -249,10 +361,11 @@ check "a directory that is not the expected root is rejected" logs_wrong_root_re
 #     file is left byte-for-byte untouched.
 containerd_unchanged_no_restart() {
   local cfg="$tmp/canonical.toml" before state
-  printf "root='/mnt/nvme/containerd'\nstate='/mnt/nvme/containerd-state'\n\n" >"$cfg"
+  cp "$script_dir/containerd-config.toml" "$cfg" || return 1
   before="$(cksum "$cfg")"
   : >"$FAKE_SUDO_LOG"
-  state="$(deploy_apply_containerd_config "$cfg" "$tmp/canon-out.toml" sudo)" || return 1
+  state="$(deploy_apply_containerd_config "$cfg" "$tmp/canon-out.toml" sudo \
+    "$canonical_containerd_config")" || return 1
   [ "$state" = "unchanged" ] || return 1
   ! grep -q 'systemctl restart containerd' "$FAKE_SUDO_LOG" || return 1
   [ "$before" = "$(cksum "$cfg")" ] || return 1
@@ -266,7 +379,8 @@ containerd_changed_one_restart() {
   local cfg="$tmp/changed.toml" state
   printf "version = 2\nroot = '/stale'\n[plugins]\n  keep = true\n" >"$cfg"
   : >"$FAKE_SUDO_LOG"
-  state="$(deploy_apply_containerd_config "$cfg" "$tmp/changed-out.toml" sudo)" || return 1
+  state="$(deploy_apply_containerd_config "$cfg" "$tmp/changed-out.toml" sudo \
+    "$canonical_containerd_config")" || return 1
   [ "$state" = "changed" ] || return 1
   [ "$(grep -c 'systemctl restart containerd.service' "$FAKE_SUDO_LOG")" -eq 1 ] || return 1
   grep -qx "root='/mnt/nvme/containerd'" "$cfg" || return 1
@@ -275,6 +389,128 @@ containerd_changed_one_restart() {
   [ ! -e "$tmp/changed-out.toml" ]
 }
 check "a changed containerd config is rewritten with exactly one restart" containerd_changed_one_restart
+
+# --- deploy_write_ddns_env_settings -----------------------------------------
+# deploy.sh must write the transferred DDNS settings into strimserver.env BEFORE
+# `systemctl enable --now strim-ddns.timer`, so a timer-triggered start reads the
+# correct DDNS_HOST/DDNS_DOMAIN. The helper owns that write: atomic, idempotent,
+# and duplicate-free while preserving every unrelated env key.
+ddns_dir="$tmp/ddns-env"
+mkdir -p "$ddns_dir"
+ddns_env="$ddns_dir/strimserver.env"
+cat >"$ddns_env" <<'ENV'
+ENABLE_DDNS=false
+DDNS_HOST=old
+DDNS_HOST=duplicate
+DDNS_DOMAIN=old.example
+TWITCH_STREAM_KEY=keep-me
+OTHER_SETTING=1
+ENV
+ddns_settings="$tmp/ddns-config"
+printf 'ENABLE_DDNS=true\nDDNS_HOST=new\nDDNS_DOMAIN=new.example\n' >"$ddns_settings"
+
+ddns_write_ok() {
+  deploy_write_ddns_env_settings "$ddns_env" "$ddns_settings" || return 1
+  [ "$(mode_of "$ddns_env")" = "600" ] || return 1
+  has_exactly_one "$ddns_env" '^ENABLE_DDNS=' 1 || return 1
+  has_exactly_one "$ddns_env" '^DDNS_HOST=' 1 || return 1
+  has_exactly_one "$ddns_env" '^DDNS_DOMAIN=' 1 || return 1
+  grep -qx 'ENABLE_DDNS=true' "$ddns_env" || return 1
+  grep -qx 'DDNS_HOST=new' "$ddns_env" || return 1
+  grep -qx 'DDNS_DOMAIN=new.example' "$ddns_env" || return 1
+  grep -qx 'TWITCH_STREAM_KEY=keep-me' "$ddns_env" || return 1
+  grep -qx 'OTHER_SETTING=1' "$ddns_env" || return 1
+  # No scratch file is left behind beside the env file.
+  ! compgen -G "$ddns_env.tmp.*" >/dev/null
+}
+check "DDNS settings replace stale values, dedupe, and preserve other keys" ddns_write_ok
+
+ddns_idempotent() {
+  local before after
+  before="$(cksum "$ddns_env")"
+  deploy_write_ddns_env_settings "$ddns_env" "$ddns_settings" || return 1
+  after="$(cksum "$ddns_env")"
+  [ "$before" = "$after" ]
+}
+check "re-applying the DDNS settings is byte-for-byte idempotent" ddns_idempotent
+
+ddns_partial_settings_keep_other_lines() {
+  local partial="$tmp/ddns-partial"
+  printf 'DDNS_HOST=partial\n' >"$partial"
+  deploy_write_ddns_env_settings "$ddns_env" "$partial" || return 1
+  has_exactly_one "$ddns_env" '^DDNS_HOST=' 1 || return 1
+  grep -qx 'DDNS_HOST=partial' "$ddns_env" || return 1
+  # Keys absent from the settings file keep their current values.
+  grep -qx 'ENABLE_DDNS=true' "$ddns_env" || return 1
+  grep -qx 'DDNS_DOMAIN=new.example' "$ddns_env"
+}
+check "settings that omit some keys leave those keys untouched" ddns_partial_settings_keep_other_lines
+
+ddns_empty_settings_is_noop() {
+  local empty="$tmp/ddns-empty" before
+  : >"$empty"
+  before="$(cksum "$ddns_env")"
+  deploy_write_ddns_env_settings "$ddns_env" "$empty" || return 1
+  [ "$before" = "$(cksum "$ddns_env")" ]
+}
+check "an empty settings file is a no-op" ddns_empty_settings_is_noop
+
+ddns_missing_env_fails_loud() {
+  local missing="$tmp/no-such-env/strimserver.env"
+  deploy_write_ddns_env_settings "$missing" "$ddns_settings" >/dev/null 2>&1 && return 1
+  [ ! -e "$missing" ]
+}
+check "a missing env file fails loudly and is not created" ddns_missing_env_fails_loud
+
+# --- atomic replace: scratch file must share the target's directory ----------
+# rename(2) is atomic only within one filesystem, so the scratch file must be
+# created in the target's own directory rather than /tmp. Observe the actual
+# `mv <tmp> <target>` call: a shim records both dirnames and delegates to the
+# real mv, proving the helper's temp file is a sibling of the target.
+assert_all_renames_are_same_directory() {
+  local log="$1" left right
+  [ -s "$log" ] || return 1
+  while IFS='|' read -r left right; do
+    [ "$left" = "$right" ] || return 1
+  done <"$log"
+}
+
+atomic_replace_same_directory() {
+  local real_mv shim_dir
+  real_mv="$(command -v mv)" || return 1
+  shim_dir="$tmp/atomic-bin"
+  mkdir -p "$shim_dir" || return 1
+  export ATOMIC_REAL_MV="$real_mv" ATOMIC_MV_LOG="$tmp/atomic-mv.log"
+  cat >"$shim_dir/mv" <<'SHIM'
+#!/usr/bin/env bash
+args=("$@")
+if [ "${args[0]:-}" = "--" ]; then
+  args=("${args[@]:1}")
+fi
+[ "${#args[@]}" -ge 2 ] || exit 1
+printf '%s|%s\n' "$(dirname -- "${args[0]}")" "$(dirname -- "${args[1]}")" \
+  >> "${ATOMIC_MV_LOG:?}"
+exec "${ATOMIC_REAL_MV:?}" "$@"
+SHIM
+  chmod +x "$shim_dir/mv" || return 1
+
+  local ccfg="$tmp/atomic-containerd.toml" cout="$tmp/atomic-containerd-out.toml"
+  printf "version = 2\nroot = '/stale'\n" >"$ccfg" || return 1
+  : >"$ATOMIC_MV_LOG"
+  PATH="$shim_dir:$PATH" deploy_prepend_containerd_root_state "$ccfg" "$cout" sudo \
+    "$canonical_containerd_config" >/dev/null 2>&1 || return 1
+  assert_all_renames_are_same_directory "$ATOMIC_MV_LOG" || return 1
+
+  local denv="$tmp/atomic-env/strimserver.env" dsettings="$tmp/atomic-settings"
+  mkdir -p "$(dirname -- "$denv")" || return 1
+  printf 'BASE_SETTING=1\n' >"$denv" || return 1
+  printf 'DDNS_HOST=atomic\n' >"$dsettings" || return 1
+  : >"$ATOMIC_MV_LOG"
+  PATH="$shim_dir:$PATH" deploy_write_ddns_env_settings "$denv" "$dsettings" \
+    >/dev/null 2>&1 || return 1
+  assert_all_renames_are_same_directory "$ATOMIC_MV_LOG"
+}
+check "atomic replace creates its scratch file in the target directory" atomic_replace_same_directory
 
 # --- deploy.sh static check -------------------------------------------------
 deploy_sh_has_no_passphrase_print() {

@@ -52,29 +52,61 @@ settings transferred, the bundled defaults (DDNS disabled) stay in effect.
 
 ## 3. How deploy.sh wires it up
 
-At the end of the deploy run `deploy.sh`:
+`deploy.sh` does all DDNS setup **before** it prints the M1 milestone; the
+post-M1 DDNS block contains only the two bounded unit starts below.
 
 1. Installs the transferred password to `/etc/strim-ddns/password` (root:root
    `0600`) and scrubs the scp'd `/mnt/nvme/ddns-password`.
 2. Installs the `strim-ddns.service` and `strim-ddns.timer` units
-   (`install -D -m 644`), then `systemctl enable --now strim-ddns.timer` (6h,
-   `Persistent=true`, `RandomizedDelaySec=300`).
+   (`install -D -m 644`), renders `strim-ddns-verify.service` from its template
+   with the expected public IP substituted, disables any old async verify
+   enablement (`sudo timeout -k 5 10 systemctl disable
+   strim-ddns-verify.service`), then `systemctl enable --now strim-ddns.timer`
+   (6h, `Persistent=true`, `RandomizedDelaySec=300`).
 3. Imports `strim-ddns-container.tar` into the `strimserver` containerd
-   namespace.
-4. Runs a one-shot refresh passing `ip=$PUBLIC_IP` explicitly (`DDNS_IP=` via a
-   temporary EnvironmentFile), so the record points at this box immediately;
-   the env file is removed after the run.
-5. Verifies — retrying ~24 times with 5s sleeps, up to a few minutes
-   worst-case, failing loudly on mismatch — that `strim.example.com` resolves
-   to the box's public IP. Each check runs **inside** the `strim-ddns`
-   container via its `check` subcommand: a direct authoritative query to the
-   domain's nameservers, via the container's c-ares DNS client — it discovers
-   the NS via the resolver, then queries the authoritative NS directly for
-   the A record; there is no per-query timeout env (the DNS client has its
-   own internal timeout). Being direct to the authoritative nameservers, the
-   check is ground truth, immune to the box's local resolver cache, and needs
-   no bind-utils/dnsutils installed on the box. On mismatch it fails loudly
-   (`exit 1`).
+   namespace as part of the parallel image-import barrier (before M1).
+4. **Refresh (blocking).** Runs
+   `sudo timeout -k 5 40 systemctl start strim-ddns.service`.
+   `strim-ddns.service` sets `TimeoutStartSec=30`, so systemd bounds the refresh
+   first; `timeout -k 5 40` is the backstop for a genuinely wedged start. By
+   default `DDNS_IP` is empty, so the update sends **no `ip=` parameter** and
+   Namecheap records the requester's IPv4; the client pins IPv4 egress
+   (`CURLOPT_IPRESOLVE=CURL_IPRESOLVE_V4`). An explicit `DDNS_IP` still works if
+   an operator sets one.
+5. **Verify (blocking).** Runs
+   `sudo timeout -k 5 150 systemctl start strim-ddns-verify.service`.
+   `systemctl start` on a `Type=oneshot` unit blocks until it exits and
+   propagates its status. The unit owns retry semantics —
+   `TimeoutStartSec=140` is the primary overall bound, each check attempt is
+   wrapped in `timeout 30`, `sleep 5` separates attempts, and there is **no
+   fixed attempt count** — and logs `attempt N: observed <ip|none> expected
+   <ip>` per failed attempt and `verified after N attempts (<Xs>)` on success.
+   The `check` binary does not count attempts.
+
+   Each check runs **inside** the `strim-ddns` container via its `check`
+   subcommand, a direct authoritative query to the domain's nameservers (via
+   the container's c-ares DNS client) — ground truth, immune to the box's local
+   resolver cache, and needing no bind-utils/dnsutils on the box. The check is
+   **per-nameserver**: each discovered NS hostname is queried separately through
+   its own IPv4 (A-record) addresses, per-phase concurrent in one c-ares event
+   loop, and it passes only when **every** NS returns the expected IP via at
+   least one of its own IPs. One unreachable or disagreeing NS means "not yet".
+   The c-ares budget is 4000 ms × 2 tries per channel, so each phase is ≤8 s and
+   the worst case is ≈24 s < the per-attempt `timeout 30`. The binary prints one
+   line per NS on stderr (`check <fqdn> ns <host> -> <ip|none>`) and the single
+   agreed IPv4 on stdout.
+
+**Exit codes.** `deploy.sh` maps the stages onto its taxonomy: `0` only when M2
+is reached (every NS agreed, or DDNS disabled); `3` when a stage failed (the
+message names refresh `strim-ddns.service` versus verify
+`strim-ddns-verify.service`); `4` when the outer wrapper returned `124` or `137`
+(backstop timeout — `deploy.sh` stops the unit and, if that stop also fails,
+warns that the unit may still be running); `5` when another deploy holds the
+lock; `129`/`130`/`143` when the deploy was signalled (HUP/INT/TERM) and any
+in-flight DDNS unit was stopped; `255` when `setup_strimserver` lost its ssh
+connection (remote state unknown). Every `systemctl` start/stop here is wrapped
+as `sudo timeout -k 5 <n> systemctl …`, so `timeout` runs inside `sudo` and can
+signal the root-owned client.
 
 Subsequent timer runs keep `ip=` omitted — the `strim-ddns` client then lets
 Namecheap use the requester IP (the instance's auto-assigned public IP):
@@ -108,20 +140,25 @@ host strim.example.com          # -> should return the box's public IP
 ```
 
 That is an operator-side check only — `deploy.sh`'s own verification runs
-**inside** the `strim-ddns` container via its `check` subcommand, which
-queries the domain's nameservers directly (the container's c-ares DNS client
-discovers the authoritative NS via the resolver, then queries the NS
-directly for the A record). Being in-container and direct to the
-authoritative nameservers, it is ground truth and immune to the box's local
-resolver cache — the box needs no bind-utils/dnsutils installed. On the box
-you can confirm the same check directly:
+**inside** the `strim-ddns` container via its `check` subcommand, which queries
+**each** discovered nameserver separately through its own IPv4 A-record
+addresses (the container's c-ares DNS client) and passes only when every NS
+returns the expected IP. Being in-container and direct to the authoritative
+nameservers, it is ground truth and immune to the box's local resolver cache —
+the box needs no bind-utils/dnsutils installed. The expected IPv4 is required
+(third argument or `DDNS_EXPECTED_IP`); on the box you can confirm the same
+check directly, substituting the box's public IP:
 
 ```sh
 sudo ctr -n strimserver run --rm --net-host \
   --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
   --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
-  docker.io/library/strim-ddns:latest strim-ddns /strim-ddns check strim example.com
+  docker.io/library/strim-ddns:latest strim-ddns /strim-ddns check strim example.com <expected-ip>
 ```
+
+The check prints one line per NS on stderr (`check <fqdn> ns <host> -> <ip|none>`)
+and the single agreed IPv4 on stdout; it exits `0` only when every NS agrees and
+`1` when any is unreachable or disagrees.
 
 The DDNS timer and service remain the ongoing health signals:
 

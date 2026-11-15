@@ -11,15 +11,23 @@
  *     line + headers) is appended to the log file given in argv[2]. Mirrors
  *     the repo's notify_stub pattern (core/notify_stub.c).
  *
- *   DNS mode: ddns-test-server dns <role> <config> <request-log>
- *     Binds 127.0.0.1:0 (UDP), prints the chosen port to stdout on a single
- *     line (flushed), then answers DNS queries until killed. Two roles drive
- *     the check subcommand's direct-authoritative flow:
- *       - resolver (config "fixed"): a stand-in recursive resolver. Answers
- *         the NS query for example.com. with ns1.example.com., the A query
- *         for ns1.example.com. with 127.0.0.1 (so the direct A query lands
- *         back on the loopback), the AAAA query for ns1.example.com. with an
- *         empty NOERROR, and everything else with NXDOMAIN.
+ *   DNS mode: ddns-test-server dns <role> <bind-ip> <port> <config> <request-log>
+ *     Binds <bind-ip>:<port> (UDP; port 0 = ephemeral), prints the chosen port
+ *     to stdout on a single line (flushed), then answers DNS queries until
+ *     killed. Two roles drive the check subcommand's direct-authoritative
+ *     flow:
+ *       - resolver (config "fixed" or "multi:<ns>=<ip>,..."): a stand-in
+ *         recursive resolver. "fixed" answers the NS query for example.com.
+ *         with ns1.example.com., the A query for ns1.example.com. with
+ *         127.0.0.1, the AAAA query for ns1.example.com. with an empty
+ *         NOERROR, and everything else with NXDOMAIN. "multi:..." answers the
+ *         NS query for example.com. with one NS record per configured name,
+ *         each NS name's A query with its configured IPv4 (distinct loopback
+ *         addresses let each NS route to its own authoritative server), AAAA
+ *         with an empty NOERROR, and everything else with NXDOMAIN. The
+ *         special IP token "nov4" declares an NS with no IPv4 A record: its
+ *         A query answers NXDOMAIN (used to exercise the all-NS-have-no-IPv4
+ *         path).
  *       - authoritative (per-case config): a stand-in authoritative server
  *         for testhost.example.com. Configs:
  *           single:<ip>               one A record
@@ -232,6 +240,110 @@ static void run_resolver_dns(int srv, const struct sockaddr_in *client,
                NULL, 0, true);
 }
 
+/* -------------------------------------------------------------------------
+ * Multi-nameserver resolver (config "multi:<ns>=<ip>,...")
+ * ------------------------------------------------------------------------- */
+
+#define DNS_MAX_NS 8
+
+struct resolver_multi_config {
+    size_t ns_count;
+    char names[DNS_MAX_NS][DNS_WIRE_NAME_MAX + 1];
+    char ips[DNS_MAX_NS][INET_ADDRSTRLEN];
+};
+
+/* parse_resolver_multi: parse "multi:ns1=127.0.0.2,ns2=127.0.0.3" into cfg.
+ * Returns 0 on success, -1 on malformed input. */
+static int parse_resolver_multi(const char *config,
+                                struct resolver_multi_config *cfg) {
+    static const char prefix[] = "multi:";
+    if (strncmp(config, prefix, sizeof(prefix) - 1) != 0) {
+        return -1;
+    }
+    cfg->ns_count = 0;
+    const char *p = config + (sizeof(prefix) - 1);
+    while (*p != '\0') {
+        const char *comma = strchr(p, ',');
+        size_t seg_len = comma ? (size_t)(comma - p) : strlen(p);
+        const char *eq = memchr(p, '=', seg_len);
+        if (eq == NULL) {
+            return -1;
+        }
+        size_t name_len = (size_t)(eq - p);
+        size_t ip_len = seg_len - name_len - 1;
+        if (name_len == 0 || name_len > DNS_WIRE_NAME_MAX || ip_len == 0 ||
+            ip_len >= INET_ADDRSTRLEN || cfg->ns_count >= DNS_MAX_NS) {
+            return -1;
+        }
+        char *name = cfg->names[cfg->ns_count];
+        char *ip = cfg->ips[cfg->ns_count];
+        memcpy(name, p, name_len);
+        name[name_len] = '\0';
+        memcpy(ip, eq + 1, ip_len);
+        ip[ip_len] = '\0';
+        struct in_addr parsed;
+        if (strcmp(ip, "nov4") != 0 && inet_pton(AF_INET, ip, &parsed) != 1) {
+            return -1;
+        }
+        cfg->ns_count++;
+        p = comma ? comma + 1 : p + seg_len;
+    }
+    return cfg->ns_count > 0 ? 0 : -1;
+}
+
+/* find_ns_ip: the configured IPv4 for an NS hostname, or NULL. */
+static const char *find_ns_ip(const struct resolver_multi_config *cfg,
+                              const char *name) {
+    for (size_t i = 0; i < cfg->ns_count; i++) {
+        if (name_eq(name, cfg->names[i])) {
+            /* "nov4" names are still advertised as NS records but have no
+             * IPv4 A record, so an A query for them falls through to
+             * NXDOMAIN (find_ns_ip returns NULL). */
+            return strcmp(cfg->ips[i], "nov4") == 0 ? NULL : cfg->ips[i];
+        }
+    }
+    return NULL;
+}
+
+/* run_resolver_multi_dns: answer from the configured NS set. */
+static void run_resolver_multi_dns(int srv, const struct sockaddr_in *client,
+                                   socklen_t client_len, FILE *logf,
+                                   const struct dns_wire_query *q,
+                                   const struct resolver_multi_config *cfg) {
+    if (q->qclass != DNS_WIRE_CLASS_IN) {
+        return;
+    }
+    if (q->qtype == DNS_WIRE_TYPE_NS && name_eq(q->name, "example.com")) {
+        struct dns_wire_answer answers[DNS_MAX_NS];
+        memset(answers, 0, sizeof(answers));
+        for (size_t i = 0; i < cfg->ns_count; i++) {
+            answers[i].owner = q->name;
+            answers[i].type = DNS_WIRE_TYPE_NS;
+            answers[i].data = cfg->names[i];
+            answers[i].ttl = DNS_TTL;
+        }
+        send_reply(srv, client, client_len, logf, q, DNS_WIRE_RCODE_NOERROR,
+                   answers, cfg->ns_count, true);
+        return;
+    }
+    if (q->qtype == DNS_WIRE_TYPE_A) {
+        const char *ip = find_ns_ip(cfg, q->name);
+        if (ip != NULL) {
+            struct dns_wire_answer ans = a_answer(q, ip);
+            send_reply(srv, client, client_len, logf, q,
+                       DNS_WIRE_RCODE_NOERROR, &ans, 1, true);
+            return;
+        }
+    }
+    if (q->qtype == DNS_WIRE_TYPE_AAAA && find_ns_ip(cfg, q->name) != NULL) {
+        send_reply(srv, client, client_len, logf, q, DNS_WIRE_RCODE_NOERROR,
+                   NULL, 0, true);
+        return;
+    }
+    send_reply(srv, client, client_len, logf, q, DNS_WIRE_RCODE_NXDOMAIN,
+               NULL, 0, true);
+}
+
 /* run_authoritative_dns: the stand-in authoritative server, configured per
  * smoke-test case (see the top-of-file comment for the config grammar). */
 static void run_authoritative_dns(int srv, const struct sockaddr_in *client,
@@ -324,8 +436,10 @@ static void run_authoritative_dns(int srv, const struct sockaddr_in *client,
 static int run_dns_mode(int argc, char **argv) {
     (void)argc;
     const char *role = argv[0];
-    const char *config = argv[1];
-    const char *log_path = argv[2];
+    const char *bind_ip = argv[1];
+    const char *port_str = argv[2];
+    const char *config = argv[3];
+    const char *log_path = argv[4];
 
     int srv = socket(AF_INET, SOCK_DGRAM, 0);
     if (srv < 0) {
@@ -335,8 +449,18 @@ static int run_dns_mode(int argc, char **argv) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0; /* ephemeral */
+    if (inet_pton(AF_INET, bind_ip, &addr.sin_addr) != 1) {
+        fprintf(stderr, "ddns-test-server: invalid bind ip '%s'\n", bind_ip);
+        return 1;
+    }
+    char *port_end = NULL;
+    long port = strtol(port_str, &port_end, 10);
+    if (port_end == port_str || *port_end != '\0' || port < 0 ||
+        port > 65535) {
+        fprintf(stderr, "ddns-test-server: invalid port '%s'\n", port_str);
+        return 1;
+    }
+    addr.sin_port = htons((uint16_t)port);
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         fprintf(stderr, "ddns-test-server: dns bind: %s\n", strerror(errno));
         return 1;
@@ -350,6 +474,18 @@ static int run_dns_mode(int argc, char **argv) {
 
     printf("%d\n", ntohs(addr.sin_port));
     fflush(stdout);
+
+    struct resolver_multi_config multi;
+    memset(&multi, 0, sizeof(multi));
+    bool use_multi = false;
+    if (strcmp(role, "resolver") == 0 && strncmp(config, "multi:", 6) == 0) {
+        if (parse_resolver_multi(config, &multi) != 0) {
+            fprintf(stderr, "ddns-test-server: bad resolver config '%s'\n",
+                    config);
+            return 1;
+        }
+        use_multi = true;
+    }
 
     FILE *logf = fopen(log_path, "a");
     if (!logf) {
@@ -377,7 +513,12 @@ static int run_dns_mode(int argc, char **argv) {
             continue; /* malformed query: drop it */
         }
         if (strcmp(role, "resolver") == 0) {
-            run_resolver_dns(srv, &client, client_len, logf, &q);
+            if (use_multi) {
+                run_resolver_multi_dns(srv, &client, client_len, logf, &q,
+                                       &multi);
+            } else {
+                run_resolver_dns(srv, &client, client_len, logf, &q);
+            }
         } else if (strcmp(role, "authoritative") == 0) {
             run_authoritative_dns(srv, &client, client_len, logf, &q, config);
         } else {
@@ -391,12 +532,13 @@ int main(int argc, char **argv) {
     if (argc == 3) {
         return run_http_mode(argc - 1, argv + 1);
     }
-    if (argc == 5 && strcmp(argv[1], "dns") == 0) {
+    if (argc == 7 && strcmp(argv[1], "dns") == 0) {
         return run_dns_mode(argc - 2, argv + 2);
     }
     fprintf(stderr,
             "usage: %s <response-body> <request-log>\n"
-            "       %s dns <resolver|authoritative> <config> <request-log>\n",
+            "       %s dns <resolver|authoritative> <bind-ip> <port> <config> "
+            "<request-log>\n",
             argv[0], argv[0]);
     return 2;
 }

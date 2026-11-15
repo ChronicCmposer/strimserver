@@ -52,6 +52,8 @@ cc_binary(
     name = "strim_ddns_bin",
     tags = ["manual"],
     srcs = [
+        "agreement.c",
+        "agreement.h",
         "main.c",
     ],
     features = _MUSL_FEATURES,
@@ -184,10 +186,12 @@ sh_test(
     args = [
         "$(location :strim_ddns)",
         "$(location :ddns_test_server)",
+        "$(location main.c)",
     ],
     data = [
         ":strim_ddns",
         ":ddns_test_server",
+        "main.c",
     ],
 )
 
@@ -199,6 +203,8 @@ sh_test(
 cc_test(
     name = "ares_reply_test",
     srcs = [
+        "agreement.c",
+        "agreement.h",
         "ares_reply_test.c",
         "dns_wire.c",
         "dns_wire.h",

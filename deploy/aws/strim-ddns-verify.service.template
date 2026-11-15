@@ -1,22 +1,27 @@
 [Unit]
-Description=strim Dynamic DNS verification (one-shot, bounded background retries)
-# The deploy kicks this unit off after arming the 6-hour refresh timer and does
-# NOT wait for it. The retry loop lives here, not in deploy.sh, so a slow or
-# still-propagating authoritative DNS answer never blocks a deploy.
+Description=strim Dynamic DNS verification (one-shot, bounded retries)
+# The deploy starts this unit after the refresh and BLOCKS until it exits; a
+# slow or still-propagating authoritative DNS answer is bounded by
+# TimeoutStartSec=140 below (and by the deploy's `timeout -k 5 150` backstop).
+# After= only: no Wants=, because starting verify must never trigger a second
+# refresh. There is deliberately no [Install] section -- deploy-invoked only.
 After=containerd.service network-online.target strim-ddns.service
 Requires=containerd.service
-Wants=strim-ddns.service
+AssertPathIsMountPoint=/mnt/nvme
 
 [Service]
 Type=oneshot
+TimeoutStartSec=140
 # DDNS_HOST / DDNS_DOMAIN come from the deployed env file; the expected public
 # IP is baked in by deploy.sh (substituted for __EXPECTED_IP__).
 EnvironmentFile=-/mnt/nvme/config/strimserver.env
-# `check` needs no password; the bind mounts mirror the strim-ddns unit so the
-# FROM-scratch image has a resolver configuration. Bounded: 24 attempts with 5s
-# between them. systemd expands $$ -> $, so the shell receives $(...) and
-# $DDNS_HOST/$DDNS_DOMAIN literally.
-ExecStart=/bin/bash -c 'for attempt in $$(seq 1 24); do got="$$(/usr/bin/ctr -n strimserver run --rm --net-host --read-only --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro docker.io/library/strim-ddns:latest strim-ddns /strim-ddns check "$$DDNS_HOST" "$$DDNS_DOMAIN" 2>/dev/null)" || got=""; if [ "$$got" = "__EXPECTED_IP__" ]; then exit 0; fi; if [ "$$attempt" -lt 24 ]; then sleep 5; fi; done; exit 1'
-
-[Install]
-WantedBy=multi-user.target
+# Attempt counting and retry semantics live HERE, not in the C check: each
+# attempt is bounded by `timeout 30` (the check's worst case is ~24s), and
+# `sleep 5` separates attempts until the check succeeds. systemd expands $$ ->
+# $, so the shell receives $(...) and $DDNS_HOST/$DDNS_DOMAIN literally. The
+# check's per-NS diagnostic lines on stderr are never redirected away.
+ExecStart=/bin/bash -c 'attempt=0; started=$$SECONDS; while :; do attempt=$$((attempt + 1)); timeout -k 5 10 /usr/bin/ctr -n strimserver tasks kill -s KILL strim-ddns-verify || true; timeout -k 5 10 /usr/bin/ctr -n strimserver containers delete strim-ddns-verify || true; got="$$(timeout 30 /usr/bin/ctr -n strimserver run --rm --net-host --read-only --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro docker.io/library/strim-ddns:latest strim-ddns-verify /strim-ddns check "$$DDNS_HOST" "$$DDNS_DOMAIN" "__EXPECTED_IP__")"; if [ $$? -eq 0 ]; then printf "verified after %s attempts (%ss)\n" "$$attempt" "$$((SECONDS - started))"; exit 0; fi; printf "attempt %s: observed %s expected %s\n" "$$attempt" "$${got:-none}" "__EXPECTED_IP__"; sleep 5; done'
+# Failure, TimeoutStartSec expiry, and the deploy backstop `systemctl stop` all
+# run this: the killed verify attempt must not leave its container task behind.
+ExecStopPost=-timeout -k 5 10 /usr/bin/ctr -n strimserver tasks kill -s KILL strim-ddns-verify
+ExecStopPost=-timeout -k 5 10 /usr/bin/ctr -n strimserver containers delete strim-ddns-verify

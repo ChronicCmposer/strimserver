@@ -134,6 +134,79 @@ after() {
   second="$(call_index "$2")"
   [[ -n "$first" && -n "$second" && "$first" -gt "$second" ]]
 }
+# True when <pattern> is recorded ANYWHERE after the first <anchor> match.
+# `before`/`after` compare first occurrences only, so they cannot prove a
+# second call of the same command (e.g. `dkms status` before removal and again
+# after the install) happens at a particular point.
+after_anchor() {
+  local pattern="$1" anchor="$2" idx
+  idx="$(call_index "$anchor")"
+  [[ -n "$idx" ]] || return 1
+  awk -v pat="$pattern" -v idx="$idx" \
+    'NR > idx && $0 ~ pat { found = 1; exit } END { exit(found ? 0 : 1) }' \
+    "$FAKE_GPU_CALLS"
+}
+# Override only `modinfo -F version nvidia-uvm` by prepending a one-module
+# overlay to PATH; every other modinfo call delegates to the fake_gpu_install
+# shim. This models a stale same-path nvidia-uvm.ko without adding a knob to the
+# shared fake (owned by wave 2).
+install_modinfo_uvm_version_override() {
+  local version="$1" overlay="$case_tmp/modinfo-overlay"
+  command mkdir -p "$overlay"
+  cat >"$overlay/modinfo" <<SHIM
+#!/usr/bin/env bash
+module="\${*: -1}"
+case " \$* " in
+  *" -n "*|*" --filename "*) ;;
+  *)
+    if [[ "\$module" == "nvidia-uvm" ]]; then
+      printf 'modinfo %s\n' "\$*" >>"\${FAKE_GPU_CALLS:-/dev/null}"
+      printf '%s\n' "$version"
+      exit 0
+    fi
+    ;;
+esac
+exec "\${FAKE_GPU_BINDIR:?}/modinfo" "\$@"
+SHIM
+  command chmod +x "$overlay/modinfo"
+  PATH="$overlay:$PATH"
+}
+# Model an on-disk nvidia-uvm module that is stale until the offline driver
+# install replaces it: `modinfo -F version nvidia-uvm` reports <stale_version>
+# while the case-local sentinel exists, then delegates to the fake afterwards.
+# A dnf shim clears the sentinel exactly on the ALLOWERASING (driver) install.
+install_modinfo_uvm_stale_until_install() {
+  local stale_version="$1" overlay="$case_tmp/modinfo-overlay"
+  local sentinel="$case_tmp/uvm-stale"
+  : >"$sentinel"
+  command mkdir -p "$overlay"
+  cat >"$overlay/modinfo" <<SHIM
+#!/usr/bin/env bash
+module="\${*: -1}"
+case " \$* " in
+  *" -n "*|*" --filename "*) ;;
+  *)
+    if [[ "\$module" == "nvidia-uvm" ]]; then
+      printf 'modinfo %s\n' "\$*" >>"\${FAKE_GPU_CALLS:-/dev/null}"
+      if [[ -e "$sentinel" ]]; then
+        printf '%s\n' "$stale_version"
+        exit 0
+      fi
+    fi
+    ;;
+esac
+exec "\${FAKE_GPU_BINDIR:?}/modinfo" "\$@"
+SHIM
+  cat >"$overlay/dnf" <<SHIM
+#!/usr/bin/env bash
+case " \$* " in
+  *" --allowerasing "*) "\${FAKE_REAL_RM:?}" -f "$sentinel" ;;
+esac
+exec "\${FAKE_GPU_BINDIR:?}/dnf" "\$@"
+SHIM
+  command chmod +x "$overlay/modinfo" "$overlay/dnf"
+  PATH="$overlay:$PATH"
+}
 # Stage helpers inspect the recorded `dnf install ... --downloadonly` call, not
 # the cumulative argv file (which mixes every dnf invocation).
 stage_has_package() {
@@ -359,6 +432,12 @@ case_upgrade() {
   check "upgrade: selects the amd64 NEVRA" has_call 'dnf install .*nvidia-open-3:620\.70\.06-1\.el9'
   check "upgrade: does not select the arm64 NEVRA" no_call 'nvidia-open-620.70.06-1.amzn2023.noarch'
   check "upgrade: depmod before unload" before 'depmod -a' 'modprobe -r nvidia$'
+  check "upgrade: verifies the on-disk nvidia module for the running kernel" \
+    has_call '^modinfo -k .* -F version nvidia$'
+  check "upgrade: verifies the on-disk nvidia-uvm module for the running kernel" \
+    has_call '^modinfo -k .* -F version nvidia-uvm$'
+  check "upgrade: on-disk uvm check runs after the offline install" \
+    before '^dnf install .*--allowerasing' 'modinfo -k .* -F version nvidia-uvm$'
   check "upgrade: unload before load" before 'modprobe -r nvidia$' 'modprobe nvidia$'
   check "upgrade: restores nvidia-persistenced" has_call 'systemctl start nvidia-persistenced'
   check "upgrade: never restarts containerd itself" no_call 'systemctl restart containerd'
@@ -788,9 +867,175 @@ case_dkms_cleanup() {
   check "dkms cleanup: exits 0" test "$rc" -eq 0
   check "dkms cleanup: removes the stale 595 build" has_call 'dkms remove nvidia-open/595\.112\.07 --all'
   check "dkms cleanup: never removes the 620 build" no_call 'dkms remove nvidia-open/620'
-  check "dkms cleanup: runs after the RPM install" before '^dnf install .*--allowerasing' 'dkms remove nvidia-open/595'
+  check "dkms cleanup: runs before the RPM install (same extra/nvidia*.ko paths)" \
+    before 'dkms remove nvidia-open/595' '^dnf install .*--allowerasing'
   check "dkms cleanup: runs before depmod" before 'dkms remove nvidia-open/595' 'depmod -a'
   check "dkms cleanup: runs before module unload" before 'dkms remove nvidia-open/595' 'modprobe -r nvidia$'
+  end_case
+}
+
+# Both the stale below-floor build AND the staged target build are registered
+# for the running kernel. Only the 595 build may be removed; the 620 build must
+# survive staging -> removal (a vacuous "never removes 620" cannot prove this
+# when 620 is absent from `dkms status` in the first place).
+case_dkms_cleanup_preserves_target_build() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
+  export FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1 FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $(uname -r), x86_64: installed
+nvidia-open/620.70.06, $(uname -r), x86_64: installed"
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "dkms both builds: exits 0" test "$rc" -eq 0
+  check "dkms both builds: removes the stale 595 build" \
+    has_call 'dkms remove nvidia-open/595\.112\.07 --all'
+  check "dkms both builds: never removes the staged 620 build" \
+    no_call 'dkms remove (nvidia|nvidia-open)/620'
+  check "dkms both builds: removal precedes the offline install" \
+    before 'dkms remove nvidia-open/595' '^dnf install .*--allowerasing'
+  check "dkms both builds: the 620 build is still reported after the removal" \
+    after_anchor 'dkms status' 'dkms remove nvidia-open/595'
+  check "dkms both builds: loads the 620 driver" procs_620
+  end_case
+}
+
+case_on_disk_uvm_mismatch_fails_closed() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=595.112.07 FAKE_PROC_VERSION=595.112.07
+  export FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  # The closure installs 620 for nvidia, but the same-path unlink defect left a
+  # stale 595 nvidia-uvm.ko on disk -- the live-host failure this lane catches.
+  install_modinfo_uvm_version_override 595.112.07
+  export FAKE_DKMS_STATUS="nvidia-open/620.70.06, $(uname -r), x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "on-disk uvm mismatch: upgrade fails" test "$rc" -ne 0
+  check "on-disk uvm mismatch: names the module and both versions" \
+    bash -c 'grep -q "nvidia-uvm" "$1" && grep -q "595.112.07" "$1" && grep -q "620.70.06" "$1"' _ "$err"
+  check "on-disk uvm mismatch: names [kernel-module]" \
+    bash -c 'grep -q "\[kernel-module\]" "$1"' _ "$err"
+  check "on-disk uvm mismatch: does not unload the old driver" no_call 'modprobe -r nvidia$'
+  check "on-disk uvm mismatch: leaves the resume marker for a rerun" marker_present
+  check "on-disk uvm mismatch: never prints a success line" \
+    bash -c '! grep -qi "at or above the .* floor" "$1"' _ "$out"
+  end_case
+}
+
+# The live incident: the LOADED driver is already 620 while the on-disk modules
+# for the running kernel are stale 595. The at-floor proc check must not short
+# circuit; the repair must rebuild the on-disk modules and load nvidia_uvm.
+case_loaded_floor_stale_on_disk_uvm_repairs() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=620.70.06 FAKE_PROC_VERSION=620.70.06
+  export FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1 FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  install_modinfo_uvm_stale_until_install 595.112.07
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $(uname -r), x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "loaded-floor stale uvm: exits 0 after the repair" test "$rc" -eq 0
+  check "loaded-floor stale uvm: does not short-circuit as nothing-to-do" \
+    bash -c '! grep -qi "nothing to do" "$1"' _ "$out"
+  check "loaded-floor stale uvm: names the disagreement" \
+    bash -c 'grep -Eqi "on-disk|disagree|stale|repair" "$1" "$2"' _ "$out" "$err"
+  check "loaded-floor stale uvm: removes the stale 595 DKMS build first" \
+    has_call 'dkms remove nvidia-open/595\.112\.07 --all'
+  check "loaded-floor stale uvm: reinstalls the target closure" \
+    has_call '^dnf install .*--allowerasing'
+  check "loaded-floor stale uvm: removal precedes the offline install" \
+    before 'dkms remove nvidia-open/595' '^dnf install .*--allowerasing'
+  check "loaded-floor stale uvm: never removes the 620 build" \
+    no_call 'dkms remove (nvidia|nvidia-open)/620'
+  check "loaded-floor stale uvm: never unloads the already-matching driver" \
+    no_call 'modprobe -r nvidia$'
+  check "loaded-floor stale uvm: loads nvidia_uvm" has_call 'modprobe nvidia_uvm$'
+  check "loaded-floor stale uvm: removes the resume marker on success" \
+    bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
+  end_case
+}
+
+# Same loaded/on-disk disagreement but the fixture never repairs the stale
+# nvidia-uvm: the run must end loudly (observed + expected), not early-return.
+case_loaded_floor_stale_uvm_fails_loud() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=620.70.06 FAKE_PROC_VERSION=620.70.06
+  export FAKE_RPM_INSTALLED=1 FAKE_KERNEL_MODULE_VARIANT=dkms
+  export FAKE_DKMS_RPM=1 FAKE_DKMS_PAYLOAD=1 FAKE_DNF_DKMS_INSTALL_REGISTERS=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  fake_gpu_install
+  install_modinfo_uvm_version_override 595.112.07
+  export FAKE_DKMS_STATUS="nvidia-open/595.112.07, $(uname -r), x86_64: installed"
+  local out="$case_tmp/out" err="$case_tmp/err" rc
+  nvidia_ensure_driver_floor >"$out" 2>"$err"; rc=$?
+
+  check "loaded-floor stale uvm (loud): fails" test "$rc" -ne 0
+  check "loaded-floor stale uvm (loud): does not short-circuit as nothing-to-do" \
+    bash -c '! grep -qi "nothing to do" "$1"' _ "$out"
+  check "loaded-floor stale uvm (loud): names nvidia-uvm and both versions" \
+    bash -c 'grep -q "nvidia-uvm" "$1" && grep -q "595.112.07" "$1" && grep -q "620.70.06" "$1"' _ "$err"
+  check "loaded-floor stale uvm (loud): enters the repair (offline install)" \
+    has_call '^dnf install .*--allowerasing'
+  check "loaded-floor stale uvm (loud): never unloads the old driver" \
+    no_call 'modprobe -r nvidia$'
+  check "loaded-floor stale uvm (loud): leaves the resume marker for a rerun" \
+    marker_present
+  check "loaded-floor stale uvm (loud): never prints a success line" \
+    bash -c '! grep -qi "at or above the .* floor" "$1"' _ "$out"
+  end_case
+}
+
+# Fast path preserved: loaded 620 with matching on-disk nvidia AND nvidia-uvm,
+# and nvidia_uvm loaded, is still a no-op (no install, no module churn).
+case_loaded_floor_consistent_short_circuits() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=620.70.06 FAKE_PROC_VERSION=620.70.06
+  export FAKE_RPM_INSTALLED=1 FAKE_MODULES="nvidia nvidia_uvm"
+  fake_gpu_install
+  local out="$case_tmp/out" rc
+  out="$(nvidia_ensure_driver_floor 2>&1)"; rc=$?
+
+  check "loaded-floor consistent: exits 0" test "$rc" -eq 0
+  check "loaded-floor consistent: reports nothing to do" \
+    bash -c 'grep -qi "nothing to do" <<<"$1"' _ "$out"
+  check "loaded-floor consistent: performs no stage" no_call '^dnf install .*--downloadonly'
+  check "loaded-floor consistent: performs no offline install" no_call '^dnf install .*--allowerasing'
+  check "loaded-floor consistent: performs no unload" no_call 'modprobe -r'
+  end_case
+}
+
+# Resume half of the same defect: the marker short-circuit may not skip loading
+# nvidia_uvm when the on-disk modules match but uvm is not loaded.
+case_resume_at_floor_loads_missing_uvm() {
+  begin_case
+  export FAKE_REPORTED_DRIVER=620.70.06 FAKE_PROC_VERSION=620.70.06 FAKE_RPM_INSTALLED=1
+  export FAKE_FABRICMANAGER_UNIT=0
+  export FAKE_PERSISTENCED_UNIT=1 FAKE_PERSISTENCED_ACTIVE=1
+  printf 'driver upgrade in progress: test\nfabricmanager_was_active=0\nfabricmanager_pkg_staged=0\npersistenced_was_active=1\n' >"$NVIDIA_RESUME_MARKER"
+  fake_gpu_install
+  local rc
+  nvidia_ensure_driver_floor >/dev/null 2>&1; rc=$?
+
+  check "resume-floor missing uvm: exits 0" test "$rc" -eq 0
+  check "resume-floor missing uvm: loads nvidia_uvm" has_call 'modprobe nvidia_uvm$'
+  check "resume-floor missing uvm: performs no offline install" \
+    no_call '^dnf install .*--allowerasing'
+  check "resume-floor missing uvm: removes the marker" \
+    bash -c '[[ ! -e "$1" ]]' _ "$NVIDIA_RESUME_MARKER"
   end_case
 }
 
@@ -1382,7 +1627,7 @@ case_dkms_tool_staged() {
     bash -c 'compgen -G "$1/dkms-*.rpm" >/dev/null' _ "$NVIDIA_STAGE_DIR"
   check "dkms tool staged: the offline install runs" has_call '^dnf install .*--allowerasing'
   check "dkms tool staged: post-install verification runs dkms status" \
-    before '^dnf install .*--allowerasing' 'dkms status'
+    after_anchor '^dkms status$' '^dnf install .*--allowerasing'
   end_case
 }
 
@@ -2089,7 +2334,7 @@ case_post_install_status_accepts_nvidia() {
   check "post-install nvidia: accepts nvidia/$NVIDIA_DRIVER_FLOOR for the kernel" \
     test "$rc" -eq 0
   check "post-install nvidia: consults dkms status after the offline install" \
-    before '^dnf install .*--allowerasing' 'dkms status'
+    after_anchor '^dkms status$' '^dnf install .*--allowerasing'
   end_case
 
   begin_case
@@ -2304,7 +2549,8 @@ case_dkms_post_install_module_missing() {
   check "post-install 620 missing: upgrade fails" test "$rc" -ne 0
   check "post-install 620 missing: names [kernel-module]" bash -c 'grep -q "\[kernel-module\]" "$1"' _ "$err"
   check "post-install 620 missing: marker remains" marker_present
-  check "post-install 620 missing: keeps the 595 DKMS build" no_call 'dkms remove nvidia-open/595'
+  check "post-install 620 missing: stale 595 removed before the install" \
+    before 'dkms remove nvidia-open/595' '^dnf install .*--allowerasing'
   end_case
 }
 
@@ -3476,6 +3722,11 @@ case_verify_uses_proc
 case_disk_620_proc_absent
 case_full_rmmod
 case_dkms_cleanup
+case_dkms_cleanup_preserves_target_build
+case_on_disk_uvm_mismatch_fails_closed
+case_loaded_floor_stale_on_disk_uvm_repairs
+case_loaded_floor_stale_uvm_fails_loud
+case_loaded_floor_consistent_short_circuits
 case_kmod_vs_dkms
 case_modprobe_uvm
 case_gpu_init
@@ -3507,6 +3758,7 @@ case_persistenced_start_failure_fatal
 case_resume_preserves_active_state
 case_marker_write_failure
 case_resume_at_floor_short_circuit
+case_resume_at_floor_loads_missing_uvm
 
 # AL2023 kernel build prerequisites (kernel6.12-devel/headers)
 case_kernel_prereq_al2023_installed_passes

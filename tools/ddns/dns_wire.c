@@ -132,6 +132,18 @@ static int append_answer(const struct dns_wire_answer *a, uint8_t *out,
         out[pos++] = 4;
         memcpy(out + pos, &addr, 4);
         pos += 4;
+    } else if (a->type == DNS_WIRE_TYPE_AAAA) {
+        struct in6_addr addr6;
+        if (inet_pton(AF_INET6, a->data, &addr6) != 1) {
+            return -1;
+        }
+        if (pos + 18 > cap) {
+            return -1;
+        }
+        out[pos++] = 0;
+        out[pos++] = 16;
+        memcpy(out + pos, &addr6, 16);
+        pos += 16;
     } else if (a->type == DNS_WIRE_TYPE_NS || a->type == DNS_WIRE_TYPE_CNAME) {
         if (pos + 2 > cap) {
             return -1;

@@ -209,6 +209,15 @@ root unresolvable, JSON serialization failed) or a `--strict` violation. A
 strict failure writes the full report before exiting, so the reviewer always
 sees the findings.
 
+### AWS credentials
+
+The AWS-backed paths (the baked-AMI driver-floor advisory and the DLAMI
+resolver) invoke the `aws` CLI with `--profile "${AWS_PROFILE:-strimserver}"`
+and `--region us-east-2` explicitly, so neither an exported `AWS_PROFILE` nor
+ambient region configuration is required. Missing credentials are not an
+error: those resolutions report `unknown`, and the baked-AMI advisory stays
+silent.
+
 ### Hermetic / offline runs
 
 `--offline` replaces every network-backed resolver **and** the native

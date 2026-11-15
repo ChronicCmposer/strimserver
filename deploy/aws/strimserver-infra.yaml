@@ -319,8 +319,8 @@ Resources:
       Name: strimserver-baked-base
       Description: strimserver baked base (driver floor, htop, openssh, containerd)
       Platform: Linux
-      Version: "1.0.0"
-      ChangeDescription: initial baked base
+      Version: "1.0.1"
+      ChangeDescription: containerd NVMe mount drop-in + bake residue cleanup
       # Fn::Sub interpolates ONLY the two URL parameters; the sourced nvidia.sh
       # owns the floor version and the stage-then-swap logic, so a threshold
       # bump is a one-line change in deploy/aws/lib/nvidia.sh.
@@ -346,11 +346,22 @@ Resources:
                       else
                         : > /tmp/containerd.toml
                       fi
-                      {
-                        printf "root='/mnt/nvme/containerd'\n"
-                        printf "state='/mnt/nvme/containerd-state'\n\n"
-                        cat /tmp/containerd.toml
-                      } > /etc/containerd/config.toml
+                      cat > /etc/containerd/config.toml <<'STRIMSERVER_CONTAINERD_CONFIG_EOF'
+                      root='/mnt/nvme/containerd'
+                      state='/mnt/nvme/containerd-state'
+
+                      STRIMSERVER_CONTAINERD_CONFIG_EOF
+                      cat /tmp/containerd.toml >> /etc/containerd/config.toml
+                      # Boot-time containerd mount condition. Canonical source is
+                      # deploy/aws/containerd-nvme.conf; the deploy.sh host layer
+                      # installs the same bytes. Without it a boot-time containerd
+                      # start before /mnt/nvme is mounted writes runtime dirs onto
+                      # the root EBS volume.
+                      mkdir -p /etc/systemd/system/containerd.service.d
+                      cat > /etc/systemd/system/containerd.service.d/10-strimserver-nvme.conf <<'STRIMSERVER_CONTAINERD_NVME_EOF'
+                      [Unit]
+                      ConditionPathIsMountPoint=/mnt/nvme
+                      STRIMSERVER_CONTAINERD_NVME_EOF
                       dnf install -y htop
                       systemctl enable nvidia-persistenced
               - name: EstablishNvidiaDriverFloor
@@ -374,12 +385,44 @@ Resources:
                       set -euo pipefail
                       curl -fsSL "${OpensshExperimentalRpmUrl}" -o /tmp/openssh-experimental.rpm
                       dnf install -y /tmp/openssh-experimental.rpm
+              - name: CleanNvmeResidue
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      # Final step: remove build-time residue under /mnt/nvme so a
+                      # fresh launch passes setup_strimserver's fail-closed mount
+                      # guard. Stop containerd first (tolerantly) so no new
+                      # activity recreates its runtime dirs.
+                      systemctl stop containerd.service containerd.socket 2>/dev/null || true
+                      rm -rf /mnt/nvme/nvidia-rpm /mnt/nvme/containerd /mnt/nvme/containerd-state
+                      # Image-side self-verification: a dirty bake must fail the
+                      # build rather than publish a bad AMI id to SSM. The
+                      # emptiness probe fails closed: a find that cannot read
+                      # /mnt/nvme is an error, not an empty result.
+                      if [ -d /mnt/nvme ]; then
+                        if ! residue="$(find /mnt/nvme -mindepth 1 -print -quit)"; then
+                          echo "CleanNvmeResidue: cannot inspect /mnt/nvme; failing closed" >&2
+                          exit 1
+                        fi
+                        if [ -n "$residue" ]; then
+                          echo "CleanNvmeResidue: /mnt/nvme is not empty after cleanup" >&2
+                          exit 1
+                        fi
+                      fi
+                      # A present resume marker means a half-finished driver
+                      # upgrade. Never delete it; fail the bake instead.
+                      if [ -e /var/lib/strimserver/driver-upgrade.state ]; then
+                        echo "CleanNvmeResidue: /var/lib/strimserver/driver-upgrade.state present; refusing to bake" >&2
+                        exit 1
+                      fi
 
   BakedImageRecipe:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: strimserver-baked-recipe
-      Version: "1.0.0"
+      Version: "1.0.1"
       ParentImage: ami-0198b63ccfac121e8
       Components:
         - ComponentArn: !Ref BakedImageComponent

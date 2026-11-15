@@ -16,36 +16,43 @@
  *         signal is <ErrCount>0</ErrCount>.
  *     Mirrors the gitd reference implementation's ddnsSuccess().
  *
- *   check <host> <domain>
- *     Resolves $host.$domain's A record by querying the AUTHORITATIVE
- *     nameserver directly, bypassing every resolver for the dynamic record:
- *       1. NS discovery: ask the box's resolver (c-ares, default system
- *          resolver config) for the DOMAIN's NS records (type NS).
- *       2. NS hostname -> IP: resolve each NS hostname to an IPv4 address
- *          via the same resolver.
- *       3. Direct A query: send the A query for $host.$domain STRAIGHT to
- *          one of those NS IPs over UDP/53 with c-ares
+ *   check <host> <domain> <expected_ip>
+ *     Resolves $host.$domain's A record by querying EVERY discovered
+ *     authoritative nameserver directly, bypassing every resolver for the
+ *     dynamic record:
+ *       1. NS discovery: ask the box's resolver (c-ares, system resolver
+ *          server list) for the DOMAIN's NS records (type NS).
+ *       2. NS hostname -> IPv4: resolve each NS hostname's A records via the
+ *          same resolver. All per-NS lookups run concurrently in one c-ares
+ *          event loop. Only IPv4 A records are used (never AAAA).
+ *       3. Direct A query: for EACH NS, send the A query for $host.$domain
+ *          STRAIGHT to that NS's own IPv4 addresses over UDP/53 with c-ares
  *          (ARES_OPT_SERVERS + ARES_FLAG_NORECURSE, so the RD bit is 0 and
- *          the authoritative server answers from its own zone data instead
- *          of recursing).
- *     Prints the first IPv4 address to stdout, or exits 1 having printed
- *     nothing when the name does not resolve. Exactly one informative line
- *     goes to stderr (see Q5c): "check <fqdn> -> <ip> (via <ns-hostname>)"
- *     on success, "check <fqdn> not resolved (via <ns-hostname>: <reason>)"
- *     (or an NS-discovery reason) on failure. The stdout contract (one IPv4
- *     or nothing) is what deploy.sh's comparison depends on.
+ *          the authoritative server answers from its own zone data). All
+ *          per-NS queries run concurrently in one c-ares event loop.
+ *     Every channel -- NS discovery, NS-hostname resolution, and each direct
+ *     query -- uses the same configured DNS budget (4000 ms x 2 tries). The
+ *     expected IPv4 is REQUIRED (third argument or DDNS_EXPECTED_IP): the
+ *     check passes ONLY when every discovered NS returns it via at least one
+ *     of its own addresses. A missing expected IP is a usage error, never an
+ *     agreement-only success. One unreachable or disagreeing NS means "not
+ *     yet": exit 1 with nothing on stdout. The check prints one line per NS
+ *     to stderr (hostname plus the observed IPv4, or "none") and, on success,
+ *     the expected IPv4 to stdout. It never counts or prints attempts -- that
+ *     belongs to the verify unit.
  *
  * Config comes from argv (host domain password_file [ip]) or, when the args
  * are absent, from the DDNS_HOST / DDNS_DOMAIN / DDNS_PASSWORD_FILE /
  * DDNS_IP environment variables. DDNS_ENDPOINT overrides the update URL
- * (testability). DDNS_RESOLVER (test-only) overrides the resolver c-ares
- * uses for NS discovery / NS-hostname resolution as "ip" or "ip:port"
- * (loopback DNS test double); DDNS_AUTHORITATIVE_PORT (test-only) overrides
- * the UDP/TCP port of the direct authoritative A query (default 53). When
- * unset, c-ares uses the system resolver config and port 53, so production
- * behavior is unchanged. DDNS_CA_BUNDLE overrides the CA bundle path
- * (CURLOPT_CAINFO); when unset, libcurl's compiled-in CURL_CA_BUNDLE
- * (/etc/ssl/certs/ca-certificates.crt in the image) is used.
+ * (testability). DDNS_EXPECTED_IP supplies the check's expected IPv4 when it
+ * is not given as the optional third check argument. DDNS_RESOLVER (test-only)
+ * overrides the resolver c-ares uses for NS discovery / NS-hostname resolution
+ * as "ip" or "ip:port" (loopback DNS test double); DDNS_AUTHORITATIVE_PORT
+ * (test-only) overrides the UDP/TCP port of the direct authoritative A query
+ * (default 53). When unset, c-ares uses the system resolver config and port
+ * 53, so production behavior is unchanged. DDNS_CA_BUNDLE overrides the CA
+ * bundle path (CURLOPT_CAINFO); when unset, libcurl's compiled-in
+ * CURL_CA_BUNDLE (/etc/ssl/certs/ca-certificates.crt in the image) is used.
  *
  * Exit: 0 on success, 1 on update/transfer failure or a not-resolved check,
  * 2 on usage/config errors.
@@ -54,6 +61,8 @@
 #include <curl/curl.h>
 
 #include <ares.h>
+
+#include "agreement.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -72,14 +81,20 @@
  * to 15s on a slow box. */
 #define DDNS_UPDATE_TIMEOUT_SECS 15L
 
-/* Per-query DNS budget for the check probe: each c-ares query (NS discovery,
- * NS hostname -> IP, direct authoritative A) retries at most
- * DDNS_DNS_TRIES times with DDNS_DNS_TIMEOUT_MS between attempts, bounding a
- * single query to ~10s. deploy.sh's retry loop absorbs the failure case. */
-#define DDNS_DNS_TIMEOUT_MS 5000L
+/* Per-query DNS budget for the check probe: EVERY c-ares channel the check
+ * creates (the resolver channel for NS discovery and NS-hostname resolution,
+ * and each authoritative channel for the direct A query) is initialized with
+ * DDNS_DNS_TIMEOUT_MS between tries and DDNS_DNS_TRIES tries, bounding a
+ * single phase to ~8s. The verify unit retries the whole check until its
+ * deadline, so a failure here is "not yet", never a hard stop. With the
+ * three phases (NS discovery, per-NS A resolution, per-NS direct query) the
+ * worst case is ~24s < the verify unit's per-attempt `timeout 30`. */
+#define DDNS_DNS_TIMEOUT_MS 4000L
 #define DDNS_DNS_TRIES 2
 
+#define DDNS_MAX_NS 16
 #define DDNS_MAX_NS_IPS 32
+#define DDNS_MAX_A_RECORDS 8
 
 /* Bounded response capture (the endpoint replies are a few hundred bytes;
  * the Go client caps reads at 1 MiB). */
@@ -303,6 +318,9 @@ static int perform_https_get(const char *url, const char *ca_bundle,
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    /* Pin IPv4 egress: no IPv6 path is attempted. Combined with the absent
+     * ip= parameter (DDNS_IP empty), Namecheap records the requester's IPv4. */
+    curl_easy_setopt(curl, CURLOPT_IPRESOLVE, (long)CURL_IPRESOLVE_V4);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_secs);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "strim-ddns/1.0");
@@ -330,18 +348,21 @@ static int perform_https_get(const char *url, const char *ca_bundle,
 static void print_usage(const char *prog) {
     fprintf(stderr,
             "usage: %s update <host> <domain> [password_file] [ip]\n"
-            "       %s check <host> <domain>\n"
+            "       %s check <host> <domain> <expected_ip>\n"
             "  the bare invocation %s <host> <domain> [password_file] [ip]\n"
             "  is treated as \"update\" (legacy).\n"
             "  config may instead come from DDNS_HOST, DDNS_DOMAIN,\n"
             "  DDNS_PASSWORD_FILE, DDNS_IP; DDNS_ENDPOINT overrides the\n"
             "  update URL; DDNS_CA_BUNDLE overrides the CA bundle.\n"
-            "  check discovers the domain's authoritative NS via the system\n"
-            "  resolver and queries the A record directly (no resolver is\n"
-            "  trusted for the dynamic A record); DDNS_RESOLVER (test-only)\n"
-            "  points NS discovery at an ip[:port] resolver,\n"
-            "  DDNS_AUTHORITATIVE_PORT (test-only) overrides the direct\n"
-            "  query port (default 53).\n",
+            "  check discovers the domain's authoritative nameservers via\n"
+            "  the system resolver, resolves each NS's own IPv4, and queries\n"
+            "  every NS directly (no resolver is trusted for the dynamic A\n"
+            "  record). The expected IPv4 is REQUIRED; it passes only when\n"
+            "  every NS returns it. One line per NS is printed to stderr.\n"
+            "  DDNS_RESOLVER (test-only) points NS discovery at an ip[:port]\n"
+            "  resolver; DDNS_AUTHORITATIVE_PORT (test-only) overrides the\n"
+            "  direct query port (default 53); DDNS_EXPECTED_IP supplies the\n"
+            "  required expected IPv4 when not given positionally.\n",
             prog, prog, prog);
 }
 
@@ -503,18 +524,101 @@ static void run_dns_query(ares_channel_t *channel, const char *name,
     }
 }
 
-/* init_resolver_channel: a c-ares channel for NS discovery / NS-hostname
- * resolution. When override_ip is set (test-only DDNS_RESOLVER), the channel
- * queries ONLY that server (override_port, or 53 when zero); otherwise it
- * reads the system resolver config (the production default). */
+/* merge_fds: union src read/write sets into dst and track the highest fd. */
+static void merge_fds(const fd_set *src_read, const fd_set *src_write,
+                      fd_set *dst_read, fd_set *dst_write, int *highest_fd) {
+    for (int fd = 0; fd < FD_SETSIZE; fd++) {
+        if (FD_ISSET(fd, src_read)) {
+            FD_SET(fd, dst_read);
+            if (fd > *highest_fd) {
+                *highest_fd = fd;
+            }
+        }
+        if (FD_ISSET(fd, src_write)) {
+            FD_SET(fd, dst_write);
+            if (fd > *highest_fd) {
+                *highest_fd = fd;
+            }
+        }
+    }
+}
+
+/* timeval_before: true when a is strictly earlier than b. */
+static bool timeval_before(const struct timeval *a, const struct timeval *b) {
+    return a->tv_sec < b->tv_sec ||
+           (a->tv_sec == b->tv_sec && a->tv_usec < b->tv_usec);
+}
+
+/* pump_channels: drive several c-ares channels in ONE select() event loop
+ * until every channel is idle. This is what makes the per-NS lookups (phase 2)
+ * and per-NS direct queries (phase 3) concurrent rather than serial: one
+ * select waits on all channels' sockets at once and each ready channel is
+ * processed in the same iteration. Each channel's own ARES_OPT_TIMEOUTMS /
+ * ARES_OPT_TRIES still bound its queries; the 1s cap only paces the loop. */
+static void pump_channels(ares_channel_t **channels, size_t nchannels) {
+    for (;;) {
+        fd_set all_read, all_write;
+        FD_ZERO(&all_read);
+        FD_ZERO(&all_write);
+        int highest_fd = -1;
+        bool any_socket = false;
+        struct timeval soonest;
+        bool have_soonest = false;
+
+        for (size_t i = 0; i < nchannels; i++) {
+            fd_set read_fds, write_fds;
+            FD_ZERO(&read_fds);
+            FD_ZERO(&write_fds);
+            int nfds = ares_fds(channels[i], &read_fds, &write_fds);
+            if (nfds > 0) {
+                any_socket = true;
+                merge_fds(&read_fds, &write_fds, &all_read, &all_write,
+                          &highest_fd);
+            }
+            struct timeval cap = {1, 0};
+            struct timeval tv;
+            struct timeval *tvp = ares_timeout(channels[i], &cap, &tv);
+            if (tvp != NULL &&
+                (!have_soonest || timeval_before(tvp, &soonest))) {
+                soonest = *tvp;
+                have_soonest = true;
+            }
+        }
+        if (!any_socket) {
+            return;
+        }
+        int rc = select(highest_fd + 1, &all_read, &all_write, NULL,
+                        have_soonest ? &soonest : NULL);
+        if (rc < 0 && errno != EINTR) {
+            for (size_t i = 0; i < nchannels; i++) {
+                ares_cancel(channels[i]);
+            }
+            return;
+        }
+        for (size_t i = 0; i < nchannels; i++) {
+            ares_process(channels[i], &all_read, &all_write);
+        }
+    }
+}
+
+
+/* init_channel_options: the single place the check's DNS budget is applied.
+ * Every ares_init_options() call site starts from this configured struct, so
+ * no channel (including the production NS-discovery/resolution channel) is
+ * ever left on c-ares defaults. Callers add their own servers/flags. */
+static void init_channel_options(struct ares_options *options, int *optmask) {
+    memset(options, 0, sizeof(*options));
+    *optmask = ARES_OPT_TIMEOUTMS | ARES_OPT_TRIES;
+    options->timeout = DDNS_DNS_TIMEOUT_MS;
+    options->tries = DDNS_DNS_TRIES;
+}
+
 static int init_resolver_channel(ares_channel_t **channel_out,
                                  const struct in_addr *override_ip,
                                  unsigned short override_port) {
     struct ares_options options;
-    memset(&options, 0, sizeof(options));
-    int optmask = ARES_OPT_TIMEOUTMS | ARES_OPT_TRIES;
-    options.timeout = DDNS_DNS_TIMEOUT_MS;
-    options.tries = DDNS_DNS_TRIES;
+    int optmask = 0;
+    init_channel_options(&options, &optmask);
     if (override_ip != NULL) {
         options.servers = (struct in_addr *)override_ip;
         options.nservers = 1;
@@ -537,12 +641,10 @@ static int init_authoritative_channel(ares_channel_t **channel_out,
                                       size_t nns,
                                       unsigned short port_override) {
     struct ares_options options;
-    memset(&options, 0, sizeof(options));
-    int optmask = ARES_OPT_FLAGS | ARES_OPT_TIMEOUTMS | ARES_OPT_TRIES |
-                  ARES_OPT_SERVERS;
+    int optmask = 0;
+    init_channel_options(&options, &optmask);
+    optmask |= ARES_OPT_FLAGS | ARES_OPT_SERVERS;
     options.flags = ARES_FLAG_NORECURSE;
-    options.timeout = DDNS_DNS_TIMEOUT_MS;
-    options.tries = DDNS_DNS_TRIES;
     options.servers = (struct in_addr *)ns_ips;
     options.nservers = (int)nns;
     if (port_override != 0) {
@@ -624,10 +726,148 @@ static long parse_authoritative_port(const char *env) {
     return parsed;
 }
 
+/* ns_probe: one discovered nameserver and everything learned about it. */
+struct ns_probe {
+    char *hostname;                            /* strdup'd NS hostname */
+    struct in_addr addresses[DDNS_MAX_NS_IPS]; /* its own A-record IPv4s */
+    size_t n_addresses;
+    struct in_addr observed[DDNS_MAX_A_RECORDS]; /* A records it returned */
+    size_t n_observed;
+    struct dns_query_state address_query; /* phase 2 reply/status */
+    struct dns_query_state direct_query;  /* phase 3 reply/status */
+};
+
+/* free_probes: release the NS hostnames (reply buffers are freed per phase). */
+static void free_probes(struct ns_probe *probes, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        free(probes[i].hostname);
+    }
+}
+
+/* parse_a_records: extract up to cap IPv4 A records from a completed query
+ * into out. Returns true when at least one address was extracted; a failed,
+ * empty, or AAAA-only reply yields false with *count == 0 (only A records are
+ * ever considered). */
+static bool parse_a_records(const struct dns_query_state *state,
+                            struct in_addr *out, size_t cap, size_t *count) {
+    *count = 0;
+    if (state->status != ARES_SUCCESS || state->reply == NULL) {
+        return false;
+    }
+    struct ares_addrttl addrs[DDNS_MAX_NS_IPS];
+    int n_addrs = DDNS_MAX_NS_IPS;
+    if (ares_parse_a_reply(state->reply, (int)state->reply_len, NULL, addrs,
+                           &n_addrs) != ARES_SUCCESS ||
+        n_addrs <= 0) {
+        return false;
+    }
+    size_t copied = (size_t)n_addrs < cap ? (size_t)n_addrs : cap;
+    for (size_t i = 0; i < copied; i++) {
+        out[i] = addrs[i].ipaddr;
+    }
+    *count = copied;
+    return copied > 0;
+}
+
+/* reset_query_state: mark a query as failed-until-proven-successful so a
+ * drained event loop can never read as ARES_SUCCESS. */
+static void reset_query_state(struct dns_query_state *state) {
+    state->done = false;
+    state->oom = false;
+    state->status = ARES_ETIMEOUT;
+    state->reply = NULL;
+    state->reply_len = 0;
+}
+
+/* resolve_ns_addresses: phase 2 -- resolve every NS hostname's A records
+ * concurrently in one c-ares event loop (a single A query per NS on the shared
+ * resolver channel). Returns 0 on success, -1 on out-of-memory. */
+static int resolve_ns_addresses(ares_channel_t *resolver,
+                                struct ns_probe *probes, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        reset_query_state(&probes[i].address_query);
+        ares_query(resolver, probes[i].hostname, ARES_CLASS_IN,
+                   ARES_REC_TYPE_A, dns_query_cb, &probes[i].address_query);
+    }
+    ares_channel_t *channels[1] = {resolver};
+    pump_channels(channels, 1);
+
+    for (size_t i = 0; i < n; i++) {
+        if (probes[i].address_query.oom) {
+            free(probes[i].address_query.reply);
+            probes[i].address_query.reply = NULL;
+            return -1;
+        }
+        parse_a_records(&probes[i].address_query, probes[i].addresses,
+                        DDNS_MAX_NS_IPS, &probes[i].n_addresses);
+        free(probes[i].address_query.reply);
+        probes[i].address_query.reply = NULL;
+    }
+    return 0;
+}
+
+/* query_nameservers: phase 3 -- query the FQDN directly against EACH
+ * nameserver through that NS's own IPv4 addresses (one authoritative channel
+ * per NS, RD bit clear), with every per-NS query driven concurrently by one
+ * select() loop. Returns 0 on success, -1 on out-of-memory/channel failure. */
+static int query_nameservers(struct ns_probe *probes, size_t n,
+                             const char *fqdn, unsigned short port) {
+    ares_channel_t *channels[DDNS_MAX_NS];
+    memset(channels, 0, sizeof(channels));
+
+    for (size_t i = 0; i < n; i++) {
+        reset_query_state(&probes[i].direct_query);
+        if (probes[i].n_addresses == 0) {
+            continue; /* no IPv4 for this NS: it cannot answer, stays "none" */
+        }
+        if (init_authoritative_channel(&channels[i], probes[i].addresses,
+                                       probes[i].n_addresses,
+                                       port) != ARES_SUCCESS) {
+            for (size_t k = 0; k < n; k++) {
+                if (channels[k] != NULL) {
+                    ares_destroy(channels[k]);
+                }
+            }
+            return -1;
+        }
+        ares_query(channels[i], fqdn, ARES_CLASS_IN, ARES_REC_TYPE_A,
+                   dns_query_cb, &probes[i].direct_query);
+    }
+
+    ares_channel_t *active[DDNS_MAX_NS];
+    size_t n_active = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (channels[i] != NULL) {
+            active[n_active++] = channels[i];
+        }
+    }
+    if (n_active > 0) {
+        pump_channels(active, n_active);
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (channels[i] != NULL) {
+            ares_destroy(channels[i]);
+        }
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        if (probes[i].direct_query.oom) {
+            free(probes[i].direct_query.reply);
+            probes[i].direct_query.reply = NULL;
+            return -1;
+        }
+        parse_a_records(&probes[i].direct_query, probes[i].observed,
+                        DDNS_MAX_A_RECORDS, &probes[i].n_observed);
+        free(probes[i].direct_query.reply);
+        probes[i].direct_query.reply = NULL;
+    }
+    return 0;
+}
+
 /* run_check: the direct-authoritative resolution probe (see the top-of-file
  * comment). Prints one IPv4 to stdout on success; prints nothing and exits 1
- * when the name does not resolve; exits 2 on usage/config errors. Exactly
- * one informative line goes to stderr. */
+ * when the name does not resolve consistently; exits 2 on usage/config
+ * errors. Always prints one line per discovered nameserver on stderr. */
 static int run_check(int argc, char **argv, int first) {
     const char *host = argc > first ? argv[first] : getenv("DDNS_HOST");
     const char *domain = argc > first + 1 ? argv[first + 1] : getenv("DDNS_DOMAIN");
@@ -651,6 +891,25 @@ static int run_check(int argc, char **argv, int first) {
         return 2;
     }
 
+    /* Required expected IP (3rd positional arg or DDNS_EXPECTED_IP): the
+     * check's contract is "every NS returns THIS address", so a missing
+     * expected IP is a usage error -- never an agreement-only success. */
+    const char *expected_arg =
+        argc > first + 2 ? argv[first + 2] : getenv("DDNS_EXPECTED_IP");
+    if (expected_arg == NULL || *expected_arg == '\0') {
+        fprintf(stderr,
+                "strim-ddns: check requires an expected IPv4 "
+                "(third argument or DDNS_EXPECTED_IP)\n");
+        print_usage(argv[0]);
+        return 2;
+    }
+    struct in_addr expected;
+    if (inet_pton(AF_INET, expected_arg, &expected) != 1) {
+        fprintf(stderr, "strim-ddns: invalid expected IP '%s'\n",
+                expected_arg);
+        return 2;
+    }
+
     size_t fqdn_len = strlen(host) + 1 + strlen(domain) + 1;
     char *fqdn = malloc(fqdn_len);
     if (!fqdn) {
@@ -659,14 +918,14 @@ static int run_check(int argc, char **argv, int first) {
     }
     snprintf(fqdn, fqdn_len, "%s.%s", host, domain);
 
-    /* 1. NS discovery: ask the resolver for the DOMAIN's NS records. The
-     * production channel reads the system resolver config; the test-only
-     * DDNS_RESOLVER override builds a channel pinned to one server. */
+    /* 1. NS discovery: ask the resolver for the DOMAIN's NS records. Both the
+     * production path (system resolver server list) and the test-only
+     * DDNS_RESOLVER override go through init_resolver_channel, so the
+     * configured 4000 ms x 2 budget always applies. */
     ares_channel_t *resolver_chan = NULL;
-    int init_rc = (ov > 0) ? init_resolver_channel(&resolver_chan,
-                                                   &resolver_override,
-                                                   resolver_override_port)
-                           : ares_init_options(&resolver_chan, NULL, 0);
+    int init_rc = init_resolver_channel(&resolver_chan,
+                                        ov > 0 ? &resolver_override : NULL,
+                                        resolver_override_port);
     if (init_rc != ARES_SUCCESS) {
         fprintf(stderr, "strim-ddns: failed to initialize the DNS resolver\n");
         free(fqdn);
@@ -701,114 +960,135 @@ static int run_check(int argc, char **argv, int first) {
         return 1;
     }
 
-    /* 2. NS hostname -> IP: resolve each NS hostname's A records via the
-     * resolver. The FIRST hostname that yields an address is the stderr
-     * "via" name. */
-    struct in_addr ns_ips[DDNS_MAX_NS_IPS];
-    size_t n_ns_ips = 0;
-    char *via_ns = NULL; /* strdup'd first NS hostname that resolved */
-    for (int i = 0; ns_hosts->h_aliases[i] != NULL &&
-                    n_ns_ips < DDNS_MAX_NS_IPS; i++) {
-        const char *ns_name = ns_hosts->h_aliases[i];
-        struct dns_query_state aq = {0};
-        run_dns_query(resolver_chan, ns_name, ARES_CLASS_IN, ARES_REC_TYPE_A, &aq);
-        if (aq.oom) {
+    /* 2. Copy the discovered NS hostnames into probes (the hostent is freed
+     * immediately after; the strdup'd names outlive it). */
+    struct ns_probe probes[DDNS_MAX_NS];
+    memset(probes, 0, sizeof(probes));
+    size_t ns_count = 0;
+    for (int i = 0; ns_hosts->h_aliases[i] != NULL; i++) {
+        if (ns_count >= DDNS_MAX_NS) {
+            fprintf(stderr,
+                    "check %s not resolved (too many nameservers to verify)\n",
+                    fqdn);
+            free_probes(probes, ns_count);
+            ares_free_hostent(ns_hosts);
+            ares_destroy(resolver_chan);
+            free(fqdn);
+            return 1;
+        }
+        probes[ns_count].hostname = strdup(ns_hosts->h_aliases[i]);
+        if (probes[ns_count].hostname == NULL) {
             fprintf(stderr, "strim-ddns: out of memory during DNS check\n");
-            free(aq.reply);
+            free_probes(probes, ns_count);
             ares_free_hostent(ns_hosts);
             ares_destroy(resolver_chan);
             free(fqdn);
             return 2;
         }
-        if (aq.status == ARES_SUCCESS) {
-            struct ares_addrttl addrs[DDNS_MAX_NS_IPS];
-            int n_addrs = DDNS_MAX_NS_IPS;
-            int ar_rc = ares_parse_a_reply(aq.reply, (int)aq.reply_len, NULL,
-                                           addrs, &n_addrs);
-            if (ar_rc == ARES_SUCCESS && n_addrs > 0) {
-                if (via_ns == NULL) {
-                    /* Copy before the hostent is freed below: via_ns must
-                     * outlive ares_free_hostent(). */
-                    via_ns = strdup(ns_name);
-                    if (via_ns == NULL) {
-                        fprintf(stderr,
-                                "strim-ddns: out of memory during DNS check\n");
-                        free(aq.reply);
-                        ares_free_hostent(ns_hosts);
-                        ares_destroy(resolver_chan);
-                        free(fqdn);
-                        return 2;
-                    }
-                }
-                for (int j = 0; j < n_addrs && n_ns_ips < DDNS_MAX_NS_IPS; j++) {
-                    ns_ips[n_ns_ips++] = addrs[j].ipaddr;
-                }
-            }
-        }
-        free(aq.reply);
+        ns_count++;
     }
     ares_free_hostent(ns_hosts);
+    if (ns_count == 0) {
+        fprintf(stderr, "check %s not resolved (no NS records)\n", fqdn);
+        ares_destroy(resolver_chan);
+        free(fqdn);
+        return 1;
+    }
+
+    /* 3. Resolve every NS hostname's own IPv4 (A) addresses concurrently in
+     * one c-ares event loop. AAAA is never queried: only A-record addresses
+     * are used for the direct queries. */
+    if (resolve_ns_addresses(resolver_chan, probes, ns_count) != 0) {
+        fprintf(stderr, "strim-ddns: out of memory during DNS check\n");
+        ares_destroy(resolver_chan);
+        free_probes(probes, ns_count);
+        free(fqdn);
+        return 2;
+    }
     ares_destroy(resolver_chan);
 
-    if (n_ns_ips == 0) {
-        fprintf(stderr, "check %s not resolved (no address for the domain's NS)\n",
+    size_t ns_with_address = 0;
+    for (size_t i = 0; i < ns_count; i++) {
+        if (probes[i].n_addresses > 0) {
+            ns_with_address++;
+        }
+    }
+    if (ns_with_address == 0) {
+        /* Still report one line per NS: every discovered nameserver lacks an
+         * IPv4 A record, and the operator must see which ones. */
+        for (size_t i = 0; i < ns_count; i++) {
+            fprintf(stderr, "check %s ns %s -> none\n", fqdn,
+                    probes[i].hostname);
+        }
+        fprintf(stderr,
+                "check %s not resolved (no IPv4 address for the domain's NS)\n",
                 fqdn);
-        free(via_ns);
+        free_probes(probes, ns_count);
         free(fqdn);
         return 1;
     }
 
-    /* 3. Direct authoritative A query: send the A query for the FQDN to the
-     * discovered NS IPs with the RD bit clear, and take the FIRST IPv4. */
-    ares_channel_t *auth_chan = NULL;
-    if (init_authoritative_channel(&auth_chan, ns_ips, n_ns_ips,
-                                   (unsigned short)auth_port) != ARES_SUCCESS) {
-        fprintf(stderr, "strim-ddns: failed to initialize the authoritative query\n");
-        free(via_ns);
-        free(fqdn);
-        return 2;
-    }
-    struct dns_query_state fq = {0};
-    run_dns_query(auth_chan, fqdn, ARES_CLASS_IN, ARES_REC_TYPE_A, &fq);
-    ares_destroy(auth_chan);
-    if (fq.oom) {
+    /* 4. Query the FQDN directly against EACH nameserver through that NS's own
+     * addresses, all NS queries concurrent in one event loop. */
+    if (query_nameservers(probes, ns_count, fqdn,
+                          (unsigned short)auth_port) != 0) {
         fprintf(stderr, "strim-ddns: out of memory during DNS check\n");
-        free(via_ns);
+        free_probes(probes, ns_count);
         free(fqdn);
         return 2;
     }
-    if (fq.status != ARES_SUCCESS) {
-        fprintf(stderr, "check %s not resolved (via %s: %s)\n",
-                fqdn, via_ns, dns_status_str(fq.status));
-        free(fq.reply);
-        free(via_ns);
-        free(fqdn);
-        return 1;
+
+    struct ns_observation observations[DDNS_MAX_NS];
+    for (size_t i = 0; i < ns_count; i++) {
+        observations[i].addrs = probes[i].observed;
+        observations[i].count = probes[i].n_observed;
     }
-    struct ares_addrttl addrs[DDNS_MAX_NS_IPS];
-    int n_addrs = DDNS_MAX_NS_IPS;
-    int ar_rc = ares_parse_a_reply(fq.reply, (int)fq.reply_len, NULL, addrs,
-                                   &n_addrs);
-    free(fq.reply);
-    if (ar_rc != ARES_SUCCESS || n_addrs <= 0) {
-        fprintf(stderr, "check %s not resolved (via %s: no A records)\n",
-                fqdn, via_ns);
-        free(via_ns);
+
+    /* Pass only when EVERY nameserver returns the required expected IP. An
+     * unreachable or disagreeing NS is "not yet". */
+    bool resolved = agreement_all_match(observations, ns_count, expected);
+    struct in_addr agreed = expected;
+
+    /* One line per NS: hostname plus the IP it returned (or none), so a
+     * lagging nameserver is visible instead of hidden by a faster sibling. */
+    for (size_t i = 0; i < ns_count; i++) {
+        const char *shown = "none";
+        char ipbuf[INET_ADDRSTRLEN];
+        if (probes[i].n_observed > 0) {
+            struct in_addr pick = resolved ? agreed : probes[i].observed[0];
+            if (inet_ntop(AF_INET, &pick, ipbuf, sizeof(ipbuf)) != NULL) {
+                shown = ipbuf;
+            }
+        }
+        fprintf(stderr, "check %s ns %s -> %s\n", fqdn, probes[i].hostname,
+                shown);
+    }
+
+    if (!resolved) {
+        char want[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &expected, want, sizeof(want)) == NULL) {
+            snprintf(want, sizeof(want), "?");
+        }
+        fprintf(stderr,
+                "check %s not resolved "
+                "(expected %s not returned by every nameserver)\n",
+                fqdn, want);
+        free_probes(probes, ns_count);
         free(fqdn);
         return 1;
     }
 
     char ip[INET_ADDRSTRLEN];
-    if (inet_ntop(AF_INET, &addrs[0].ipaddr, ip, sizeof(ip)) == NULL) {
-        fprintf(stderr, "check %s not resolved (via %s: bad A record)\n",
-                fqdn, via_ns);
-        free(via_ns);
+    if (inet_ntop(AF_INET, &agreed, ip, sizeof(ip)) == NULL) {
+        fprintf(stderr, "check %s not resolved (bad A record)\n", fqdn);
+        free_probes(probes, ns_count);
         free(fqdn);
         return 1;
     }
     printf("%s\n", ip);
-    fprintf(stderr, "check %s -> %s (via %s)\n", fqdn, ip, via_ns);
-    free(via_ns);
+    fprintf(stderr, "check %s -> %s (all %zu nameservers returned it)\n", fqdn,
+            ip, ns_count);
+    free_probes(probes, ns_count);
     free(fqdn);
     return 0;
 }

@@ -95,8 +95,27 @@ deploy_write_srt_passphrase() {
   return 0
 }
 
-# Write <out> = canonical root/state TOML assignments + <config> with any
+# Print the canonical containerd config source path: deploy/aws/containerd-config.toml.
+#
+# The repo layout is deploy/aws/lib/deploy.sh and the bundle layout is
+# /mnt/nvme/lib/deploy.sh, so the canonical file is always one level above this
+# library. Resolving it here keeps a single source of truth instead of
+# regenerating the root/state text inline.
+deploy__canonical_containerd_config() {
+  local lib_dir
+  lib_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || return 1
+  printf '%s/../containerd-config.toml\n' "$lib_dir"
+}
+
+# Write <out> = canonical containerd config bytes followed by <config> with any
 # existing top-level (or whitespace-indented) root/state assignments removed.
+#
+# The canonical bytes come from deploy/aws/containerd-config.toml (root line,
+# state line, one blank separator line, trailing newline) and are copied
+# verbatim, never regenerated: <source> overrides the default sibling path for
+# tests, and an absent <source> is fatal rather than silently emitting a
+# divergent config. Existing settings therefore stay after the separator at
+# runtime, with exactly one canonical root/state pair.
 #
 # Reading goes through the sudo prefix: a failed read of an EXISTING config is
 # fatal and leaves <out> untouched (the old inline block truncated the config if
@@ -106,11 +125,24 @@ deploy_prepend_containerd_root_state() {
   local config="$1"
   local out="$2"
   local sudo_cmd="${3:-}"
+  local source="${4:-}"
   local existing=""
   local tmp
 
   if [ -z "$config" ] || [ -z "$out" ]; then
     printf '[containerd] ERROR: config and out arguments are required\n' >&2
+    return 1
+  fi
+
+  if [ -z "$source" ]; then
+    if ! source="$(deploy__canonical_containerd_config)"; then
+      printf '[containerd] ERROR: cannot resolve the canonical containerd config path\n' >&2
+      return 1
+    fi
+  fi
+  if ! test -s "$source"; then
+    printf '[containerd] ERROR: canonical containerd config %s is missing or empty\n' \
+      "$source" >&2
     return 1
   fi
 
@@ -130,8 +162,12 @@ deploy_prepend_containerd_root_state() {
     return 1
   }
   {
-    printf "root='/mnt/nvme/containerd'\n"
-    printf "state='/mnt/nvme/containerd-state'\n\n"
+    cat -- "$source" || {
+      rm -f "$tmp"
+      printf '[containerd] ERROR: cannot read canonical containerd config %s\n' \
+        "$source" >&2
+      return 1
+    }
     if [ -n "$existing" ]; then
       printf '%s\n' "$existing" |
         grep -vE '^[[:space:]]*(root|state)[[:space:]]*=' || true
@@ -145,9 +181,19 @@ deploy_prepend_containerd_root_state() {
   fi
 }
 
-# Prepare the strimserver logs directory: 0750 root:root, with the three known
+# Prepare the strimserver logs directory: 0755 root:root, with the three known
 # log files pre-created 0640 (the containerd shim creates them, so entrypoint
 # umask cannot control their mode), and every regular file normalized to 0640.
+#
+# The directory itself is 0755 (world-traversable, not writable): deploy.sh runs
+# an unprivileged `tee -a` process substitution and an EXIT trap that writes
+# deploy-last.rc, both of which must be able to traverse /mnt/nvme/logs. A 0750
+# directory would silently deny them on a fresh volume.
+#
+# deploy.sh pre-creates its own deploy-<timestamp>.log and deploy-last.rc as
+# 0640 ec2-user (so it can prune and write them without sudo), so deploy-*
+# artifacts are excluded from normalization; every other regular file still
+# becomes root:root 0640.
 #
 # <dir> must resolve to the expected root (DEPLOY_LOGS_ROOT, default
 # /mnt/nvme/logs); a symlink or a different resolved path is rejected before
@@ -180,7 +226,7 @@ deploy_prepare_logs_directory() {
     return 1
   fi
 
-  deploy__run "$sudo_cmd" install -d -m 0750 -o root -g root "$resolved" || {
+  deploy__run "$sudo_cmd" install -d -m 0755 -o root -g root "$resolved" || {
     printf '[logs] ERROR: cannot create %s\n' "$resolved" >&2
     return 1
   }
@@ -194,10 +240,75 @@ deploy_prepare_logs_directory() {
     fi
   done
   deploy__run "$sudo_cmd" find -P "$resolved" -xdev -type f \
+    ! -name 'deploy-*' \
     -exec chmod 0640 {} + -exec chown root:root {} + || {
     printf '[logs] ERROR: cannot normalize log modes under %s\n' "$resolved" >&2
     return 1
   }
+  return 0
+}
+
+# Merge the transferred DDNS settings into <env_file> (strimserver.env).
+#
+# Call-site ordering contract: deploy.sh MUST call this BEFORE it issues
+# `systemctl enable --now strim-ddns.timer`. The timer is Persistent=true, so
+# enabling it can start strim-ddns.service immediately; the unit reads
+# DDNS_HOST/DDNS_DOMAIN from this file, so the settings must already be present
+# or the first timer-triggered refresh runs with stale/missing values.
+#
+# Only ENABLE_DDNS, DDNS_HOST, and DDNS_DOMAIN are merged. Each key present in
+# <settings_file> replaces every existing assignment (any leading whitespace) and
+# is appended once at the end, so re-runs are byte-for-byte idempotent and never
+# duplicate a key. Every unrelated env key is preserved. The file is replaced
+# atomically via a same-directory temp file, mode 0600. A missing/empty settings
+# file is a no-op; a missing <env_file> is fatal because there is nothing safe to
+# update.
+deploy_write_ddns_env_settings() {
+  local env_file="$1"
+  local settings_file="$2"
+  local key assignment key_pattern tmp
+  local -a written_keys=()
+  local -a assignments=()
+
+  if [ -z "$env_file" ] || [ -z "$settings_file" ]; then
+    printf '[ddns] ERROR: env and settings file arguments are required\n' >&2
+    return 1
+  fi
+  if [ ! -s "$settings_file" ]; then
+    return 0
+  fi
+  if [ ! -f "$env_file" ]; then
+    printf '[ddns] ERROR: env file %s does not exist\n' "$env_file" >&2
+    return 1
+  fi
+
+  for key in ENABLE_DDNS DDNS_HOST DDNS_DOMAIN; do
+    assignment="$(grep -m1 "^${key}=" "$settings_file" || true)"
+    if [ -z "$assignment" ]; then
+      continue
+    fi
+    written_keys+=("$key")
+    assignments+=("$assignment")
+  done
+  if [ "${#assignments[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  tmp="$(mktemp "${env_file}.tmp.XXXXXX")" || {
+    printf '[ddns] ERROR: cannot create a temporary file beside %s\n' "$env_file" >&2
+    return 1
+  }
+  key_pattern="$(IFS='|'; printf '%s' "${written_keys[*]}")"
+  {
+    grep -vE "^[[:space:]]*(${key_pattern})[[:space:]]*=" "$env_file" || true
+    printf '%s\n' "${assignments[@]}"
+  } >"$tmp"
+
+  if ! chmod 0600 "$tmp" || ! mv -- "$tmp" "$env_file"; then
+    rm -f "$tmp"
+    printf '[ddns] ERROR: cannot update %s\n' "$env_file" >&2
+    return 1
+  fi
   return 0
 }
 
@@ -210,16 +321,17 @@ deploy_prepare_logs_directory() {
 #   unchanged   config already matched; no write, no restart
 # and leaves no scratch file behind. <out> is a caller-owned temp path beside
 # which the canonical content is assembled atomically by
-# deploy_prepend_containerd_root_state.
+# deploy_prepend_containerd_root_state. <source> is the canonical repo/bundle
+# file and defaults to the sibling containerd-config.toml.
 deploy_apply_containerd_config() {
-  local config="$1" out="$2" sudo_cmd="${3:-}"
+  local config="$1" out="$2" sudo_cmd="${3:-}" source="${4:-}"
 
   if [ -z "$config" ] || [ -z "$out" ]; then
     printf '[containerd] ERROR: config and out arguments are required\n' >&2
     return 1
   fi
 
-  deploy_prepend_containerd_root_state "$config" "$out" "$sudo_cmd" || return 1
+  deploy_prepend_containerd_root_state "$config" "$out" "$sudo_cmd" "$source" || return 1
 
   if deploy__run "$sudo_cmd" test -e "$config" \
       && deploy__run "$sudo_cmd" cmp -s "$out" "$config"; then

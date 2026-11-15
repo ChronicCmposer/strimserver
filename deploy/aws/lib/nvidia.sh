@@ -70,9 +70,9 @@
 #                 sudo dnf install -y --allowerasing --disableexcludes=all \
 #                   --disablerepo='*' /mnt/nvme/nvidia-rpm/*.rpm
 #   [depmod]    `depmod -a` failed; the new module graph is incomplete.
-#   [dkms]      `dkms remove <package>/<old> --all` failed for an nvidia or
-#               nvidia-open package; a stale 595 build may still shadow the new
-#               module.
+#   [dkms]      `dkms remove <package>/<old> --all` failed before installing the
+#               new closure; the stale 595 build remains and nothing new was
+#               installed.
 #   [drain]     the DCGM units did not stop within the drain timeout.
 #               Recovery: `sudo systemctl stop nvidia-dcgm-exporter nvidia-dcgm`.
 #   [holders]   a process still holds /dev/nvidia* after the drain stops.
@@ -1554,6 +1554,71 @@ nvidia__modules_loaded() {
   grep -Eq '^(nvidia|gdrdrv|efa_nv_peermem)' <<<"$listing"
 }
 
+# 0 when exactly <module> is present in lsmod. Captures the listing before
+# matching for the same SIGPIPE reason as nvidia__modules_loaded.
+nvidia__module_loaded() {
+  local sudo_cmd="$1" module="$2" listing
+  listing="$("$sudo_cmd" lsmod 2>/dev/null || true)"
+  grep -Eq "^${module}([[:space:]]|$)" <<<"$listing"
+}
+
+# Print the ON-DISK module version for the running kernel (modinfo -k).
+# `modinfo nvidia` without -k can resolve a module built for another kernel.
+nvidia__on_disk_kernel_version() {
+  local sudo_cmd="$1" module="$2" kernel out
+  kernel="$(uname -r)"
+  out="$("$sudo_cmd" modinfo -k "$kernel" -F version "$module" 2>/dev/null)" || return 1
+  nvidia__is_version "$out" || return 1
+  printf '%s\n' "$out"
+}
+
+# 0 when the LOADED driver is at/above the floor AND the on-disk nvidia and
+# nvidia-uvm modules for the running kernel report exactly that version. A
+# stale same-path nvidia-uvm.ko makes this fail even when nvidia itself agrees.
+nvidia__loaded_matches_on_disk() {
+  local sudo_cmd="$1" loaded on_disk_nvidia on_disk_uvm
+  loaded="$(nvidia__proc_version)" || return 1
+  nvidia_driver_ge "$loaded" "$NVIDIA_DRIVER_FLOOR" || return 1
+  on_disk_nvidia="$(nvidia__on_disk_kernel_version "$sudo_cmd" nvidia)" || return 1
+  on_disk_uvm="$(nvidia__on_disk_kernel_version "$sudo_cmd" nvidia-uvm)" || return 1
+  [[ "$on_disk_nvidia" == "$loaded" && "$on_disk_uvm" == "$loaded" ]]
+}
+
+# 0 when the loaded driver and both on-disk modules agree and nvidia_uvm is
+# loaded. Only this state may take the "nothing to do" fast path.
+nvidia__loaded_graph_consistent() {
+  local sudo_cmd="$1"
+  nvidia__loaded_matches_on_disk "$sudo_cmd" || return 1
+  nvidia__module_loaded "$sudo_cmd" nvidia_uvm
+}
+
+# 0 when BOTH on-disk modules for the running kernel report <expected>.
+nvidia__on_disk_matches_version() {
+  local sudo_cmd="$1" expected="$2" on_disk_nvidia on_disk_uvm
+  on_disk_nvidia="$(nvidia__on_disk_kernel_version "$sudo_cmd" nvidia)" || return 1
+  on_disk_uvm="$(nvidia__on_disk_kernel_version "$sudo_cmd" nvidia-uvm)" || return 1
+  [[ "$on_disk_nvidia" == "$expected" && "$on_disk_uvm" == "$expected" ]]
+}
+
+# Depmod then load one module, failing loudly with observed state. Used by the
+# light repair paths that must not unload an already-matching driver.
+nvidia__load_module() {
+  local sudo_cmd="$1" module="$2" state="${3:-verify}"
+  if ! "$sudo_cmd" depmod -a; then
+    nvidia__fail depmod "depmod -a failed before loading $module"
+    return 1
+  fi
+  if ! "$sudo_cmd" modprobe "$module"; then
+    nvidia__fail "$state" "$module failed to load. Recovery: $sudo_cmd depmod -a && $sudo_cmd modprobe nvidia && $sudo_cmd modprobe $module"
+    return 1
+  fi
+  if ! nvidia__module_loaded "$sudo_cmd" "$module"; then
+    nvidia__fail "$state" "$module is not loaded after a successful modprobe"
+    return 1
+  fi
+  return 0
+}
+
 # Unload the nvidia module graph dependency-first. Optional modules are removed
 # before nvidia_drm/nvidia_modeset, and nvidia is always last. `modprobe -r`
 # handles the dependency graph dynamically; `rmmod` is the fallback.
@@ -1596,9 +1661,11 @@ nvidia__unload_modules() {
   return 0
 }
 
-# Remove every stale DKMS build below the floor before depmod so none can
-# shadow the new module. Never removes a build at/above the floor, and never
-# runs on a kmod (precompiled) host.
+# Remove every stale DKMS build below the floor BEFORE the new closure is
+# installed. Both DKMS packages write to the same /lib/modules/<kernel>/extra/
+# nvidia*.ko paths, so a `dkms remove` after the install unlinks the freshly
+# installed module files and leaves the old version on disk. Never removes a
+# build at/above the floor, and never runs on a kmod (precompiled) host.
 nvidia__remove_stale_dkms() {
   local sudo_cmd="$1" variant status found version
 
@@ -1613,7 +1680,7 @@ nvidia__remove_stale_dkms() {
       continue
     fi
     if ! "$sudo_cmd" dkms remove "$found" --all; then
-      nvidia__fail dkms "dkms remove $found --all failed; a stale build may shadow 620"
+      nvidia__fail dkms "dkms remove $found --all failed before installing the new closure; the stale build remains and no new modules were installed"
       return 1
     fi
     printf 'nvidia: removed stale DKMS build %s\n' "$found"
@@ -1739,8 +1806,11 @@ nvidia__resume_hint() {
 nvidia_ensure_driver_floor() {
   local sudo_cmd="${SUDO:-sudo}"
   local installed="" variant marker_active=0 marker_valid=0 resume_at_floor=0
+  local load_uvm_only=0 kernel loaded=""
   local fabricmanager_was_active=0 fabricmanager_pkg_staged=0 persistenced_was_active=0
   local saved_fm_active="" saved_fm_staged="" saved_persist="" on_disk=""
+
+  kernel="$(uname -r)"
 
   # Stage-only inspection mode: repository + stage + every validator, then exit
   # 0 before the resume marker, drain, uninstall, or install.
@@ -1771,33 +1841,67 @@ nvidia_ensure_driver_floor() {
     fi
   else
     installed="$(nvidia__detect_installed_version || true)"
-    if [[ -n "$installed" ]] && nvidia_driver_ge "$installed" "$NVIDIA_DRIVER_FLOOR"; then
-      # At/above the floor is only a no-op when the LOADED driver (proc) or a
-      # working nvidia-smi confirms it. A 620 on disk with no loaded module must
-      # be reloaded and re-verified, never silently accepted.
-      if nvidia__proc_at_floor || nvidia__smi_at_floor; then
+    if [[ -z "$installed" ]] || ! nvidia_driver_ge "$installed" "$NVIDIA_DRIVER_FLOOR"; then
+      printf 'nvidia: driver %s is below the %s floor; upgrading\n' \
+        "${installed:-unknown}" "$NVIDIA_DRIVER_FLOOR"
+    else
+      # At/above the floor is only a no-op when the LOADED driver and BOTH
+      # on-disk modules for the running kernel agree and nvidia_uvm is loaded.
+      # A 620 in memory with a stale 595 nvidia-uvm.ko on disk must repair.
+      if nvidia__loaded_graph_consistent "$sudo_cmd"; then
         printf 'nvidia: driver %s is at or above the %s floor; nothing to do\n' \
           "$installed" "$NVIDIA_DRIVER_FLOOR"
         return 0
       fi
-      printf 'nvidia: driver %s is on disk but not loaded; reloading\n' "$installed"
-      if ! "$sudo_cmd" depmod -a; then
-        nvidia__fail depmod "depmod -a failed during reload; the module graph is incomplete"
-        return 1
-      fi
-      if ! "$sudo_cmd" modprobe nvidia; then
-        nvidia__fail verify "driver $installed is on disk but the module did not load. Recovery: $sudo_cmd depmod -a && $sudo_cmd modprobe nvidia"
-        return 1
-      fi
-      if nvidia__proc_at_floor || nvidia__smi_at_floor; then
-        printf 'nvidia: reloaded driver %s\n' "$installed"
+
+      if nvidia__loaded_matches_on_disk "$sudo_cmd"; then
+        # The loaded module already equals the on-disk target; only nvidia_uvm
+        # is missing. Loading it must not rebuild or unload nvidia.
+        loaded="$(nvidia__proc_version || true)"
+        printf 'nvidia: loaded driver %s matches the on-disk modules for %s but nvidia_uvm is not loaded; loading it\n' \
+          "$loaded" "$kernel"
+        if ! nvidia__load_module "$sudo_cmd" nvidia_uvm; then
+          return 1
+        fi
+        printf 'nvidia: driver %s is at or above the %s floor\n' \
+          "$loaded" "$NVIDIA_DRIVER_FLOOR"
         return 0
       fi
-      nvidia__fail verify "driver $installed is on disk but did not become active after reload"
-      return 1
+
+      if nvidia__proc_at_floor || nvidia__smi_at_floor; then
+        local loaded_now on_disk_nvidia on_disk_uvm
+        loaded_now="$(nvidia__proc_version || true)"
+        on_disk_nvidia="$(nvidia__on_disk_kernel_version "$sudo_cmd" nvidia || true)"
+        on_disk_uvm="$(nvidia__on_disk_kernel_version "$sudo_cmd" nvidia-uvm || true)"
+        printf 'nvidia: loaded driver %s but the on-disk modules for %s are nvidia=%s nvidia-uvm=%s; repairing the on-disk modules\n' \
+          "${loaded_now:-unknown}" "$kernel" \
+          "${on_disk_nvidia:-<missing>}" "${on_disk_uvm:-<missing>}"
+      elif nvidia__on_disk_matches_version "$sudo_cmd" "$installed"; then
+        # On disk but not loaded: reload the installed payload, including uvm.
+        printf 'nvidia: driver %s is on disk but not loaded; reloading\n' "$installed"
+        if ! "$sudo_cmd" depmod -a; then
+          nvidia__fail depmod "depmod -a failed during reload; the module graph is incomplete"
+          return 1
+        fi
+        if ! "$sudo_cmd" modprobe nvidia; then
+          nvidia__fail verify "driver $installed is on disk but the module did not load. Recovery: $sudo_cmd depmod -a && $sudo_cmd modprobe nvidia"
+          return 1
+        fi
+        if ! "$sudo_cmd" modprobe nvidia_uvm; then
+          nvidia__fail verify "driver $installed is on disk but nvidia_uvm did not load. Recovery: $sudo_cmd depmod -a && $sudo_cmd modprobe nvidia && $sudo_cmd modprobe nvidia_uvm"
+          return 1
+        fi
+        if nvidia__proc_at_floor || nvidia__smi_at_floor; then
+          printf 'nvidia: reloaded driver %s\n' "$installed"
+          return 0
+        fi
+        nvidia__fail verify "driver $installed is on disk but did not become active after reload"
+        return 1
+      else
+        printf 'nvidia: driver %s is on disk but the on-disk modules for %s disagree; repairing\n' \
+          "$installed" "$kernel"
+      fi
     fi
-    printf 'nvidia: driver %s is below the %s floor; upgrading\n' \
-      "${installed:-unknown}" "$NVIDIA_DRIVER_FLOOR"
   fi
 
   # Resume with 620 on disk but below-floor /proc: try to reload the installed
@@ -1816,11 +1920,16 @@ nvidia_ensure_driver_floor() {
     fi
   fi
 
-  # Resume short-circuit: the loaded driver is already at the floor, so the
-  # stage/uninstall/install steps are unnecessary. Only restore + verify remain.
-  if [[ "$marker_active" == "1" ]] && nvidia__proc_at_floor; then
+  # Resume short-circuit: the loaded driver already matches the on-disk modules,
+  # so the stage/uninstall/install steps are unnecessary. Only restore + verify
+  # remain. `nvidia_uvm` may still be missing; that is handled by the light load
+  # below, never by silently accepting the graph.
+  if [[ "$marker_active" == "1" ]] && nvidia__loaded_matches_on_disk "$sudo_cmd"; then
     resume_at_floor=1
-    printf 'nvidia: loaded driver is already at the %s floor; skipping stage/install and resuming at verification\n' "$NVIDIA_DRIVER_FLOOR"
+    printf 'nvidia: loaded driver matches the on-disk modules; skipping stage/install and resuming at verification\n'
+    if ! nvidia__module_loaded "$sudo_cmd" nvidia_uvm; then
+      load_uvm_only=1
+    fi
     if [[ "$marker_valid" == "1" ]]; then
       fabricmanager_was_active="${saved_fm_active:-0}"
       fabricmanager_pkg_staged="${saved_fm_staged:-0}"
@@ -1892,6 +2001,15 @@ nvidia_ensure_driver_floor() {
       fi
     fi
 
+    # Remove every stale below-floor DKMS build BEFORE the offline install.
+    # Both DKMS packages install to the same extra/nvidia*.ko paths; removing
+    # the old build after installing 620 would unlink the new module files and
+    # leave a 595 module on disk while 620 runs in memory.
+    if ! nvidia__remove_stale_dkms "$sudo_cmd"; then
+      nvidia__resume_hint dkms "could not remove the stale DKMS build before installing 620; no new modules were installed" "$sudo_cmd"
+      return 1
+    fi
+
     # Install offline from the validated closure. --disablerepo='*' and
     # --disableexcludes=all bypass the DLAMI excludes that otherwise filter the
     # required NVIDIA RPMs after the old driver is removed.
@@ -1902,10 +2020,8 @@ nvidia_ensure_driver_floor() {
     fi
 
     # Prove the freshly installed 620 module serves the RUNNING kernel BEFORE
-    # removing any old DKMS build or unloading the old module. `dnf` success
-    # does not guarantee a DKMS build.
-    local kernel module_file module_version dkms_status dkms_conf=0
-    kernel="$(uname -r)"
+    # unloading the old module. `dnf` success does not guarantee a DKMS build.
+    local module_file module_version uvm_module_version dkms_status dkms_conf=0
     if [[ "$variant" == "dkms" ]] && nvidia__staged_dkms_has_conf "$sudo_cmd" "$NVIDIA_STAGE_DIR"; then
       dkms_conf=1
     fi
@@ -1920,12 +2036,6 @@ nvidia_ensure_driver_floor() {
       fi
     fi
 
-    # Remove every stale below-floor DKMS build, then rebuild the module graph.
-    if ! nvidia__remove_stale_dkms "$sudo_cmd"; then
-      nvidia__resume_hint dkms "could not remove the stale DKMS build; 620 may be shadowed" "$sudo_cmd"
-      return 1
-    fi
-
     if ! "$sudo_cmd" depmod -a; then
       nvidia__resume_hint depmod "depmod -a failed; the new module dependency graph is incomplete" "$sudo_cmd"
       return 1
@@ -1933,9 +2043,19 @@ nvidia_ensure_driver_floor() {
 
     nvidia__normalize_module_index "$sudo_cmd" "$kernel"
 
+    # Verify ON DISK that both module files for the running kernel report the
+    # target version. `modinfo nvidia` alone cannot catch a stale same-path
+    # nvidia-uvm.ko left by a DKMS swap; the live-host failure reported
+    # "disagrees about version of symbol nvUvmInterfaceRetainChannel" and CUDA
+    # died with CUDA_ERROR_UNKNOWN even though nvidia.ko was 620.
     if ! module_version="$("$sudo_cmd" modinfo -k "$kernel" -F version nvidia 2>/dev/null)" \
-        || ! nvidia_driver_ge "$module_version" "$NVIDIA_DRIVER_FLOOR"; then
-      nvidia__resume_hint kernel-module "installed module for $kernel is not $NVIDIA_DRIVER_FLOOR; not unloading the old driver" "$sudo_cmd"
+        || [[ "$module_version" != "$NVIDIA_DRIVER_FLOOR" ]]; then
+      nvidia__resume_hint kernel-module "on-disk nvidia module for $kernel is ${module_version:-<missing>}, expected $NVIDIA_DRIVER_FLOOR; not unloading the old driver" "$sudo_cmd"
+      return 1
+    fi
+    if ! uvm_module_version="$("$sudo_cmd" modinfo -k "$kernel" -F version nvidia-uvm 2>/dev/null)" \
+        || [[ "$uvm_module_version" != "$NVIDIA_DRIVER_FLOOR" ]]; then
+      nvidia__resume_hint kernel-module "on-disk nvidia-uvm module for $kernel is ${uvm_module_version:-<missing>}, expected $NVIDIA_DRIVER_FLOOR; not unloading the old driver" "$sudo_cmd"
       return 1
     fi
     module_file="$("$sudo_cmd" modinfo -k "$kernel" -n nvidia 2>/dev/null || true)"
@@ -1944,17 +2064,38 @@ nvidia_ensure_driver_floor() {
       return 1
     fi
 
-    if ! nvidia__unload_modules "$sudo_cmd"; then
-      nvidia__resume_hint rmmod "could not unload the old module graph" "$sudo_cmd"
-      return 1
-    fi
-
-    if ! "$sudo_cmd" modprobe nvidia; then
-      nvidia__resume_hint modprobe "the 620 module failed to load. Recovery: $sudo_cmd depmod -a && $sudo_cmd modprobe nvidia" "$sudo_cmd"
-      return 1
+    # A loaded module that already equals the freshly installed on-disk target
+    # must not be unloaded: real hosts hold it with efa_nv_peermem/nvidia_fs/
+    # gdrdrv, and reloading the same version adds risk without changing anything.
+    # Only a genuinely different loaded version needs the unload/reload swap.
+    loaded="$(nvidia__proc_version || true)"
+    if [[ "$loaded" == "$module_version" ]]; then
+      printf 'nvidia: loaded module %s already matches the on-disk module; leaving it loaded\n' "$loaded"
+    else
+      if ! nvidia__unload_modules "$sudo_cmd"; then
+        nvidia__resume_hint rmmod "could not unload the old module graph" "$sudo_cmd"
+        return 1
+      fi
+      if ! "$sudo_cmd" modprobe nvidia; then
+        nvidia__resume_hint modprobe "the 620 module failed to load. Recovery: $sudo_cmd depmod -a && $sudo_cmd modprobe nvidia" "$sudo_cmd"
+        return 1
+      fi
     fi
     if ! "$sudo_cmd" modprobe nvidia_uvm; then
       nvidia__resume_hint modprobe "nvidia_uvm failed to load after nvidia" "$sudo_cmd"
+      return 1
+    fi
+  fi
+
+  # The resume short-circuit skipped stage/install because the loaded driver
+  # already matches the on-disk modules; only nvidia_uvm was missing.
+  if [[ "$load_uvm_only" == "1" ]]; then
+    if ! "$sudo_cmd" depmod -a; then
+      nvidia__resume_hint depmod "depmod -a failed while loading nvidia_uvm during resume" "$sudo_cmd"
+      return 1
+    fi
+    if ! "$sudo_cmd" modprobe nvidia_uvm; then
+      nvidia__resume_hint modprobe "nvidia_uvm failed to load during resume; the on-disk modules match but containers cannot open the GPU" "$sudo_cmd"
       return 1
     fi
   fi
@@ -1967,10 +2108,22 @@ nvidia_ensure_driver_floor() {
 
   # Verification uses the STRICT proc reader: an on-disk 620 with a still-loaded
   # 595 must never be reported healthy.
-  local loaded compute
+  local compute on_disk_nvidia on_disk_uvm
   loaded="$(nvidia__proc_version || true)"
   if ! nvidia_driver_ge "$loaded" "$NVIDIA_DRIVER_FLOOR"; then
     nvidia__resume_hint verify "loaded driver is ${loaded:-unknown} (below $NVIDIA_DRIVER_FLOOR) after the swap" "$sudo_cmd"
+    return 1
+  fi
+  # A matching loaded version is not enough: both on-disk modules for the
+  # running kernel must agree with it (stale same-path nvidia-uvm.ko).
+  on_disk_nvidia="$(nvidia__on_disk_kernel_version "$sudo_cmd" nvidia || true)"
+  on_disk_uvm="$(nvidia__on_disk_kernel_version "$sudo_cmd" nvidia-uvm || true)"
+  if [[ "$on_disk_nvidia" != "$loaded" || "$on_disk_uvm" != "$loaded" ]]; then
+    nvidia__resume_hint verify "loaded driver is $loaded but the on-disk modules for $kernel are nvidia=${on_disk_nvidia:-<missing>} nvidia-uvm=${on_disk_uvm:-<missing>}, expected $loaded for both" "$sudo_cmd"
+    return 1
+  fi
+  if ! nvidia__module_loaded "$sudo_cmd" nvidia_uvm; then
+    nvidia__resume_hint verify "nvidia_uvm is not loaded although the on-disk module reports $on_disk_uvm; containers cannot open the GPU" "$sudo_cmd"
     return 1
   fi
   compute="$(nvidia_compute_cap_of_smi || true)"

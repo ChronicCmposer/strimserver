@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"strimserver-check-deps/common"
+	"strimserver-check-deps/resolverimpl"
 )
 
 // These tests cover the baked-AMI driver-floor advisory: check-deps resolves the
@@ -247,6 +250,133 @@ func TestCheckBakedAMIQueriesUsEast2(t *testing.T) {
 	}
 	if strings.Count(joined, bakedAMIRegion) < 2 {
 		t.Errorf("aws log %q does not pass --region %s to both reads", joined, bakedAMIRegion)
+	}
+}
+
+// assertAWSInvocationsPassedProfileAndRegion reads a logged aws argv file and
+// asserts every invocation carried the explicit profile and region the design
+// requires. An empty log is a failure: a test that never invoked aws proves
+// nothing.
+func assertAWSInvocationsPassedProfileAndRegion(t *testing.T, logPath, wantProfile string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading aws log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		t.Fatalf("aws log %q is empty; no invocation was recorded", data)
+	}
+	for i, line := range lines {
+		if !strings.Contains(line, "--profile "+wantProfile) {
+			t.Errorf("aws invocation %d (%q) does not pass --profile %s", i, line, wantProfile)
+		}
+		if !strings.Contains(line, "--region us-east-2") {
+			t.Errorf("aws invocation %d (%q) does not pass --region us-east-2", i, line)
+		}
+	}
+	return lines
+}
+
+// TestCheckBakedAMIProfileAndRegion proves both baked-AMI reads pass an
+// explicit profile — AWS_PROFILE when set, "strimserver" when not — and
+// --region us-east-2. This removes the accidental dependency on the caller
+// exporting AWS_PROFILE.
+func TestCheckBakedAMIProfileAndRegion(t *testing.T) {
+	cases := []struct {
+		name        string
+		envProfile  string
+		wantProfile string
+	}{
+		{"AWS_PROFILE unset defaults to strimserver", "", "strimserver"},
+		{"AWS_PROFILE set is honoured", "deployer", "deployer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			logFile := filepath.Join(t.TempDir(), "aws.log")
+			fakeBakedAWS(t, binDir, "ami-0123456789abcdef0", 0,
+				`[{"Key":"strimserver:nvidia-driver","Value":"620.70.06"}]`, 0)
+			useFakeAWS(t, binDir)
+			t.Setenv("AWS_BAKED_LOG", logFile)
+			t.Setenv("AWS_PROFILE", tc.envProfile)
+			root := bakedFloorRepo(t, "620.70.06")
+
+			checkBakedAMI(root, 5*time.Second, func(string, ...any) {})
+
+			lines := assertAWSInvocationsPassedProfileAndRegion(t, logFile, tc.wantProfile)
+			if len(lines) != 2 {
+				t.Errorf("aws log has %d invocation(s), want 2 (get-parameter + describe-images): %v", len(lines), lines)
+			}
+		})
+	}
+}
+
+// TestCheckBakedAMICredentialsMissingIsUnknown proves a credential-less run is
+// the existing silent "not applicable" path: the aws failure is swallowed by
+// the advisory, no warning is emitted, and nothing panics.
+func TestCheckBakedAMICredentialsMissingIsUnknown(t *testing.T) {
+	binDir := t.TempDir()
+	fakeBakedAWS(t, binDir, "aws: error: Unable to locate credentials", 255, "", 0)
+	useFakeAWS(t, binDir)
+	root := bakedFloorRepo(t, "620.70.06")
+
+	var warns []string
+	checkBakedAMI(root, 5*time.Second, captureWarn(&warns))
+
+	if len(warns) != 0 {
+		t.Errorf("missing credentials warned %v, want none (unknown)", warns)
+	}
+}
+
+// TestDLAMIResolveProfileAndRegion proves the resolver side passes the same
+// explicit profile and region at both the SSM and describe-images call sites.
+func TestDLAMIResolveProfileAndRegion(t *testing.T) {
+	cases := []struct {
+		name        string
+		envProfile  string
+		wantProfile string
+	}{
+		{"AWS_PROFILE unset defaults to strimserver", "", "strimserver"},
+		{"AWS_PROFILE set is honoured", "deployer", "deployer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			logFile := filepath.Join(t.TempDir(), "aws.log")
+			fakeBakedAWS(t, binDir, "ami-07626c4fc6797c8e0", 0,
+				"base-oss-nvidia-driver-gpu-amazon-linux-2023.1.20260806\t2026-08-06T12:00:00Z", 0)
+			useFakeAWS(t, binDir)
+			t.Setenv("AWS_BAKED_LOG", logFile)
+			t.Setenv("AWS_PROFILE", tc.envProfile)
+
+			vi := resolverimpl.DLAMIResolve(nil, 5*time.Second)(common.Dependency{Category: common.CategoryAMI, Name: "dlami"})
+			if vi.Err != nil {
+				t.Fatalf("DLAMIResolve = %+v, want no error", vi)
+			}
+
+			lines := assertAWSInvocationsPassedProfileAndRegion(t, logFile, tc.wantProfile)
+			if len(lines) != 4 {
+				t.Errorf("aws log has %d invocation(s), want 4 (2 SSM + 2 describe-images): %v", len(lines), lines)
+			}
+		})
+	}
+}
+
+// TestDLAMIResolveCredentialsMissingIsUnknown proves the resolver reports
+// unknown (an error, no version) when every aws call fails for missing
+// credentials; it never panics or exits the process.
+func TestDLAMIResolveCredentialsMissingIsUnknown(t *testing.T) {
+	binDir := t.TempDir()
+	fakeBakedAWS(t, binDir, "aws: error: Unable to locate credentials", 255, "", 0)
+	useFakeAWS(t, binDir)
+
+	vi := resolverimpl.DLAMIResolve(nil, 5*time.Second)(common.Dependency{Category: common.CategoryAMI, Name: "dlami"})
+	if vi.Err == nil {
+		t.Fatalf("DLAMIResolve = %+v, want an error (unknown)", vi)
+	}
+	if vi.Version != "" {
+		t.Errorf("version = %q, want empty on failure", vi.Version)
 	}
 }
 

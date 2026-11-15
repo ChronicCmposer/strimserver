@@ -2,6 +2,8 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 exports_files(
     [
+        "containerd-config.toml",
+        "containerd-nvme.conf",
         "deploy.sh",
         "fish-deploy.sh",
         "imdslib.sh",
@@ -94,6 +96,7 @@ sh_test(
     srcs = ["deploy_helpers_test.sh"],
     data = [
         "//deploy/aws/lib:deploy.sh",
+        "containerd-config.toml",
         "deploy.sh",
     ],
 )
@@ -104,8 +107,9 @@ sh_test(
 #   * deploy_floor_check_test -- below-floor driver fails fast with remediation;
 #     floor met generates the amd64 CDI spec at deploy time; setup-gpu.sh is
 #     never invoked.
-#   * deploy_ddns_async_test  -- the DDNS verify loop moves into an armed
-#     oneshot unit (no 24x5s block in deploy.sh).
+#   * deploy_ddns_blocking_test -- the two-milestone blocking contract: M1 is
+#     the last line before the DDNS block, the block contains ONLY the two
+#     bounded unit starts, and M2 is the last output line.
 #   * deploy_budget_test      -- full fast path: no sleep/dnf/setup-gpu,
 #     compare-before-restart containerd, parallel image imports with a barrier.
 sh_test(
@@ -114,19 +118,29 @@ sh_test(
     data = [
         "//deploy/aws/lib:deploy.sh",
         "//deploy/aws/lib:nvidia.sh",
+        "containerd-config.toml",
+        "containerd-nvme.conf",
         "deploy.sh",
         "testutil_fake_gpu.sh",
     ],
 )
 
 sh_test(
-    name = "deploy_ddns_async_test",
-    srcs = ["deploy_ddns_async_test.sh"],
+    name = "deploy_ddns_blocking_test",
+    srcs = ["deploy_ddns_blocking_test.sh"],
+    # The signal/interrupt cases wait on a fake blocking start; keep the test
+    # from tripping the default 60s small-test timeout on slow sandboxes.
+    size = "medium",
     data = [
         "//deploy/aws/lib:deploy.sh",
         "//deploy/aws/lib:nvidia.sh",
+        "containerd-config.toml",
         "deploy.sh",
+        "imdslib.sh",
+        "strim-ddns.service.template",
+        "strim-ddns.timer",
         "strim-ddns-verify.service.template",
+        "strimserver.service.template",
         "testutil_fake_gpu.sh",
     ],
 )
@@ -137,7 +151,10 @@ sh_test(
     data = [
         "//deploy/aws/lib:deploy.sh",
         "//deploy/aws/lib:nvidia.sh",
+        "containerd-config.toml",
         "deploy.sh",
+        "strim-ddns.service.template",
+        "strim-ddns-verify.service.template",
         "testutil_fake_gpu.sh",
     ],
 )
@@ -167,7 +184,10 @@ sh_test(
     name = "deploy_infra_test",
     srcs = ["deploy_infra_test.sh"],
     data = [
+        "//deploy/aws/lib:deploy.sh",
         "//deploy/aws/lib:nvidia.sh",
+        "containerd-config.toml",
+        "containerd-nvme.conf",
         "deploy-infra",
         "strimserver-infra.yaml",
         "strimserver-operator.yaml",

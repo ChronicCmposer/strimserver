@@ -3,11 +3,13 @@
 # setup-gpu.sh - arch-aware NVIDIA GPU + containerd runtime setup for the
 # strimserver deployment bundle.
 #
-# Runs as the deploy user (uses sudo), is idempotent and safe to re-run, and is
-# invoked by deploy.sh BEFORE the containerd block so that deploy.sh's single
-# `sudo systemctl restart containerd.service` happens after all GPU wiring here.
-# This script deliberately does NOT restart containerd itself (see the ordering
-# note below).
+# Runs as the deploy user (uses sudo) and is idempotent and safe to re-run.
+# This is an operator-run recovery/legacy tool: the current deploy.sh does NOT
+# invoke it. deploy.sh instead asserts the baked driver floor
+# (nvidia__proc_at_floor) and fails closed below 620.70.06, and generates the
+# amd64 CDI spec itself; run setup-gpu.sh once on a legacy host that still needs
+# the driver raised to the floor. This script deliberately does NOT restart
+# containerd itself (see the ordering note below).
 #
 # Background
 # ----------
@@ -50,11 +52,11 @@
 #
 # Ordering note
 # -------------
-# deploy.sh runs this script, then prepends root/state to /etc/containerd/
-# config.toml and restarts containerd exactly once. Under Option C this script
-# no longer writes a containerd drop-in (no nvidia-ctk runtime configure), so
-# the single restart only picks up deploy.sh's root/state config prepend. Do
-# not restart containerd here.
+# This script is run manually, not by deploy.sh. It raises/verifies the driver
+# floor and can wire the CDI spec, but it never restarts containerd. deploy.sh
+# independently installs the canonical containerd config and starts or restarts
+# containerd through its own guarded, compare-before-apply path. Do not restart
+# containerd here.
 #
 # PATH B - manual driver install on a stock AL2023 arm64 AMI (FALLBACK ONLY)
 # -------------------------------------------------------------------------
@@ -182,9 +184,9 @@ fi
 # --- Option C / CDI wiring ----------------------------------------------------
 # The driver floor is already verified (and the module loaded) above, so any
 # CDI spec generated below reflects a working 620.70.06 driver.
-# containerd is restarted exactly once by deploy.sh AFTER this script, so any
-# containerd config change below is picked up together with deploy.sh's
-# root/state config prepend. Do not restart containerd here.
+# This script does not restart containerd (deploy.sh owns that); any containerd
+# config change below is picked up by the deploy's own config path or on the
+# next operator-run restart.
 if [[ "$ARCH" == "arm64" ]]; then
    # arm64 (Option C): the assembly controller speaks the RAW containerd API,
    # where CDI annotations and default_runtime_name are INERT. GPU stages get

@@ -2,15 +2,22 @@
 Description=strim Namecheap Dynamic DNS refresh (one-shot)
 After=containerd.service network-online.target
 Requires=containerd.service
+ConditionPathIsMountPoint=/mnt/nvme
 
 [Service]
 Type=oneshot
+TimeoutStartSec=30
 # Runs as root so it can read the DDNS password (root:root 0600, installed by
 # deploy.sh to /etc/strim-ddns/password). The operator's DDNS_HOST / DDNS_DOMAIN
 # (and an optional explicit DDNS_IP) are read at runtime from the deployed
 # /mnt/nvme/config/strimserver.env (EnvironmentFile); timer runs leave DDNS_IP
 # empty so the client omits ip= and Namecheap uses the requester IP.
 EnvironmentFile=-/mnt/nvme/config/strimserver.env
+# Before each start, remove any leftover task/container from a previous run that
+# was killed before ExecStopPost could run (belt and braces; `-` keeps it
+# non-fatal and every command is bounded).
+ExecStartPre=-timeout -k 5 10 /usr/bin/ctr -n strimserver tasks kill -s KILL strim-ddns
+ExecStartPre=-timeout -k 5 10 /usr/bin/ctr -n strimserver containers delete strim-ddns
 # No explicit capability flags: ctr accepts only CAP_-prefixed names (no bare
 # ALL), and this static HTTPS client needs none (--net-host, binds no ports).
 ExecStart=/usr/bin/ctr -n strimserver run --rm --net-host --read-only \
@@ -23,3 +30,7 @@ ExecStart=/usr/bin/ctr -n strimserver run --rm --net-host --read-only \
     --mount type=bind,src=/etc/resolv.conf,dst=/etc/resolv.conf,options=rbind:ro \
    --mount type=bind,src=/etc/hosts,dst=/etc/hosts,options=rbind:ro \
    __IMAGE__ __CONTAINER__
+# Failure, TimeoutStartSec expiry, and the deploy backstop `systemctl stop` all
+# run this: the killed refresh must not leave its container task behind.
+ExecStopPost=-timeout -k 5 10 /usr/bin/ctr -n strimserver tasks kill -s KILL strim-ddns
+ExecStopPost=-timeout -k 5 10 /usr/bin/ctr -n strimserver containers delete strim-ddns

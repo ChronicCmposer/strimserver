@@ -28,6 +28,9 @@ const (
 	bakedAMISSMParam = "/strimserver/ami/baked/latest"
 	// bakedAMIRegion is the region the baked AMI and its parameter live in.
 	bakedAMIRegion = "us-east-2"
+	// bakedAMIProfileDefault is the AWS CLI profile used when AWS_PROFILE is
+	// unset, so the check never depends on the caller exporting it.
+	bakedAMIProfileDefault = "strimserver"
 	// bakedAMIDriverTagKey is the EC2 tag the Image Builder recipe writes with
 	// the baked driver version as its value.
 	bakedAMIDriverTagKey = "strimserver:nvidia-driver"
@@ -180,6 +183,16 @@ func checkBakedAMI(root string, timeout time.Duration, warn func(string, ...any)
 		bakedAMIStaleWarningID, id, bakedAMIRegion, tag, bakedAMIDriverTagKey, floor, nvidiaFloorPath, bakedAMISSMParam)
 }
 
+// bakedAWSProfile returns the profile every baked-AMI aws call passes
+// explicitly: AWS_PROFILE when set, otherwise the deploy profile. Missing
+// credentials remain a not-applicable result, never an identity gate.
+func bakedAWSProfile() string {
+	if profile := os.Getenv("AWS_PROFILE"); profile != "" {
+		return profile
+	}
+	return bakedAMIProfileDefault
+}
+
 // awsBakedAMIID resolves the single baked AMI id from the Image Builder SSM
 // parameter. Any aws failure (missing binary, missing credentials, parameter
 // not published) is an error; the caller treats it as not applicable.
@@ -187,6 +200,7 @@ func awsBakedAMIID(timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "aws", "ssm", "get-parameter",
+		"--profile", bakedAWSProfile(),
 		"--region", bakedAMIRegion,
 		"--name", bakedAMISSMParam,
 		"--query", "Parameter.Value",
@@ -208,6 +222,7 @@ func awsImageTags(timeout time.Duration, id string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "aws", "ec2", "describe-images",
+		"--profile", bakedAWSProfile(),
 		"--region", bakedAMIRegion,
 		"--image-ids", id,
 		"--query", "Images[0].Tags",

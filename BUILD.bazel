@@ -89,6 +89,8 @@ pkg_files(
 pkg_files(
     name = "bundle_scripts",
     srcs = [
+        "//deploy/aws:containerd-config.toml",
+        "//deploy/aws:containerd-nvme.conf",
         "//deploy/aws:fish-deploy.sh",
         "//deploy/aws:imdslib.sh",
         "//deploy/aws:prompt_login.fish",

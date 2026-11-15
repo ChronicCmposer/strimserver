@@ -1241,6 +1241,9 @@ unit_is_active() {
   [[ -n "$f" && "$(cat "$f" 2>/dev/null)" == "1" ]]
 }
 case "$*" in
+  *'show'*'InvocationID'*)
+    printf '%s\n' "${FAKE_INVOCATION_ID:-0123456789abcdef0123456789abcdef}"
+    exit 0 ;;
   *'show'*'FragmentPath'*)
     unit=""
     for a in "$@"; do
@@ -1258,6 +1261,12 @@ case "$*" in
     exit 0 ;;
   *'is-active'*'strimserver.service'*)
     [[ "${FAKE_STRIMSERVER_ACTIVE:-1}" == "1" ]] && exit 0 || exit 3 ;;
+  *'is-active'*'containerd'*)
+    state="${FAKE_CONTAINERD_ACTIVE:-1}"
+    if [ -f "$FAKE_GPU_STATE/containerd_active" ]; then
+      state="$(cat "$FAKE_GPU_STATE/containerd_active" 2>/dev/null)"
+    fi
+    [[ "$state" == "1" ]] && exit 0 || exit 3 ;;
   *'is-active'*'nvidia-fabricmanager.service'*)
     unit_exists nvidia-fabricmanager.service && unit_is_active nvidia-fabricmanager.service && exit 0 || exit 3 ;;
   *'is-active'*'nvidia-persistenced.service'*)
@@ -1289,6 +1298,28 @@ case "$*" in
     rc="${FAKE_PERSISTENCED_START_RC:-0}"
     [[ "$rc" == "0" ]] || exit "$rc"
     printf '1' >"$FAKE_GPU_STATE/persistenced_active"
+    exit 0 ;;
+  *'start'*'containerd'*)
+    rc="${FAKE_CONTAINERD_START_RC:-0}"
+    [[ "$rc" == "0" ]] || exit "$rc"
+    [[ "${FAKE_CONTAINERD_STAY_INACTIVE:-0}" == "1" ]] || printf '1' >"$FAKE_GPU_STATE/containerd_active"
+    exit 0 ;;
+  *'stop'*'containerd'*)
+    printf '0' >"$FAKE_GPU_STATE/containerd_active"
+    exit 0 ;;
+  *'start'*'strim-ddns-verify.service'*)
+    rc="${FAKE_DDNS_VERIFY_START_RC:-0}"
+    [[ "$rc" == "0" ]] || exit "$rc"
+    [[ -z "${FAKE_SYSTEMCTL_BLOCK_SECONDS:-}" ]] || /bin/sleep "$FAKE_SYSTEMCTL_BLOCK_SECONDS"
+    exit 0 ;;
+  *'start'*'strim-ddns.service'*)
+    rc="${FAKE_DDNS_START_RC:-0}"
+    [[ "$rc" == "0" ]] || exit "$rc"
+    [[ -z "${FAKE_SYSTEMCTL_BLOCK_SECONDS:-}" ]] || /bin/sleep "$FAKE_SYSTEMCTL_BLOCK_SECONDS"
+    exit 0 ;;
+  *'stop'*'strim-ddns-verify.service'*|*'stop'*'strim-ddns.service'*)
+    exit "${FAKE_DDNS_STOP_RC:-0}" ;;
+  *'disable'*'strim-ddns'*|*'enable'*'strim-ddns'*)
     exit 0 ;;
   *'cat'*'nvidia-dcgm-exporter.service'*|*'list-unit-files'*'nvidia-dcgm-exporter'*)
     [[ "${FAKE_DCGM_EXPORTER_UNIT:-0}" == "1" ]] && exit 0 || exit 1 ;;
@@ -1539,6 +1570,17 @@ fake_gpu_cleanup() {
 #   FAKE_CTR_DELAY       seconds (real /bin/sleep) spent inside fake `ctr import`
 #   FAKE_CTR_FAIL_IMAGE  controller|ffmpeg|mediamtx|strim-ddns -> that import fails
 #   FAKE_PUBLIC_IP       value the seeded IMDS stub reports (default 203.0.113.10)
+#   FAKE_MOUNTPOINT_RC   rc for the recording `mountpoint` shim (default 0)
+#   FAKE_CONTAINERD_ACTIVE      0 -> `systemctl is-active containerd` is inactive
+#   FAKE_CONTAINERD_START_RC    rc for `systemctl start containerd` (default 0)
+#   FAKE_DDNS_START_RC          rc for `systemctl start strim-ddns.service`
+#   FAKE_DDNS_VERIFY_START_RC   rc for `systemctl start strim-ddns-verify.service`
+#   FAKE_DDNS_STOP_RC           rc for `systemctl stop strim-ddns*.service`
+#   FAKE_SYSTEMCTL_BLOCK_SECONDS  real seconds the fake DDNS starts block (signal
+#                               tests: deliver a signal while a start is running)
+#   FAKE_INVOCATION_ID          value for `systemctl show -p InvocationID`
+#   FAKE_PGREP_RC               rc for the recording `pgrep` shim; 0 models a live
+#                               in-flight `ctr ... i import` orphan (default 1)
 fake_deploy_install() {
   FAKE_DEPLOY_BINDIR="$(mktemp -d)"
   FAKE_DEPLOY_ROOT="$(mktemp -d)"
@@ -1637,12 +1679,66 @@ fi
 exit 0
 SHIM
 
+  cat >"$FAKE_DEPLOY_BINDIR/timeout" <<'SHIM'
+#!/usr/bin/env bash
+# Record the full argv, then execute the wrapped command with its options
+# stripped, so deploy.sh's `sudo timeout -k 5 <n> systemctl ...` reaches the
+# fake systemctl and its rc is observable.
+printf 'timeout %s\n' "$*" >>"${FAKE_GPU_CALLS:?}"
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  case "${args[$i]}" in
+    -k|--kill-after=*) i=$((i + 2)) ;;
+    -s|--signal) i=$((i + 2)) ;;
+    -*) i=$((i + 1)) ;;
+    *) break ;;
+  esac
+done
+i=$((i + 1))
+if [ "$i" -ge "${#args[@]}" ]; then
+  exit 0
+fi
+exec "${args[@]:$i}"
+SHIM
+
+  cat >"$FAKE_DEPLOY_BINDIR/journalctl" <<'SHIM'
+#!/usr/bin/env bash
+# Recording shim: the fake sudo logs `sudo journalctl ...`; this logs the bare
+# argv too. --show-cursor emits a parseable cursor; -f returns immediately
+# (never blocks the test).
+printf 'journalctl %s\n' "$*" >>"${FAKE_GPU_CALLS:?}"
+case " $* " in
+  *' --show-cursor '*) printf '%s\n' '-- cursor: s=fakecursor;c=1' ;;
+esac
+exit 0
+SHIM
+
+  cat >"$FAKE_DEPLOY_BINDIR/mountpoint" <<'SHIM'
+#!/usr/bin/env bash
+printf 'mountpoint %s\n' "$*" >>"${FAKE_GPU_CALLS:?}"
+exit "${FAKE_MOUNTPOINT_RC:-0}"
+SHIM
+
+  cat >"$FAKE_DEPLOY_BINDIR/pgrep" <<'SHIM'
+#!/usr/bin/env bash
+# Recording shim: the deploy's orphan-import guard runs `timeout ... pgrep -f
+# 'ctr .* i import'`. FAKE_PGREP_RC=0 models a live orphan; the default (1)
+# models none, so no real process scan leaks between tests.
+printf 'pgrep %s\n' "$*" >>"${FAKE_GPU_CALLS:?}"
+exit "${FAKE_PGREP_RC:-1}"
+SHIM
+
   chmod +x "$FAKE_DEPLOY_BINDIR"/*
   PATH="$FAKE_DEPLOY_BINDIR:$PATH"
   export PATH
+  mkdir -p "$FAKE_SYSROOT/run"
   DEPLOY_ROOT="$FAKE_DEPLOY_ROOT"
   DEPLOY_LOGS_ROOT="$FAKE_DEPLOY_ROOT/logs"
-  export DEPLOY_ROOT DEPLOY_LOGS_ROOT
+  # The lock lives under /run on the host (root-owned); relocate it into the
+  # hermetic sysroot so deploy.sh's sudo touch + read-only open both work.
+  DEPLOY_LOCK_FILE="$FAKE_SYSROOT/run/strimserver-deploy.lock"
+  export DEPLOY_ROOT DEPLOY_LOGS_ROOT DEPLOY_LOCK_FILE
 }
 
 # Seed a standard deploy payload + canonical containerd config. Tests adjust
@@ -1653,7 +1749,7 @@ fake_deploy_seed_baseline() {
     "$sys/etc/containerd" "$sys/etc/systemd/system" "$sys/etc/cdi" \
     "$sys/var/run/cdi" "$sys/etc/strim-ddns"
   cat >"$root/imdslib.sh" <<'EOF'
-get_public_ip() { printf '%s\n' "${FAKE_PUBLIC_IP:-203.0.113.10}"; }
+get_public_ip() { printf '%s\n' "${FAKE_PUBLIC_IP-203.0.113.10}"; }
 get_instance_type() { printf '%s\n' "g4dn.xlarge"; }
 EOF
   : >"$root/fish-deploy.sh"
@@ -1666,6 +1762,8 @@ EOF
   : >"$root/mediamtx-container.tar"
   : >"$root/strim-ddns.service"
   : >"$root/strim-ddns.timer"
+  printf '[Unit]\nConditionPathIsMountPoint=/mnt/nvme\n' \
+    >"$root/containerd-nvme.conf"
   printf 'ENABLE_DDNS=false\nDDNS_HOST=strim\nDDNS_DOMAIN=\n' \
     >"$root/config/strimserver.env"
   printf "root='/mnt/nvme/containerd'\nstate='/mnt/nvme/containerd-state'\n\n" \

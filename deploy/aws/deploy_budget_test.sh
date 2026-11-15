@@ -54,7 +54,11 @@ end_case() {
     FAKE_CTR_FAIL_IMAGE FAKE_GPU_BINDIR FAKE_GPU_CALLS FAKE_GPU_STATE \
     FAKE_DNF_ARGV FAKE_PROC_FILE FAKE_SUDO_ACTIVE FAKE_DEPLOY_BINDIR \
     FAKE_DEPLOY_ROOT FAKE_SYSROOT FAKE_DEPLOY_SLEEP_LOG FAKE_CTR_STARTS \
-    DEPLOY_ROOT DEPLOY_LOGS_ROOT 2>/dev/null || true
+    FAKE_MOUNTPOINT_RC FAKE_CONTAINERD_ACTIVE FAKE_CONTAINERD_START_RC \
+    FAKE_CONTAINERD_STAY_INACTIVE FAKE_DDNS_START_RC \
+    FAKE_DDNS_VERIFY_START_RC FAKE_DDNS_STOP_RC FAKE_SYSTEMCTL_BLOCK_SECONDS \
+    FAKE_INVOCATION_ID DEPLOY_M1_ELAPSED_OVERRIDE \
+    DEPLOY_ROOT DEPLOY_LOGS_ROOT DEPLOY_LOCK_FILE 2>/dev/null || true
 }
 
 run_deploy() {
@@ -137,6 +141,30 @@ failed_import_case() {
   end_case
 }
 check "a single import failure aborts and names the image" failed_import_case
+
+# --- case 5: structural wall-clock budget -----------------------------------
+# The configured bounds must sum to <= 240s: M1 target 60 + refresh
+# TimeoutStartSec 30 + verify TimeoutStartSec 140 = 230. Wrappers (40/150) are
+# backstops outside the budget. Structural, never wall-clock.
+structural_budget_case() {
+  local m1=60 refresh verify total
+  refresh="$(awk -F= '/^TimeoutStartSec=/{print $2; exit}' "$script_dir/strim-ddns.service.template")"
+  verify="$(awk -F= '/^TimeoutStartSec=/{print $2; exit}' "$script_dir/strim-ddns-verify.service.template")"
+  total=$((m1 + ${refresh:-0} + ${verify:-0}))
+  check "budget: refresh TimeoutStartSec is 30" test "${refresh:-}" = "30"
+  check "budget: verify TimeoutStartSec is 140" test "${verify:-}" = "140"
+  check "budget: systemd verify bound is under the 150s backstop" \
+    bash -c '[ "$1" -lt 150 ]' _ "${verify:-0}"
+  check "budget: systemd refresh bound is under the 40s backstop" \
+    bash -c '[ "$1" -lt 40 ]' _ "${refresh:-0}"
+  check "budget: M1 target 60 + refresh 30 + verify 140 <= 240" \
+    bash -c '[ "$1" -le 240 ]' _ "$total"
+  check "budget: deploy.sh carries the 60s M1 target" \
+    grep -qE 'M1_ELAPSED.*-gt 60|over 60s target' "$deploy_sh"
+  check "budget: deploy.sh has no unbounded sleep" \
+    bash -c '! grep -Eq "(^|[;&|[:space:]])sleep[[:space:]]" "$1"' _ "$deploy_sh"
+}
+check "configured bounds sum within the 240s budget" structural_budget_case
 
 if [ "$failures" -ne 0 ]; then
   printf '\n%d check(s) failed\n' "$failures" >&2

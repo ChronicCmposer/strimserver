@@ -2,6 +2,9 @@
 Description=Strimserver Controller
 After=network.target containerd.service
 Wants=containerd.service
+# Serving requires the NVMe volume; after a reboot without it the unit fails
+# visibly (degraded) instead of serving from an absent volume.
+AssertPathIsMountPoint=/mnt/nvme
 
 [Service]
 Type=simple

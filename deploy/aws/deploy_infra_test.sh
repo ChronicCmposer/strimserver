@@ -449,6 +449,142 @@ check "infra declares the HasAvailabilityZone condition" \
 check "produced AMI id is published to /strimserver/ami/baked/latest" \
   bash -c 'grep -Fq "/strimserver/ami/baked/latest" "$1"' _ "$infra_template"
 
+# ---------------------------------------------------------------------------
+# Image Builder bake hygiene (design spec §3): version bumps, bake residue
+# cleanup ordering, the baked containerd NVMe drop-in, and the single source of
+# truth for both baked containerd artifacts. The component `Data` is captured by
+# a sha256 content lock stored beside the expected version so any change forces a
+# conscious version bump.
+# ---------------------------------------------------------------------------
+expected_component_version="1.0.1"
+expected_recipe_version="1.0.1"
+expected_component_data_sha256="37f90934b7f7d6e854c3afe42b81c65ae8f6f2602412816633a38f025af4852a"
+
+containerd_nvme_conf="$script_dir/containerd-nvme.conf"
+containerd_config_toml="$script_dir/containerd-config.toml"
+
+# extract_heredoc_body <file> <marker>: print the body of a <<'<marker>'
+# heredoc, dedenting the YAML block-scalar indentation. The canonical repo files
+# are flush-left, so stripping leading whitespace reproduces their exact bytes.
+extract_heredoc_body() {
+  awk -v marker="$2" '
+    !p {
+      if (index($0, "<<") && index($0, marker)) { p = 1 }
+      next
+    }
+    $0 ~ ("^[[:space:]]*" marker "[[:space:]]*$") { exit }
+    { sub(/^[[:space:]]+/, ""); print }
+  ' "$1"
+}
+
+# extract_step_block <component-block> <step-name>: print exactly one build
+# step block, from its `- name: <step>` line up to the next `- name:` line.
+# Assertions scoped to this block cannot be satisfied by a token that merely
+# appears in another step or in a comment elsewhere in the component.
+extract_step_block() {
+  awk -v want="$2" '
+    $0 ~ ("^[[:space:]]*- name: " want "[[:space:]]*$") { p = 1 }
+    p && $0 ~ /^[[:space:]]*- name: / && $0 !~ ("- name: " want "[[:space:]]*$") { exit }
+    p { print }
+  ' <<<"$1"
+}
+
+check "repo containerd drop-in exists (deploy/aws/containerd-nvme.conf)" \
+  test -f "$containerd_nvme_conf"
+check "repo containerd config exists (deploy/aws/containerd-config.toml)" \
+  test -f "$containerd_config_toml"
+
+yaml_dropin_file="$work/yaml-containerd-nvme.conf"
+yaml_config_file="$work/yaml-containerd-config.toml"
+extract_heredoc_body "$infra_template" STRIMSERVER_CONTAINERD_NVME_EOF >"$yaml_dropin_file"
+extract_heredoc_body "$infra_template" STRIMSERVER_CONTAINERD_CONFIG_EOF >"$yaml_config_file"
+check "component YAML inlines a non-empty containerd drop-in block" \
+  test -s "$yaml_dropin_file"
+check "component YAML inlines a non-empty containerd config block" \
+  test -s "$yaml_config_file"
+check "component YAML inline drop-in bytes == deploy/aws/containerd-nvme.conf" \
+  bash -c 'cmp -s "$1" "$2"' _ "$yaml_dropin_file" "$containerd_nvme_conf"
+check "component YAML inline config bytes == deploy/aws/containerd-config.toml" \
+  bash -c 'cmp -s "$1" "$2"' _ "$yaml_config_file" "$containerd_config_toml"
+check "component YAML writes the inline config without an extra newline printf" \
+  bash -c '! grep -Fq "printf '\''\\n'\'' >> /etc/containerd/config.toml" <<<"$1"' _ "$component_block"
+
+# Real cross-artifact equality: execute lib/deploy.sh's helper against a
+# missing config in a temp dir. Its emitted bytes (root/state lines plus the
+# blank separator before any preserved settings) must be the repo file 1:1.
+helper_lib="$script_dir/lib/deploy.sh"
+check "repo lib/deploy.sh helper exists for containerd config equality" \
+  test -f "$helper_lib"
+# shellcheck source=lib/deploy.sh
+. "$helper_lib"
+helper_config="$work/helper-no-existing.toml"
+helper_out="$work/helper-emitted.toml"
+helper_rc=0
+deploy_prepend_containerd_root_state "$helper_config" "$helper_out" "" \
+  >/dev/null 2>&1 || helper_rc=$?
+check "deploy_prepend_containerd_root_state succeeds with no existing config" \
+  test "$helper_rc" -eq 0
+check "lib/deploy.sh helper output bytes == deploy/aws/containerd-config.toml" \
+  bash -c 'cmp -s "$1" "$2"' _ "$helper_out" "$containerd_config_toml"
+
+check "component version is $expected_component_version" \
+  bash -c 'grep -Eq "^      Version: \"$2\"$" <<<"$1"' _ "$component_block" "$expected_component_version"
+check "recipe version is $expected_recipe_version" \
+  bash -c 'grep -Eq "^      Version: \"$2\"$" <<<"$1"' _ "$recipe_block" "$expected_recipe_version"
+check "recipe version is bumped together with the component" \
+  bash -c '
+    c="$(grep -m1 "^      Version:" <<<"$1" | sed -E "s/.*\"(.*)\".*/\1/")"
+    r="$(grep -m1 "^      Version:" <<<"$2" | sed -E "s/.*\"(.*)\".*/\1/")"
+    [ -n "$c" ] && [ "$c" = "$r" ]
+  ' _ "$component_block" "$recipe_block"
+
+component_data_sha="$(awk '/^      Data: !Sub \|/{p=1;next} p' <<<"$component_block" | sha256sum | awk '{print $1}')"
+check "component Data sha256 matches the content lock stored beside version $expected_component_version" \
+  test "$component_data_sha" = "$expected_component_data_sha256"
+
+check "component bakes the containerd NVMe drop-in at the canonical path" \
+  bash -c 'grep -Fq "/etc/systemd/system/containerd.service.d/10-strimserver-nvme.conf" <<<"$1"' _ "$component_block"
+check "CleanNvmeResidue step exists" \
+  bash -c 'grep -Fq "name: CleanNvmeResidue" <<<"$1"' _ "$component_block"
+
+# Negative/ordering assertion: the residue cleanup must run strictly AFTER the
+# driver install (a cleanup before the driver closure is staged would be wiped by
+# the very install it is meant to clean up after).
+check "CleanNvmeResidue runs AFTER EstablishNvidiaDriverFloor (ordering)" \
+  bash -c '
+    a="$(grep -n "name: EstablishNvidiaDriverFloor" <<<"$1" | head -1 | cut -d: -f1)"
+    b="$(grep -n "name: CleanNvmeResidue" <<<"$1" | head -1 | cut -d: -f1)"
+    [ -n "$a" ] && [ -n "$b" ] && [ "$b" -gt "$a" ]
+  ' _ "$component_block"
+check "CleanNvmeResidue is the final step (after InstallExperimentalOpenSsh)" \
+  bash -c '
+    a="$(grep -n "name: InstallExperimentalOpenSsh" <<<"$1" | head -1 | cut -d: -f1)"
+    b="$(grep -n "name: CleanNvmeResidue" <<<"$1" | head -1 | cut -d: -f1)"
+    [ -n "$a" ] && [ -n "$b" ] && [ "$b" -gt "$a" ]
+  ' _ "$component_block"
+check "CleanNvmeResidue stops containerd before removing residue" \
+  bash -c '
+    s="$(grep -n "systemctl stop containerd.service containerd.socket" <<<"$1" | head -1 | cut -d: -f1)"
+    r="$(grep -n "rm -rf /mnt/nvme/nvidia-rpm" <<<"$1" | head -1 | cut -d: -f1)"
+    [ -n "$s" ] && [ -n "$r" ] && [ "$r" -gt "$s" ]
+  ' _ "$component_block"
+clean_residue_block="$(extract_step_block "$component_block" CleanNvmeResidue)"
+check "CleanNvmeResidue step block was extracted" test -n "$clean_residue_block"
+check "CleanNvmeResidue removes all three residue paths under /mnt/nvme" \
+  bash -c 'grep -Fq "rm -rf /mnt/nvme/nvidia-rpm /mnt/nvme/containerd /mnt/nvme/containerd-state" <<<"$1"' _ "$clean_residue_block"
+check "CleanNvmeResidue tolerantly stops containerd before removing residue" \
+  bash -c 'grep -Fq "systemctl stop containerd.service containerd.socket" <<<"$1" && grep -Fq "|| true" <<<"$1"' _ "$clean_residue_block"
+check "CleanNvmeResidue checks that driver-upgrade.state is absent" \
+  bash -c 'grep -Fq -- "-e /var/lib/strimserver/driver-upgrade.state" <<<"$1"' _ "$clean_residue_block"
+check "CleanNvmeResidue fails the build (exit 1) when residue/marker remain" \
+  bash -c 'grep -Fq "exit 1" <<<"$1"' _ "$clean_residue_block"
+check "CleanNvmeResidue emptiness probe no longer suppresses ls errors" \
+  bash -c '! grep -Fq "ls -A /mnt/nvme" <<<"$1"' _ "$clean_residue_block"
+check "CleanNvmeResidue emptiness probe is an rc-checked find under /mnt/nvme" \
+  bash -c 'grep -Fq "if ! residue=\"\$(find /mnt/nvme -mindepth 1 -print -quit)\"" <<<"$1"' _ "$clean_residue_block"
+check "no component command deletes the resume marker" \
+  bash -c '! grep -E "rm[^#]*driver-upgrade.state" <<<"$1"' _ "$component_block"
+
 if [[ "$failures" -eq 0 ]]; then
   echo "PASS: deploy-infra profile-run behaviour OK"
   exit 0
