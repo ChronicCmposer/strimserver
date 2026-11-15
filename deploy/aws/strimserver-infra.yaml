@@ -453,7 +453,18 @@ Resources:
       Content:
         schemaVersion: "0.3"
         description: Publish the baked strimserver AMI id to SSM.
+        # The automation MUST assume a role. StartAutomationExecution runs the
+        # steps with no implicit identity, so without assumeRole the
+        # executeAwsApi ssm:PutParameter step is Denied even though EventBridge
+        # successfully started the execution. The operator stack owns the role
+        # (deterministic name, trusted by ssm.amazonaws.com, scoped to this
+        # document + parameter), so bind it here by ARN.
+        assumeRole: "{{ AutomationAssumeRole }}"
         parameters:
+          AutomationAssumeRole:
+            type: String
+            description: Role the automation assumes to publish the parameter.
+            default: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-baked-publish-role"
           AmiId:
             type: String
             description: AMI id produced by the Image Builder pipeline.

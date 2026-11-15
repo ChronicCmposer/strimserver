@@ -441,6 +441,31 @@ document_block="$(extract_template_resource BakedAmiPublishDocument)"
 check "SSM publish document sets Properties.Name (valid AWS::SSM::Document property)" \
   test "$(property_value "$document_block" Name)" = '!Sub "${ProjectName}-baked-ami-publish"'
 
+# The automation must ASSUME the operator-owned publish role. Without an
+# assumeRole binding the steps run with no assumed identity, so the
+# ssm:PutParameter step is denied even though EventBridge started the execution.
+automation_role_param="$(awk '
+  /^          AutomationAssumeRole:[[:space:]]*$/ {p=1; next}
+  p && /^          [A-Za-z0-9]+:/ {p=0}
+  p {print}
+' <<<"$document_block")"
+check "publish document declares the AutomationAssumeRole parameter" \
+  bash -c 'grep -Fq "AutomationAssumeRole:" <<<"$1"' _ "$document_block"
+check "AutomationAssumeRole parameter is a String" \
+  bash -c 'grep -Fq "type: String" <<<"$1"' _ "$automation_role_param"
+check "AutomationAssumeRole defaults to the ProjectName-derived publish role ARN" \
+  bash -c 'grep -Fq -- "$2" <<<"$1"' _ "$automation_role_param" \
+    'default: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-baked-publish-role"'
+check "publish document binds the top-level assumeRole to AutomationAssumeRole" \
+  bash -c 'grep -Fxq "        assumeRole: \"{{ AutomationAssumeRole }}\"" <<<"$1"' _ "$document_block"
+
+# The role binding is additive: the parameter and step that actually publish
+# the AMI id must survive unchanged.
+check "publish document keeps the AmiId String parameter" \
+  bash -c 'grep -Fq "AmiId:" <<<"$1"' _ "$document_block"
+check "publish document keeps the executeAwsApi PutParameter step" \
+  bash -c 'grep -Fq "name: putBakedAmiParameter" <<<"$1" && grep -Fq "Api: PutParameter" <<<"$1"' _ "$document_block"
+
 publish_rule_name="$(property_value "$publish_rule_block" Name)"
 publish_rule_keys="$(properties_keys "$publish_rule_block")"
 
