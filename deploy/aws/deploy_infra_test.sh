@@ -341,6 +341,20 @@ property_value() { # property_value <resource-block> <key>
   ' <<<"$1"
 }
 
+# input_template_scalar <resource-block>: print the raw YAML scalar assigned to
+# the target's InputTemplate. It is a single-quoted YAML string holding JSON, so
+# the surrounding quotes are stripped to expose the JSON template EventBridge
+# actually interpolates.
+input_template_scalar() {
+  awk '
+    /^[[:space:]]*InputTemplate:[[:space:]]*/ {
+      sub(/^[[:space:]]*InputTemplate:[[:space:]]*/, "")
+      print
+      exit
+    }
+  ' <<<"$1"
+}
+
 check "infra template exists" test -f "$infra_template"
 check "operator template exists" test -f "$operator_template"
 
@@ -434,6 +448,21 @@ check "BakedAmiPublishRule sets Properties.Name to the deterministic ProjectName
   test "$publish_rule_name" = '!Sub "${ProjectName}-baked-ami-publish"'
 check "BakedAmiPublishRule has no invalid RuleName property (Events Rule property is Name)" \
   bash -c '! grep -Fxq "RuleName" <<<"$1"' _ "$publish_rule_keys"
+
+# The target's InputTemplate is JSON with an EventBridge <ami> placeholder. An
+# unquoted placeholder makes EventBridge emit {"AmiId": ami-...} (invalid JSON),
+# so StartAutomationExecution fails at target invocation. Pin both the quoted
+# placeholder and end-to-end JSON validity after substitution.
+sample_ami="ami-0123456789abcdef0"
+publish_input_template="$(input_template_scalar "$publish_rule_block")"
+publish_input_template="${publish_input_template#\'}"
+publish_input_template="${publish_input_template%\'}"
+check "BakedAmiPublishRule InputTemplate contains the QUOTED <ami> placeholder" \
+  bash -c 'grep -Fq -- "$2" <<<"$1"' _ "$publish_input_template" '"<ami>"'
+check "BakedAmiPublishRule InputTemplate renders valid JSON once <ami> is substituted" \
+  bash -c 'printf "%s" "$1" | sed "s/<ami>/$2/" | python3 -c "import json, sys; json.load(sys.stdin)"' \
+    _ "$publish_input_template" "$sample_ami"
+
 check "publish Name matches the operator policy's events rule scope" \
   bash -c 'grep -Fq "rule/\${ProjectName}-baked-ami-publish" "$1"' _ "$operator_template"
 

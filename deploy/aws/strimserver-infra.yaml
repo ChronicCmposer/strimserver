@@ -496,7 +496,7 @@ Resources:
           InputTransformer:
             InputPathsMap:
               ami: "$.detail.outputResources.amis[0].image"
-            InputTemplate: '{"AmiId": <ami>}'
+            InputTemplate: '{"AmiId": "<ami>"}'
 
 Outputs:
   SecurityGroupId:
