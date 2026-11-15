@@ -357,6 +357,7 @@ check "NvidiaDriverFloor parameter default equals the repo floor" \
 
 component_block="$(extract_template_resource BakedImageComponent)"
 recipe_block="$(extract_template_resource BakedImageRecipe)"
+log_group_block="$(extract_template_resource BakedImageBuilderLogs)"
 infra_config_block="$(extract_template_resource BakedInfrastructureConfiguration)"
 distribution_block="$(extract_template_resource BakedDistributionConfiguration)"
 pipeline_block="$(extract_template_resource BakedImagePipeline)"
@@ -413,6 +414,22 @@ check "InfrastructureConfiguration launches into the stack-managed subnet" \
   bash -c 'grep -Fq "SubnetId: !Ref ManagedSubnet" <<<"$1"' _ "$infra_config_block"
 check "InfrastructureConfiguration attaches the stack instance security group" \
   bash -c 'grep -Fq "SecurityGroupIds: [!Ref InstanceSecurityGroup]" <<<"$1"' _ "$infra_config_block"
+# AMI build logs are ALWAYS retained: without a Logging configuration the bake
+# produces no build log at all, so a bad bake (the DKMS incident) is
+# undiagnosable. The log group is a first-class resource with bounded retention.
+check "Image Builder build-log group exists (AWS::Logs::LogGroup)" \
+  bash -c 'grep -Fq "Type: AWS::Logs::LogGroup" <<<"$1"' _ "$log_group_block"
+check "build-log group is named /aws/imagebuilder/strimserver-baked" \
+  bash -c 'grep -Fq "LogGroupName: /aws/imagebuilder/strimserver-baked" <<<"$1"' _ "$log_group_block"
+check "build-log group retains logs for 90 days" \
+  bash -c 'grep -Fq "RetentionInDays: 90" <<<"$1"' _ "$log_group_block"
+check "build-log group carries the Project tag" \
+  bash -c 'grep -Fq "Key: Project" <<<"$1" && grep -Fq "Value: !Ref ProjectName" <<<"$1"' _ "$log_group_block"
+check "InfrastructureConfiguration enables CloudWatch logging" \
+  bash -c 'grep -Fq "Logging:" <<<"$1" && grep -Fq "CloudWatchLogs:" <<<"$1"' _ "$infra_config_block"
+check "CloudWatch logging wires the build-log group ARN (no empty s3Logs)" \
+  bash -c 'grep -Fq "LogGroupArn: !GetAtt BakedImageBuilderLogs.Arn" <<<"$1" && ! grep -Fq "s3Logs: {}" <<<"$1"' _ "$infra_config_block"
+
 # Image Builder publishes the produced AMI id natively during the DISTRIBUTION
 # phase. SsmParameterConfigurations is a SIBLING of AmiDistributionConfiguration
 # on the regional Distribution entry -- not a child of it, and there is no
@@ -456,8 +473,8 @@ check "produced AMI id is published to /strimserver/ami/baked/latest" \
 # a sha256 content lock stored beside the expected version so any change forces a
 # conscious version bump.
 # ---------------------------------------------------------------------------
-expected_component_version="1.0.2"
-expected_recipe_version="1.0.2"
+expected_component_version="1.0.3"
+expected_recipe_version="1.0.3"
 expected_component_data_sha256="7ecd476d6ea6cc8ff6d45c46b275110f025358e1006f21f38a9284f7ae3eafa5"
 
 containerd_nvme_conf="$script_dir/containerd-nvme.conf"

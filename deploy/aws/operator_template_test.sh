@@ -645,6 +645,19 @@ check "pipeline execution role attaches the EC2ImageBuilderExecutionPolicy manag
 check "pipeline execution role keeps its inline policy alongside the managed policy" \
   bash -c 'grep -Fq "Policies:" <<<"$1" && grep -Fq "ssm:PutParameter" <<<"$1"' _ "$execution_role"
 
+# --- baked-AMI Image Builder build-log grant (instance profile) --------------
+# Image Builder delivers build logs through the build-instance profile. The
+# execution-role grant alone proved insufficient because the Logging property
+# was never set, so BOTH roles carry the logs grant (belt and suspenders).
+ib_instance_role="$(extract_resource "$operator_template" BakedImageBuilderInstanceRole)"
+check "Image Builder instance role carries an inline policy" \
+  bash -c 'grep -Fq "Policies:" <<<"$1"' _ "$ib_instance_role"
+check "Image Builder instance role can create/manage CloudWatch log streams" \
+  bash -c 'grep -Fq "logs:CreateLogGroup" <<<"$1" && grep -Fq "logs:CreateLogStream" <<<"$1" && grep -Fq "logs:PutLogEvents" <<<"$1"' _ "$ib_instance_role"
+check "Image Builder instance role logs grant is scoped to /aws/imagebuilder/*" \
+  bash -c 'grep -Fq "arn:aws:logs:*:\${AWS::AccountId}:log-group:/aws/imagebuilder/*" <<<"$1"' _ "$ib_instance_role"
+
+
 # --- infra template: ExecutionRole wiring + AvailabilityZone -----------------
 pipeline_block="$(extract_resource "$infra_template" BakedImagePipeline)"
 check "ImagePipeline wires the Image Builder execution role" \

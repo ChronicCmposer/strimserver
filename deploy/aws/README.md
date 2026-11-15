@@ -435,6 +435,23 @@ if it already pre-exists when CloudFormation validates the template; the
 existing `SsmDlamiLookup` statement covers it, and `launch` uses it to resolve
 the baked AMI before falling back to the DLAMI.
 
+### AMI build logs
+
+Every bake logs to the CloudWatch Logs group `/aws/imagebuilder/strimserver-baked`
+(us-east-2) with 90-day retention. Logs are **always on**: the infrastructure
+configuration sets `Logging.CloudWatchLogs`, and both Image Builder roles
+(instance profile and execution role) carry the `logs:*` write grant. A bake
+that emits no log is undiagnosable — the DKMS incident shipped an image whose
+`PurgeStaleNvidiaDkms` effects were absent, and there was no build log to show
+why.
+
+View the latest build's per-step output in the Image Builder console (the
+pipeline's build history links to the log stream), or tail it:
+
+```sh
+aws logs tail /aws/imagebuilder/strimserver-baked --follow
+```
+
 Deploy in two steps. `provision-account` is the only admin-run script: it
 deploys the operator stack, mints the service account's access key into the
 local `[strimserver]` profile (backing up `~/.aws/credentials` and

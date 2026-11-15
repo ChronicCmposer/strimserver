@@ -319,7 +319,7 @@ Resources:
       Name: strimserver-baked-base
       Description: strimserver baked base (driver floor, htop, openssh, containerd)
       Platform: Linux
-      Version: "1.0.2"
+      Version: "1.0.3"
       ChangeDescription: purge stale below-floor NVIDIA DKMS state before baking
       # Fn::Sub interpolates ONLY the two URL parameters; the sourced nvidia.sh
       # owns the floor version and the stage-then-swap logic, so a threshold
@@ -563,13 +563,26 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: strimserver-baked-recipe
-      Version: "1.0.2"
+      Version: "1.0.3"
       ParentImage: ami-0198b63ccfac121e8
       Components:
         - ComponentArn: !Ref BakedImageComponent
       Tags:
         Project: !Ref ProjectName
         "strimserver:nvidia-driver": !Ref NvidiaDriverFloor
+
+  # AMI build logs are ALWAYS retained (design rule). A bake without logs is
+  # undiagnosable: the DKMS incident shipped an image whose PurgeStaleNvidiaDkms
+  # effects were absent, and there was no build log to show why. Image Builder
+  # writes each phase/step's output here, so Logging is never left unset.
+  BakedImageBuilderLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/imagebuilder/strimserver-baked
+      RetentionInDays: 90
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
 
   # The build-instance profile is owned by the operator stack; reference it by
   # the same deterministic name (no cross-stack ImportValue, matching the
@@ -589,6 +602,11 @@ Resources:
       InstanceTypes:
         - g4dn.xlarge
       TerminateInstanceOnFailure: true
+      # Always-on build logging (see BakedImageBuilderLogs). Without this the
+      # bake retains no log anywhere and a bad image cannot be diagnosed.
+      Logging:
+        CloudWatchLogs:
+          LogGroupArn: !GetAtt BakedImageBuilderLogs.Arn
       Tags:
         Project: !Ref ProjectName
 

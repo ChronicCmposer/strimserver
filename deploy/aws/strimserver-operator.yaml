@@ -539,6 +539,22 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      # Image Builder delivers build logs through the build-instance profile.
+      # The execution-role logs grant alone proved insufficient because the
+      # InfrastructureConfiguration's Logging property was never set, so both
+      # roles carry the grant (belt and suspenders).
+      Policies:
+        - PolicyName: BuildLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/imagebuilder/*"
       Tags:
         - Key: Project
           Value: !Ref ProjectName
