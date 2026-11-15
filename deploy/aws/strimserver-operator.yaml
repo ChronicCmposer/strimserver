@@ -333,6 +333,41 @@ Resources:
               - cloudformation:ExecuteChangeSet
               - cloudformation:DeleteChangeSet
             Resource: !Sub "arn:aws:cloudformation:*:${AWS::AccountId}:stack/${ProjectName}/*"
+          # deploy-infra runs as THIS identity and the regional stack owns the
+          # BakedImageBuilderLogs group. The operator previously had NO CloudWatch
+          # Logs permissions: a bake was undiagnosable because Image Builder
+          # Logging was unconfigured, and the subsequent deploy failed because
+          # CreateLogGroup -- and, during rollback, DeleteLogGroup -- were denied,
+          # orphaning /aws/imagebuilder/strimserver-baked. Grant exactly the group
+          # lifecycle the CloudFormation handler needs, scoped to Image Builder's
+          # log namespace.
+          - Sid: BakeBuildLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+            Resource: !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/imagebuilder/*"
+          # Reading the bake logs is the point of retaining them: the operator
+          # must be able to inspect build output when a bake fails. Scoped to the
+          # same Image Builder log namespace.
+          - Sid: BakeBuildLogsRead
+            Effect: Allow
+            Action:
+              - logs:DescribeLogStreams
+              - logs:GetLogEvents
+              - logs:FilterLogEvents
+            Resource: !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/imagebuilder/*"
+          # logs:DescribeLogGroups is a list action without resource-level support,
+          # so it cannot be scoped to a group ARN and must stay on Resource "*".
+          - Sid: BakeBuildLogsListGroups
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+            Resource: "*"
           - Sid: SsmDlamiLookup
             Effect: Allow
             Action: ssm:GetParameter

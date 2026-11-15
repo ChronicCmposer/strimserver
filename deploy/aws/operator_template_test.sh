@@ -317,7 +317,8 @@ deploy_launch_sids="CloudFormationReadStack CloudFormationGetTemplateSummary \
 CloudFormationDeployStack SsmDlamiLookup SelfKeyRotation PassStrimserverRole \
 PassImageBuilderRoles GetImageBuilderInstanceProfile ImageBuilderServiceLinkedRole \
 Ec2Describe Ec2RunInstances Ec2RunInstancesDependencies Ec2CreateTags \
-Ec2TerminateInstances S3BucketConfig S3Objects"
+Ec2TerminateInstances S3BucketConfig S3Objects BakeBuildLogs \
+BakeBuildLogsRead BakeBuildLogsListGroups"
 infra_lifecycle_sids="Ec2VpcLifecycle ImageBuilderRead ImageBuilderLifecycle \
 ImageBuilderRebuild"
 for sid in $deploy_launch_sids; do
@@ -656,6 +657,31 @@ check "Image Builder instance role can create/manage CloudWatch log streams" \
   bash -c 'grep -Fq "logs:CreateLogGroup" <<<"$1" && grep -Fq "logs:CreateLogStream" <<<"$1" && grep -Fq "logs:PutLogEvents" <<<"$1"' _ "$ib_instance_role"
 check "Image Builder instance role logs grant is scoped to /aws/imagebuilder/*" \
   bash -c 'grep -Fq "arn:aws:logs:*:\${AWS::AccountId}:log-group:/aws/imagebuilder/*" <<<"$1"' _ "$ib_instance_role"
+
+# --- operator bake-log management (CloudFormation LogGroup lifecycle) --------
+# deploy-infra runs as the operator and the regional stack owns the
+# BakedImageBuilderLogs group. The operator previously had NO CloudWatch Logs
+# permissions: a bake was undiagnosable because Logging was unconfigured, and the
+# subsequent deploy failed because CreateLogGroup -- and, during rollback,
+# DeleteLogGroup -- were denied, orphaning /aws/imagebuilder/strimserver-baked.
+# These assertions pin the least-privilege remediation on the operator identity.
+bake_logs_stmt="$(extract_statement BakeBuildLogs)"
+bake_logs_read_stmt="$(extract_statement BakeBuildLogsRead)"
+bake_logs_list_stmt="$(extract_statement BakeBuildLogsListGroups)"
+check "operator policy manages the baked-AMI log group (BakeBuildLogs)" \
+  bash -c 'grep -Fq "logs:CreateLogGroup" <<<"$1"' _ "$bake_logs_stmt"
+check "BakeBuildLogs grants the full log-group lifecycle" \
+  bash -c 'for a in CreateLogGroup DeleteLogGroup TagResource UntagResource PutRetentionPolicy DeleteRetentionPolicy; do grep -Fq "logs:$a" <<<"$1" || exit 1; done' _ "$bake_logs_stmt"
+check "BakeBuildLogs is scoped to /aws/imagebuilder/* (Partition/AccountId/region wildcard)" \
+  bash -c 'grep -Fq "arn:\${AWS::Partition}:logs:*:\${AWS::AccountId}:log-group:/aws/imagebuilder/*" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$bake_logs_stmt"
+check "BakeBuildLogs omits logs:DeleteLogStream (not needed)" \
+  bash -c '! grep -Fq "logs:DeleteLogStream" <<<"$1"' _ "$bake_logs_stmt"
+check "BakeBuildLogsRead lets the operator read bake logs" \
+  bash -c 'for a in DescribeLogStreams GetLogEvents FilterLogEvents; do grep -Fq "logs:$a" <<<"$1" || exit 1; done' _ "$bake_logs_read_stmt"
+check "BakeBuildLogsRead is scoped to /aws/imagebuilder/*" \
+  bash -c 'grep -Fq "arn:\${AWS::Partition}:logs:*:\${AWS::AccountId}:log-group:/aws/imagebuilder/*" <<<"$1" && ! grep -Fq "Resource: \"*\"" <<<"$1"' _ "$bake_logs_read_stmt"
+check "BakeBuildLogsListGroups grants logs:DescribeLogGroups on Resource \"*\"" \
+  bash -c 'grep -Fq "logs:DescribeLogGroups" <<<"$1" && grep -Fq "Resource: \"*\"" <<<"$1"' _ "$bake_logs_list_stmt"
 
 
 # --- infra template: ExecutionRole wiring + AvailabilityZone -----------------
