@@ -107,7 +107,14 @@ is_dotted_quad() {
 }
 
 # --- preamble step 1: acquire the non-blocking deploy lock -------------------
-sudo touch "$LOCK_FILE"
+# Create the lock file root-owned and world-readable. On a rerun an earlier
+# deploy may have left it 0600; chmod fixes the mode while preserving the inode,
+# so flock mutual exclusion survives repeated deploys.
+if [ -e "$LOCK_FILE" ]; then
+   sudo chmod 0644 "$LOCK_FILE"
+else
+   sudo install -m 0644 -o root -g root /dev/null "$LOCK_FILE"
+fi
 exec 9<"$LOCK_FILE"
 if ! flock -n 9; then
    printf 'another deploy is running\n'

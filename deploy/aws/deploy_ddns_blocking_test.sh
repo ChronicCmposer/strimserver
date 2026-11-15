@@ -106,6 +106,10 @@ static_checks() {
   grep -q "trap 'exit 130' INT" "$deploy_sh" || return 1
   grep -q "trap 'exit 143' TERM" "$deploy_sh" || return 1
   grep -q 'flock -n 9' "$deploy_sh" || return 1
+  # The lock file is created with its mode pinned (idempotent on reruns); a bare
+  # sudo touch would leave a pre-existing 0600 file unreadable by exec 9<.
+  grep -qF 'sudo install -m 0644 -o root -g root /dev/null "$LOCK_FILE"' "$deploy_sh" || return 1
+  ! grep -qF 'sudo touch "$LOCK_FILE"' "$deploy_sh" || return 1
   grep -qF 'exec 9<"$LOCK_FILE"' "$deploy_sh" || return 1
   grep -q 'flock -u 9' "$deploy_sh" || return 1
   # Read-only observers close fd 9. The orphan-import guard (not fd inheritance)
