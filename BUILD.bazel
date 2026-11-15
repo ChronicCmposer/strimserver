@@ -76,6 +76,8 @@ pkg_files(
     srcs = [
         "//deploy/aws:deploy.sh",
         "//deploy/aws:setup-gpu.sh",
+        # stackctl's SETUP_ENTRYPOINT; runs on the instance before deploy.sh.
+        "//deploy/aws:stackctl-setup.sh",
         "//core:transcode.sh",
         "//core:notify",
     ],
@@ -95,6 +97,8 @@ pkg_files(
         "//deploy/aws:imdslib.sh",
         "//deploy/aws:prompt_login.fish",
         "//core:strimserver.env",
+        # Rendered by stackctl-setup.sh at boot (Twitch key from SSM).
+        "//core:strimserver.env.template",
         "//core:mediamtx.yaml.template",
         # Static template shipped at the bundle root; deploy.sh substitutes
         # __EXPECTED_IP__ at deploy time (reads it from $script_dir).

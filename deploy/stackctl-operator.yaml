@@ -1,0 +1,405 @@
+# Vendored from stackctl v0.1.2 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+AWSTemplateFormatVersion: "2010-09-09"
+Description: stackctl account-global operator stack - instance role, operator managed policy, optional CI user and Image Builder roles.
+Parameters:
+  ProjectName:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9]+$"
+    Description: Project identifier - hyphen-free and equal to the stack name prefix. The per-REGION length bound (derived from the longest S3 bucket name) is enforced by stackctl config validation, the single source of truth.
+  InstanceTypeAllowlist:
+    Type: CommaDelimitedList
+    Description: Union of instance types allowed for this project across all region variants.
+  ReleasePrefixes:
+    Type: CommaDelimitedList
+    Description: S3 release prefixes readable by the CI reader role.
+  EnableImageBuilder:
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "false"
+    Description: Create the baked-image Image Builder roles when true.
+  EnableCiUser:
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "false"
+    Description: Create the project CI user and artifact reader policy when true.
+  CertBucketEnabled:
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+    Description: Grant the instance role access to the cert bucket module (BUCKET_MODULES contains cert) when true.
+  PermissionsBoundaryArn:
+    Type: String
+    Default: ""
+    Description: Optional IAM permissions boundary applied to the instance role.
+Conditions:
+  EnableImageBuilderCondition: !Equals [!Ref EnableImageBuilder, "true"]
+  EnableCiUserCondition: !Equals [!Ref EnableCiUser, "true"]
+  CertBucketEnabledCondition: !Equals [!Ref CertBucketEnabled, "true"]
+  HasPermissionsBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, ""]]
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-instance-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      PermissionsBoundary: !If [HasPermissionsBoundary, !Ref PermissionsBoundaryArn, !Ref "AWS::NoValue"]
+      Policies:
+        - PolicyName: ArtifactReadAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ArtifactList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - releases/*
+              - Sid: ArtifactRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
+              - Sid: OnboxSecretRead
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/*
+        - Fn::If:
+            - CertBucketEnabledCondition
+            - PolicyName: CertStorageAccess
+              PolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                  - Sid: CertList
+                    Effect: Allow
+                    Action: s3:ListBucket
+                    Resource: !Sub arn:aws:s3:::${ProjectName}-certs-${AWS::AccountId}-*
+                    Condition:
+                      StringLike:
+                        s3:prefix:
+                          - certs/*
+                  - Sid: CertObjects
+                    Effect: Allow
+                    Action:
+                      - s3:GetObject
+                      - s3:PutObject
+                      - s3:DeleteObject
+                    Resource: !Sub arn:aws:s3:::${ProjectName}-certs-${AWS::AccountId}-*/certs/*
+            - !Ref "AWS::NoValue"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${ProjectName}-instance-role
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${ProjectName}-instance-profile
+      Roles:
+        - !Ref InstanceRole
+  OperatorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-operator
+      Description: Project-scoped operator policy - all resources region-wildcarded.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RunInstancesTagged
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ec2:CreateAction: ec2:RunInstances
+                aws:RequestTag/Project: !Ref ProjectName
+              ForAllValues:StringEquals:
+                ec2:InstanceType: !Ref InstanceTypeAllowlist
+                aws:TagKeys:
+                  - Project
+                  - Name
+                  - stackctl:launch-nonce
+          - Sid: RunInstancesDependencies
+            Effect: Allow
+            Action:
+              - ec2:RunInstances
+              - ec2:CreateVolume
+              - ec2:CreateNetworkInterface
+            Resource:
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:volume/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:network-interface/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:subnet/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:image/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:key-pair/*
+          - Sid: TerminateTagged
+            Effect: Allow
+            Action: ec2:TerminateInstances
+            Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ec2:ResourceTag/Project: !Ref ProjectName
+          - Sid: CreateTagsOnLaunch
+            Effect: Allow
+            Action: ec2:CreateTags
+            Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ec2:CreateAction: ec2:RunInstances
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                  - Project
+                  - Name
+                  - stackctl:launch-nonce
+          - Sid: PassInstanceRole
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-instance-role
+            Condition:
+              StringEquals:
+                iam:PassedToService: ec2.amazonaws.com
+          - Sid: SelfKeyRotation
+            Effect: Allow
+            Action:
+              - iam:CreateAccessKey
+              - iam:DeleteAccessKey
+              - iam:UpdateAccessKey
+              - iam:ListAccessKeys
+            Resource: !Sub arn:aws:iam::${AWS::AccountId}:user/${ProjectName}-ci
+          - Sid: TemplateSummary
+            Effect: Allow
+            Action: cloudformation:GetTemplateSummary
+            Resource: "*"
+          - Sid: ChangeSetLifecycle
+            Effect: Allow
+            Action:
+              - cloudformation:CreateChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DeleteChangeSet
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+            Resource: !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/${ProjectName}-*/*
+          - Sid: DeleteInfraStack
+            Effect: Allow
+            Action: cloudformation:DeleteStack
+            Resource: !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/${ProjectName}-infra/*
+          - Sid: VpcLifecycle
+            Effect: Allow
+            Action:
+              - ec2:CreateVpc
+              - ec2:DeleteVpc
+              - ec2:ModifyVpcAttribute
+              - ec2:CreateSubnet
+              - ec2:DeleteSubnet
+              - ec2:ModifySubnetAttribute
+              - ec2:CreateSecurityGroup
+              - ec2:DeleteSecurityGroup
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:CreateInternetGateway
+              - ec2:DeleteInternetGateway
+              - ec2:AttachInternetGateway
+              - ec2:DetachInternetGateway
+              - ec2:CreateRouteTable
+              - ec2:DeleteRouteTable
+              - ec2:CreateRoute
+              - ec2:DeleteRoute
+              - ec2:AssociateRouteTable
+              - ec2:DisassociateRouteTable
+              - ec2:CreateTags
+            Resource:
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:vpc/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:subnet/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:internet-gateway/*
+              - !Sub arn:aws:ec2:*:${AWS::AccountId}:route-table/*
+          - Sid: DdnsSecretRead
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+            Resource: !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/*
+          - Sid: ConsoleOutputTagged
+            Effect: Allow
+            Action: ec2:GetConsoleOutput
+            Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ec2:ResourceTag/Project: !Ref ProjectName
+          - Sid: ArtifactBucketList
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - releases/*
+                  - releases
+          - Sid: ArtifactReleases
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
+          - Sid: ReadOnlyDescribe
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeImages
+              - ec2:DescribeVpcs
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeKeyPairs
+              - ec2:DescribeVolumes
+              - ec2:DescribeInstanceStatus
+              - ec2:DescribeSpotPriceHistory
+            Resource: "*"
+  OperatorUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Ref ProjectName
+      ManagedPolicyArns:
+        - !Ref OperatorPolicy
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+  CiUser:
+    Type: AWS::IAM::User
+    Condition: EnableCiUserCondition
+    Properties:
+      UserName: !Sub ${ProjectName}-ci
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+  CiAccessKey:
+    Type: AWS::IAM::AccessKey
+    Condition: EnableCiUserCondition
+    Properties:
+      UserName: !Ref CiUser
+  ArtifactReaderPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: EnableCiUserCondition
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-artifact-reader
+      Description: CI reader scoped to configured release prefixes.
+      Users:
+        - !Ref CiUser
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReleaseList
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*
+            Condition:
+              StringLike:
+                s3:prefix: !Ref ReleasePrefixes
+          - Sid: ReleaseRead
+            Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
+  BakedImageBuilderInstanceRole:
+    Type: AWS::IAM::Role
+    Condition: EnableImageBuilderCondition
+    Properties:
+      RoleName: !Sub ${ProjectName}-baked-imagebuilder-instance-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BakedImageArtifactRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadReleases
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
+  BakedImageBuilderInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: EnableImageBuilderCondition
+    Properties:
+      InstanceProfileName: !Sub ${ProjectName}-baked-imagebuilder-instance-profile
+      Roles:
+        - !Ref BakedImageBuilderInstanceRole
+  ImageBuilderExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: EnableImageBuilderCondition
+    Properties:
+      RoleName: !Sub ${ProjectName}-imagebuilder-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ImageBuilderExecution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BuildArtifactsRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
+              - Sid: BakedAmiPublish
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/ami/baked/*
+  BakedAmiPublishRole:
+    Type: AWS::IAM::Role
+    Condition: EnableImageBuilderCondition
+    Properties:
+      RoleName: !Sub ${ProjectName}-baked-ami-publish-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BakedAmiPublish
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PublishLatestAmi
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/ami/baked/latest
+Outputs:
+  InstanceRoleArn:
+    Value: !GetAtt InstanceRole.Arn
+  InstanceProfileArn:
+    Value: !GetAtt InstanceProfile.Arn
+  OperatorPolicyArn:
+    Value: !Ref OperatorPolicy
+  CiUserName:
+    Value: !If [EnableCiUserCondition, !Ref CiUser, "-"]

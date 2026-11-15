@@ -1,3 +1,4 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 exports_files(
@@ -9,12 +10,29 @@ exports_files(
         "imdslib.sh",
         "prompt_login.fish",
         "setup-gpu.sh",
+        "stackctl-setup.sh",
+        "stackctl.sh",
         "strim-ddns.service.template",
         "strim-ddns-verify.service.template",
         "strim-ddns.timer",
     ],
-    # deploy.sh is consumed by //core:security_hygiene_test.
+    # deploy.sh is consumed by //core:security_hygiene_test; stackctl-setup.sh
+    # is a member of the deployment tar assembled by the root package.
     visibility = ["//visibility:public"],
+)
+
+# --- stackctl wrapper -------------------------------------------------------
+# Runs the pinned @stackctl binary against deploy/aws so operators never need
+# an installed stackctl. See docs/onboarding.md Step 2 in the stackctl repo.
+sh_binary(
+    name = "stackctl",
+    srcs = ["stackctl.sh"],
+    data = ["@stackctl//core/cli/dispatch:stackctl"],
+    env = {
+        # rlocationpath (not rootpath): under bzlmod the external repo lives at
+        # the runfiles root, not below the main-repo package directory.
+        "STACKCTL_BIN": "$(rlocationpath @stackctl//core/cli/dispatch:stackctl)",
+    },
 )
 
 # --- Generated systemd units (Go / C controller variants) --------------------

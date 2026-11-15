@@ -1,0 +1,636 @@
+# Vendored from stackctl v0.1.2 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+AWSTemplateFormatVersion: "2010-09-09"
+Description: stackctl regional infra stack - VPC, subnet, security group, retained buckets, optional Image Builder and spot alerts.
+Parameters:
+  ProjectName:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9]+$"
+    Description: Project identifier - hyphen-free and equal to the stack name prefix. The per-REGION length bound (derived from the longest S3 bucket name) is enforced by stackctl config validation, the single source of truth.
+  ReleaseTag:
+    Type: String
+    Description: Release tag recorded as stack metadata and resource metadata.
+  ReleaseManifestSha256:
+    Type: String
+    AllowedPattern: "^[a-f0-9]{64}$"
+    Description: SHA-256 of the release manifest recorded as resource metadata.
+  AmiPolicy:
+    Type: String
+    AllowedValues:
+      - pinned
+      - ssm
+      - baked
+    Default: ssm
+    Description: AMI resolution policy - only pinned carries explicit AMI ids.
+  AmiIdAmd64:
+    Type: String
+    Default: ""
+    Description: Pinned amd64 AMI id used when AmiPolicy is pinned.
+  AmiIdArm64:
+    Type: String
+    Default: ""
+    Description: Pinned arm64 AMI id used when AmiPolicy is pinned.
+  ImageBuilderParentImage:
+    Type: String
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+    Description: SSM public parameter path used as the Image Builder parent image.
+  OperatorCidr:
+    Type: String
+    Default: ""
+    Description: CIDR allowed to SSH to the instance - empty omits the SSH ingress rule.
+  IngressTcp:
+    Type: CommaDelimitedList
+    Default: "443"
+    Description: INGRESS_TCP - comma list of port[:cidr] application TCP rules (audit copy). stackctl expands each item into the indexed IngressTcpPort<N>/IngressTcpCidr<N> parameters below; an item without :cidr uses the documented default 0.0.0.0/0.
+  IngressUdp:
+    Type: CommaDelimitedList
+    Default: "53"
+    Description: INGRESS_UDP - comma list of port[:cidr] application UDP rules (audit copy). stackctl expands each item into the indexed IngressUdpPort<N>/IngressUdpCidr<N> parameters below; an item without :cidr uses the documented default 0.0.0.0/0.
+  IngressTcpPort0:
+    Type: String
+    Default: ""
+    Description: Application TCP port for INGRESS_TCP item 0 - empty disables the rule.
+  IngressTcpCidr0:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_TCP item 0 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressTcpPort1:
+    Type: String
+    Default: ""
+    Description: Application TCP port for INGRESS_TCP item 1 - empty disables the rule.
+  IngressTcpCidr1:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_TCP item 1 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressTcpPort2:
+    Type: String
+    Default: ""
+    Description: Application TCP port for INGRESS_TCP item 2 - empty disables the rule.
+  IngressTcpCidr2:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_TCP item 2 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressTcpPort3:
+    Type: String
+    Default: ""
+    Description: Application TCP port for INGRESS_TCP item 3 - empty disables the rule.
+  IngressTcpCidr3:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_TCP item 3 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressTcpPort4:
+    Type: String
+    Default: ""
+    Description: Application TCP port for INGRESS_TCP item 4 - empty disables the rule.
+  IngressTcpCidr4:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_TCP item 4 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressTcpPort5:
+    Type: String
+    Default: ""
+    Description: Application TCP port for INGRESS_TCP item 5 - empty disables the rule.
+  IngressTcpCidr5:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_TCP item 5 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressTcpPort6:
+    Type: String
+    Default: ""
+    Description: Application TCP port for INGRESS_TCP item 6 - empty disables the rule.
+  IngressTcpCidr6:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_TCP item 6 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressTcpPort7:
+    Type: String
+    Default: ""
+    Description: Application TCP port for INGRESS_TCP item 7 - empty disables the rule.
+  IngressTcpCidr7:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_TCP item 7 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressUdpPort0:
+    Type: String
+    Default: ""
+    Description: Application UDP port for INGRESS_UDP item 0 - empty disables the rule.
+  IngressUdpCidr0:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_UDP item 0 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressUdpPort1:
+    Type: String
+    Default: ""
+    Description: Application UDP port for INGRESS_UDP item 1 - empty disables the rule.
+  IngressUdpCidr1:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_UDP item 1 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressUdpPort2:
+    Type: String
+    Default: ""
+    Description: Application UDP port for INGRESS_UDP item 2 - empty disables the rule.
+  IngressUdpCidr2:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_UDP item 2 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressUdpPort3:
+    Type: String
+    Default: ""
+    Description: Application UDP port for INGRESS_UDP item 3 - empty disables the rule.
+  IngressUdpCidr3:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_UDP item 3 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressUdpPort4:
+    Type: String
+    Default: ""
+    Description: Application UDP port for INGRESS_UDP item 4 - empty disables the rule.
+  IngressUdpCidr4:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_UDP item 4 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressUdpPort5:
+    Type: String
+    Default: ""
+    Description: Application UDP port for INGRESS_UDP item 5 - empty disables the rule.
+  IngressUdpCidr5:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_UDP item 5 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressUdpPort6:
+    Type: String
+    Default: ""
+    Description: Application UDP port for INGRESS_UDP item 6 - empty disables the rule.
+  IngressUdpCidr6:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_UDP item 6 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  IngressUdpPort7:
+    Type: String
+    Default: ""
+    Description: Application UDP port for INGRESS_UDP item 7 - empty disables the rule.
+  IngressUdpCidr7:
+    Type: String
+    Default: ""
+    Description: Source CIDR for INGRESS_UDP item 7 - set from port[:cidr] or 0.0.0.0/0 when the item omits a CIDR.
+  CertBucketEnabled:
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+    Description: Create the certificate bucket module when true.
+  DdnsHost:
+    Type: String
+    Default: ""
+    Description: Namecheap dynamic DNS host for this project.
+  DdnsDomain:
+    Type: String
+    Default: ""
+    Description: Namecheap domain that owns the dynamic DNS host.
+  EnableImageBuilder:
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "false"
+    Description: Create the baked-image pipeline when true.
+  EnableSpotAlerts:
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "false"
+    Description: Create the spot-interruption alert module when true.
+  SpotAlertEmail:
+    Type: String
+    Default: ""
+    Description: Email address subscribed to spot-interruption warnings.
+Conditions:
+  AmiPinned: !Equals [!Ref AmiPolicy, "pinned"]
+  CertBucketEnabledCondition: !Equals [!Ref CertBucketEnabled, "true"]
+  HasOperatorCidr: !Not [!Equals [!Ref OperatorCidr, ""]]
+  HasDdnsHost: !Not [!Equals [!Ref DdnsHost, ""]]
+  EnableImageBuilderCondition: !Equals [!Ref EnableImageBuilder, "true"]
+  EnableSpotAlertsCondition: !Equals [!Ref EnableSpotAlerts, "true"]
+  HasIngressTcp0: !And [!Not [!Equals [!Ref IngressTcpPort0, ""]], !Not [!Equals [!Ref IngressTcpCidr0, ""]]]
+  HasIngressTcp1: !And [!Not [!Equals [!Ref IngressTcpPort1, ""]], !Not [!Equals [!Ref IngressTcpCidr1, ""]]]
+  HasIngressTcp2: !And [!Not [!Equals [!Ref IngressTcpPort2, ""]], !Not [!Equals [!Ref IngressTcpCidr2, ""]]]
+  HasIngressTcp3: !And [!Not [!Equals [!Ref IngressTcpPort3, ""]], !Not [!Equals [!Ref IngressTcpCidr3, ""]]]
+  HasIngressTcp4: !And [!Not [!Equals [!Ref IngressTcpPort4, ""]], !Not [!Equals [!Ref IngressTcpCidr4, ""]]]
+  HasIngressTcp5: !And [!Not [!Equals [!Ref IngressTcpPort5, ""]], !Not [!Equals [!Ref IngressTcpCidr5, ""]]]
+  HasIngressTcp6: !And [!Not [!Equals [!Ref IngressTcpPort6, ""]], !Not [!Equals [!Ref IngressTcpCidr6, ""]]]
+  HasIngressTcp7: !And [!Not [!Equals [!Ref IngressTcpPort7, ""]], !Not [!Equals [!Ref IngressTcpCidr7, ""]]]
+  HasIngressUdp0: !And [!Not [!Equals [!Ref IngressUdpPort0, ""]], !Not [!Equals [!Ref IngressUdpCidr0, ""]]]
+  HasIngressUdp1: !And [!Not [!Equals [!Ref IngressUdpPort1, ""]], !Not [!Equals [!Ref IngressUdpCidr1, ""]]]
+  HasIngressUdp2: !And [!Not [!Equals [!Ref IngressUdpPort2, ""]], !Not [!Equals [!Ref IngressUdpCidr2, ""]]]
+  HasIngressUdp3: !And [!Not [!Equals [!Ref IngressUdpPort3, ""]], !Not [!Equals [!Ref IngressUdpCidr3, ""]]]
+  HasIngressUdp4: !And [!Not [!Equals [!Ref IngressUdpPort4, ""]], !Not [!Equals [!Ref IngressUdpCidr4, ""]]]
+  HasIngressUdp5: !And [!Not [!Equals [!Ref IngressUdpPort5, ""]], !Not [!Equals [!Ref IngressUdpCidr5, ""]]]
+  HasIngressUdp6: !And [!Not [!Equals [!Ref IngressUdpPort6, ""]], !Not [!Equals [!Ref IngressUdpCidr6, ""]]]
+  HasIngressUdp7: !And [!Not [!Equals [!Ref IngressUdpPort7, ""]], !Not [!Equals [!Ref IngressUdpCidr7, ""]]]
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Metadata:
+      stackctl:release-tag: !Ref ReleaseTag
+      stackctl:release-sha: !Ref ReleaseManifestSha256
+      stackctl:ami-policy: !Ref AmiPolicy
+      stackctl:ami-amd64: !If [AmiPinned, !Ref AmiIdAmd64, ""]
+      stackctl:ami-arm64: !If [AmiPinned, !Ref AmiIdArm64, ""]
+      stackctl:ddns-host: !Ref DdnsHost
+      stackctl:ddns-domain: !Ref DdnsDomain
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${ProjectName}-vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${ProjectName}-igw
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${ProjectName}-public-rt
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${ProjectName}-public-subnet
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      stackctl:ingress-tcp: !Ref IngressTcp
+      stackctl:ingress-udp: !Ref IngressUdp
+    Properties:
+      GroupDescription: !Sub ${ProjectName} application security group
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${ProjectName}-sg
+  SshIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasOperatorCidr
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Ref OperatorCidr
+  TcpIngress0:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressTcp0
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref IngressTcpPort0
+      ToPort: !Ref IngressTcpPort0
+      CidrIp: !Ref IngressTcpCidr0
+  TcpIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressTcp1
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref IngressTcpPort1
+      ToPort: !Ref IngressTcpPort1
+      CidrIp: !Ref IngressTcpCidr1
+  TcpIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressTcp2
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref IngressTcpPort2
+      ToPort: !Ref IngressTcpPort2
+      CidrIp: !Ref IngressTcpCidr2
+  TcpIngress3:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressTcp3
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref IngressTcpPort3
+      ToPort: !Ref IngressTcpPort3
+      CidrIp: !Ref IngressTcpCidr3
+  TcpIngress4:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressTcp4
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref IngressTcpPort4
+      ToPort: !Ref IngressTcpPort4
+      CidrIp: !Ref IngressTcpCidr4
+  TcpIngress5:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressTcp5
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref IngressTcpPort5
+      ToPort: !Ref IngressTcpPort5
+      CidrIp: !Ref IngressTcpCidr5
+  TcpIngress6:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressTcp6
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref IngressTcpPort6
+      ToPort: !Ref IngressTcpPort6
+      CidrIp: !Ref IngressTcpCidr6
+  TcpIngress7:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressTcp7
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref IngressTcpPort7
+      ToPort: !Ref IngressTcpPort7
+      CidrIp: !Ref IngressTcpCidr7
+  UdpIngress0:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressUdp0
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: udp
+      FromPort: !Ref IngressUdpPort0
+      ToPort: !Ref IngressUdpPort0
+      CidrIp: !Ref IngressUdpCidr0
+  UdpIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressUdp1
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: udp
+      FromPort: !Ref IngressUdpPort1
+      ToPort: !Ref IngressUdpPort1
+      CidrIp: !Ref IngressUdpCidr1
+  UdpIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressUdp2
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: udp
+      FromPort: !Ref IngressUdpPort2
+      ToPort: !Ref IngressUdpPort2
+      CidrIp: !Ref IngressUdpCidr2
+  UdpIngress3:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressUdp3
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: udp
+      FromPort: !Ref IngressUdpPort3
+      ToPort: !Ref IngressUdpPort3
+      CidrIp: !Ref IngressUdpCidr3
+  UdpIngress4:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressUdp4
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: udp
+      FromPort: !Ref IngressUdpPort4
+      ToPort: !Ref IngressUdpPort4
+      CidrIp: !Ref IngressUdpCidr4
+  UdpIngress5:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressUdp5
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: udp
+      FromPort: !Ref IngressUdpPort5
+      ToPort: !Ref IngressUdpPort5
+      CidrIp: !Ref IngressUdpCidr5
+  UdpIngress6:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressUdp6
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: udp
+      FromPort: !Ref IngressUdpPort6
+      ToPort: !Ref IngressUdpPort6
+      CidrIp: !Ref IngressUdpCidr6
+  UdpIngress7:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasIngressUdp7
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: udp
+      FromPort: !Ref IngressUdpPort7
+      ToPort: !Ref IngressUdpPort7
+      CidrIp: !Ref IngressUdpCidr7
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub ${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Suspended
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${ProjectName}-artifacts
+  CertBucket:
+    Type: AWS::S3::Bucket
+    Condition: CertBucketEnabledCondition
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub ${ProjectName}-certs-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Suspended
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Name
+          Value: !Sub ${ProjectName}-certs
+  BakedImageComponent:
+    Type: AWS::ImageBuilder::Component
+    Condition: EnableImageBuilderCondition
+    Properties:
+      Name: !Sub ${ProjectName}-baked-image-component
+      Platform: Linux
+      Version: 1.0.0
+      Description: stackctl baked image component
+      Data: "name: stackctl-baked\ndescription: no-op placeholder\nschemaVersion: 1.0\nphases:\n  - name: build\n    steps:\n      - name: noop\n        action: ExecuteBash\n        inputs:\n          commands:\n            - echo ok\n"
+  BakedImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Condition: EnableImageBuilderCondition
+    Properties:
+      Name: !Sub ${ProjectName}-baked-image-recipe
+      Version: 1.0.0
+      ParentImage: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ImageBuilderParentImage}
+      Components:
+        - ComponentArn: !Ref BakedImageComponent
+  BakedImageInfrastructure:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Condition: EnableImageBuilderCondition
+    Properties:
+      Name: !Sub ${ProjectName}-baked-image-infra
+      InstanceProfileName: !Sub ${ProjectName}-baked-imagebuilder-instance-profile
+      InstanceTypes:
+        - t3.micro
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+  BakedImageDistribution:
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Condition: EnableImageBuilderCondition
+    Properties:
+      Name: !Sub ${ProjectName}-baked-image-distribution
+      Distributions:
+        - Region: !Ref "AWS::Region"
+          AmiDistributionConfiguration:
+            Name: !Sub ${ProjectName}-baked-ami-{{ imagebuilder:buildVersion }}
+  BakedImagePipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Condition: EnableImageBuilderCondition
+    Properties:
+      Name: !Sub ${ProjectName}-baked-image-pipeline
+      Status: ENABLED
+      ImageRecipeArn: !Ref BakedImageRecipe
+      InfrastructureConfigurationArn: !Ref BakedImageInfrastructure
+      DistributionConfigurationArn: !Ref BakedImageDistribution
+  BakedAmiPublishDocument:
+    Type: AWS::SSM::Document
+    Condition: EnableImageBuilderCondition
+    Properties:
+      DocumentType: Automation
+      Content: "schemaVersion: '0.3'\nmainSteps:\n  - name: publishBakedAmi\n    action: aws:executeAwsApi\n    inputs:\n      Service: ssm\n      Api: PutParameter\n      Name: /${ProjectName}/ami/baked/latest\n      Type: String\n      Value: '{{ BuildImage.ImageId }}'\n"
+  BakedImageBuildRule:
+    Type: AWS::Events::Rule
+    Condition: EnableImageBuilderCondition
+    Properties:
+      Name: !Sub ${ProjectName}-imagebuilder-complete
+      EventPattern:
+        source:
+          - aws.imagebuilder
+        detail-type:
+          - EC2 Image Builder Image Build State Change
+        detail:
+          state:
+            - AVAILABLE
+      Targets:
+        - Arn: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${BakedAmiPublishDocument}:$DEFAULT
+          Id: baked-ami-publish
+          RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-baked-ami-publish-role
+  SpotAlertTopic:
+    Type: AWS::SNS::Topic
+    Condition: EnableSpotAlertsCondition
+    Properties:
+      TopicName: !Sub ${ProjectName}-spot-alerts
+  SpotAlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: EnableSpotAlertsCondition
+    Properties:
+      Protocol: email
+      Endpoint: !Ref SpotAlertEmail
+      TopicArn: !Ref SpotAlertTopic
+  SpotInterruptionRule:
+    Type: AWS::Events::Rule
+    Condition: EnableSpotAlertsCondition
+    Properties:
+      Name: !Sub ${ProjectName}-spot-interruption
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Spot Instance Interruption Warning
+      Targets:
+        - Arn: !Ref SpotAlertTopic
+          Id: spot-interruption
+          InputTransformer:
+            InputPathsMap:
+              instance: $.detail.instance-id
+              region: $.region
+            InputTemplate: '"Spot interruption warning for <instance> in <region>"'
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+  SubnetId:
+    Value: !Ref PublicSubnet
+  SecurityGroupId:
+    Value: !Ref SecurityGroup
+  InstanceProfileName:
+    Value: !Sub ${ProjectName}-instance-profile
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+  CertBucketName:
+    Value: !If [CertBucketEnabledCondition, !Ref CertBucket, ""]
+  DdnsHost:
+    Value: !If [HasDdnsHost, !Ref DdnsHost, "-"]
+  ReleaseTag:
+    Value: !Ref ReleaseTag
+  ReleaseManifestSha256:
+    Value: !Ref ReleaseManifestSha256
