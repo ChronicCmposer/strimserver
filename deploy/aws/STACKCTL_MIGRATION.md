@@ -3,30 +3,50 @@
 Derived from stackctl `docs/migration.md` (Appendix A and C) for the
 strimserver pilot. This file is owned by strimserver; it is not part of the
 stackctl repository. The old `deploy/aws/` shell pipeline stays in place and is
-the rollback path until Phase 5.
+the rollback path until the final phase.
 
 Pinned deploy tool: stackctl **v0.1.2** (`97a72d1`), via `MODULE.bazel`'s
 `git_override`. Operators run it through `bazel run //deploy/aws:stackctl --`.
+
+## Runbook order (revised after the Phase 0 inventory)
+
+The generic runbook (infra alongside, operator stack last) assumed a live
+instance. The inventory found **no live strimserver instance** (the old
+`deploy/aws/launch` tags instances with `Project=strimserver`, so the finding
+is trustworthy), and the **old instance role is bucket-pinned**: its
+`DeploymentBucketRead` policy only reads `arn:aws:s3:::strimserver.cvbn.cc/*`
+(`deploy/aws/strimserver-operator.yaml:101`). A stackctl launch fetches the
+bundle from the NEW hard-named bucket, so launching under the old profile
+would fail with AccessDenied.
+
+Therefore the operator stack is replaced **first**, not last. With nothing
+live, no maintenance window is required.
 
 ## Project-specific mapping
 
 | Old | New |
 |---|---|
 | Infra stack `strimserver` | Infra stack `strimserver-infra` |
-| Operator stack `strimserver-operator` | Same name, deleted and recreated in the Phase 4 window |
-| Old artifact bucket (`strimserver.cvbn.cc`) | New hard-named `<project>-artifacts-<account>-<region>` |
+| Operator stack `strimserver-operator` | Same name, replaced up front (Phase 1) — nothing live depends on it |
+| Old artifact bucket (`strimserver.cvbn.cc`) | New hard-named `strimserver-artifacts-183438553939-us-east-2` |
 | EC2 Image Builder pipeline | `ENABLE_IMAGE_BUILDER=true` + the BakedImage module |
 | `deploy/aws/strimserver-{infra,operator}.yaml` | Vendored canonical `deploy/stackctl-*.yaml` |
-| On-box `setup_strimserver` + `deploy.sh` | stackctl bundle fetch/verify/extract + `stackctl-setup.sh` + unchanged `deploy.sh` |
+| On-box `setup_strimserver` + `deploy.sh` | stackctl fetch/verify/extract + `stackctl-setup.sh` + `deploy.sh` |
 | Twitch key scp'd by `setup_strimserver` | SSM SecureString `/strimserver/twitch-stream-key` read at boot |
 | On-box `strim-ddns.{service,timer}` + verify unit | Retired; stackctl owns DDNS updates (`DDNS_ONBOX=false`) |
 | Unversioned `releases/` history | Fresh `releases/<tag>/` history from the next tag |
 
+Session Manager is **not carried over**: the old stack set
+`EnableSessionManager=true`, but the canonical operator template attaches no
+`AmazonSSMManagedInstanceCore`. SSH from `OPERATOR_CIDR` is the access path.
 Ingress mapping (slots start at 0 because the SSH rule is separate):
 
 - `INGRESS_TCP=4000:<operator-cidr>,2222:<operator-cidr>` -- controller and
   experimental OpenSSH, both operator-restricted.
-- `INGRESS_UDP=9000` -- SRT ingest, world-open by omitting a CIDR.
+- `INGRESS_UDP=9000` -- SRT ingest. **Decide deliberately**: the current live
+  SG restricts UDP 9000 to the operator CIDR (`IngestCidr=104.218.148.0/24`
+  in the old stack), while the default here (CIDR omitted) is world-open.
+  Use `9000:104.218.148.0/24` to match today's exposure.
 - Ordinary SSH (22) stays the template's conditional `SshIngress` from
   `OPERATOR_CIDR`.
 
@@ -34,23 +54,40 @@ Ingress mapping (slots start at 0 because the SSH rule is separate):
 
 ### Phase 0 -- Prepare (read-only)
 
-- [ ] Record old stack outputs, bucket names (`strimserver.cvbn.cc`), IAM
-      user/profile names, and the current release/artifact layout.
-- [ ] Confirm the old operator profile and that the instance profile is
-      `strimserver-instance-profile`.
-- [ ] Lower the DDNS record TTL in Namecheap and wait out the old TTL.
-- [ ] Freeze new releases on the old pipeline.
-- [ ] Store the on-box secret (manual; stackctl never writes SSM):
+- [x] Inventory recorded (`stackctl-phase0-inventory.sh` output, 2026-11-15):
+      account 183438553939, region us-east-2, old stacks/IAM/bucket captured,
+      no live instance, `/strimserver/twitch-stream-key` EXISTS,
+      `/strimserver/ami/baked/latest` EXISTS.
+- [ ] Create the MISSING DDNS SecureString (launch/status fail closed without
+      it):
 
       aws ssm put-parameter \
-        --name /strimserver/twitch-stream-key \
+        --name /strimserver/ddns/password \
         --type SecureString \
-        --value "<the Twitch stream key>"
+        --value "<the Namecheap DDNS password>"
 
-- [ ] Keep the DDNS SecureString `/strimserver/ddns/password` (or create it;
-      `launch`/`status` fail closed when it is missing).
+- [ ] Ensure `~/.aws/credentials` has a **`[default]` admin profile** —
+      `provision` authenticates as `[default]` (root/admin is fine) and itself
+      mints + writes the `[strimserver]` profile key. The old user's secret is
+      not needed; the old key dies with the old stack.
+- [ ] Create `deploy/aws/.env` from `.env.example` with real values
+      (`OPERATOR_CIDR=104.218.148.0/24`, `KEY_NAME`, `SSH_IDENTITY`,
+      `DDNS_DOMAIN`, `IMAGE_BUILDER_PARENT_IMAGE=ami-0198b63ccfac121e8`,
+      `INSTANCE_TYPES_AMD64=g4dn.xlarge`, `ROOT_VOLUME_SIZE=100`).
+- [ ] Lower the DDNS record TTL in Namecheap (still worthwhile: the record may
+      be resolving to a stale IP until first launch).
+- [ ] Freeze new releases on the old pipeline.
 
-### Phase 1 -- New infra stack alongside the old
+### Phase 1 -- Operator-stack replacement (no window needed)
+
+- [ ] Delete the old operator stack (nothing is live):
+
+      aws cloudformation delete-stack --stack-name strimserver-operator
+      aws cloudformation wait stack-delete-complete \
+        --stack-name strimserver-operator
+
+      This removes the old IAM user `strimserver` (and its access key), the
+      old policies/role/profile, and the old ImageBuilder roles.
 
 - [ ] Vendored templates are present and checker-clean:
 
@@ -59,57 +96,55 @@ Ingress mapping (slots start at 0 because the SSH rule is separate):
       bazel run @stackctl//deploy/check:template_check -- \
         infra "$PWD/deploy/stackctl-infra.yaml"
 
-- [ ] `.env`/`.env.example` reviewed; unknown keys removed.
-- [ ] Artifact bucket copied (old bucket read-only afterwards):
+- [ ] `bazel run //deploy/aws:stackctl -- provision` (runs as `[default]`)
+      recreates the canonical operator stack — operator user + policy,
+      instance role/profile with new-bucket read
+      (`strimserver-artifacts-<acct>-*/releases/*`) and SSM secret read —
+      and writes the fresh `[strimserver]` credentials profile.
 
-      aws s3 sync "s3://strimserver.cvbn.cc" \
-        "s3://strimserver-artifacts-<account>-us-east-2"
+### Phase 2 -- First release and new infra stack
 
-- [ ] First `deploy` creates `strimserver-infra`.
-- [ ] Rendered security group verified: TCP 4000 + 2222 from the operator CIDR,
-      UDP 9000 world-open.
-
-### Phase 2 -- Launch and terminate cutover
-
-- [ ] `bazel run //deploy/aws:stackctl -- launch` succeeds; `stackctl-setup.sh`
-      mounted the instance store, fetched the key, rendered
-      `config/strimserver.env`, and `deploy.sh` exited 0.
-- [ ] Instance carries the new project tag; DDNS points at the new IP; the
-      dedicated stackctl known-hosts store is used.
-- [ ] `stackctl terminate` is now the only teardown path.
-
-### Phase 3 -- Deploy pipeline cutover
-
-- [ ] Push an annotated `vX.Y.Z` tag and publish the first stackctl release:
+- [ ] Push an annotated release tag (provenance gate requires it):
 
       git tag -a vX.Y.Z -m "strimserver vX.Y.Z"
       git push origin vX.Y.Z
-      bazel run //deploy/aws:stackctl -- deploy
 
-- [ ] Release members: four deployment tars and `strimserver.env.template`
-      (see `RELEASE_TARGETS`). Manifest verified.
-- [ ] CI uses the new release prefix (`RELEASE_PREFIXES=releases/`).
-- [ ] Old unversioned prefixes remain read-only.
+- [ ] Build the release targets so the freshness gate passes:
 
-### Phase 4 -- Operator-stack maintenance window (only IAM removal)
+      bazel build //:strimserver_deployment_tar_go_amd64 \
+        //:strimserver_deployment_tar_c_amd64 \
+        //:strimserver_deployment_tar_go_arm64 \
+        //:strimserver_deployment_tar_c_arm64
 
-- [ ] Announce the window (DDNS TTL already lowered).
-- [ ] `stackctl terminate` the instance.
-- [ ] Delete the old `strimserver-operator` stack. Do not delete it under a
-      live instance.
-- [ ] `bazel run //deploy/aws:stackctl -- provision` recreates the canonical
-      operator stack and refreshes `[strimserver]` credentials.
-- [ ] `bazel run //deploy/aws:stackctl -- launch` again.
-- [ ] Verify TLS renewal end to end before deleting old certificate data.
+- [ ] `bazel run //deploy/aws:stackctl -- deploy` (now running as the
+      `[strimserver]` profile) creates `strimserver-infra` + the new bucket
+      and publishes `releases/<tag>/`.
+- [ ] Copy legacy artifacts (ffmpeg/, openssh/, offline/, root tars) from the
+      old bucket (read-only afterwards):
+
+      aws s3 sync "s3://strimserver.cvbn.cc/" \
+        "s3://strimserver-artifacts-183438553939-us-east-2/" --dry-run
+      # then the same command without --dry-run
+
+- [ ] Rendered security group verified: TCP 4000 + 2222 from
+      `104.218.148.0/24`, UDP 9000 per the decision above, SSH 22 from
+      `104.218.148.0/24`.
+
+### Phase 3 -- Launch cutover
+
+- [ ] `bazel run //deploy/aws:stackctl -- launch` succeeds; `stackctl-setup.sh`
+      mounted the instance store, fetched the Twitch key from SSM, rendered
+      `config/strimserver.env`, and `deploy.sh` exited 0.
+- [ ] Instance carries the new project tags; DDNS points at the new IP; the
+      dedicated stackctl known-hosts store is used.
+- [ ] `stackctl terminate` is now the only teardown path.
 - [ ] Raise the DDNS TTL back to normal.
 
-### Phase 5 -- Decommission
+### Phase 4 -- Decommission
 
-- [ ] Delete the old `strimserver` infra stack and retained buckets after a
-      full release cycle.
+- [ ] Delete the old `strimserver` infra stack after a full release cycle.
 - [ ] Remove the old shell entry points and old per-project templates.
-- [ ] Leave old `releases/` prefixes read-only for one retention period, then
-      delete them.
+- [ ] Leave the old bucket read-only for one retention period, then delete it.
 - [ ] Record the final state here.
 
 ## DDNS unit retirement
