@@ -456,9 +456,9 @@ check "produced AMI id is published to /strimserver/ami/baked/latest" \
 # a sha256 content lock stored beside the expected version so any change forces a
 # conscious version bump.
 # ---------------------------------------------------------------------------
-expected_component_version="1.0.1"
-expected_recipe_version="1.0.1"
-expected_component_data_sha256="37f90934b7f7d6e854c3afe42b81c65ae8f6f2602412816633a38f025af4852a"
+expected_component_version="1.0.2"
+expected_recipe_version="1.0.2"
+expected_component_data_sha256="7ecd476d6ea6cc8ff6d45c46b275110f025358e1006f21f38a9284f7ae3eafa5"
 
 containerd_nvme_conf="$script_dir/containerd-nvme.conf"
 containerd_config_toml="$script_dir/containerd-config.toml"
@@ -584,6 +584,70 @@ check "CleanNvmeResidue emptiness probe is an rc-checked find under /mnt/nvme" \
   bash -c 'grep -Fq "if ! residue=\"\$(find /mnt/nvme -mindepth 1 -print -quit)\"" <<<"$1"' _ "$clean_residue_block"
 check "no component command deletes the resume marker" \
   bash -c '! grep -E "rm[^#]*driver-upgrade.state" <<<"$1"' _ "$component_block"
+
+# ---------------------------------------------------------------------------
+# Baked-AMI stale-DKMS hardening: the base AMI ships a registered
+# nvidia-open/595.112.07 DKMS entry (plus nvidia-open-grid sources). At boot the
+# enabled dkms.service rebuilds that stale entry over the baked 620 modules, so
+# the bake must purge every non-floor DKMS entry/source, re-assert the 620 build
+# for every kernel, remove stale 595 userland, and gate on-system on BOTH
+# nvidia and nvidia-uvm reporting the floor.
+# ---------------------------------------------------------------------------
+purge_dkms_block="$(extract_step_block "$component_block" PurgeStaleNvidiaDkms)"
+check "PurgeStaleNvidiaDkms step block was extracted" test -n "$purge_dkms_block"
+check "stale-DKMS purge derives entries from dkms status" \
+  bash -c 'grep -Fq "dkms status" <<<"$1"' _ "$purge_dkms_block"
+check "stale-DKMS purge iterates dkms status entries" \
+  bash -c 'grep -Fq "while IFS= read -r entry" <<<"$1"' _ "$purge_dkms_block"
+check "stale-DKMS purge removes every non-floor entry with --all" \
+  bash -c 'grep -Fq "dkms remove" <<<"$1" && grep -Fq -- "--all" <<<"$1"' _ "$purge_dkms_block"
+check "stale-DKMS purge skips only the floor version" \
+  bash -c 'grep -Fq "if [ \"\$version\" = \"\$FLOOR\" ]" <<<"$1"' _ "$purge_dkms_block"
+# Regression coverage: the matcher must capture the incident's nvidia-open/
+# 595.112.07 entry AND the grid source, not a hardcoded 595 literal.
+purge_regex="$(grep -oE "grep -oE '[^']+'" <<<"$purge_dkms_block" | head -n1 | sed -E "s/^grep -oE '(.*)'$/\1/")"
+check "stale-DKMS matcher captures nvidia-open/595.112.07 and nvidia-open-grid/580.159.03" \
+  bash -c '
+    fixture="nvidia-open/595.112.07, 6.12.0, x86_64: installed
+nvidia-open-grid/580.159.03, 6.12.0, x86_64: installed
+nvidia/620.70.06, 6.12.0, x86_64: installed"
+    got="$(printf "%s\n" "$fixture" | grep -oE "$1" | sort -u)"
+    grep -Fq "nvidia-open/595.112.07" <<<"$got" &&
+      grep -Fq "nvidia-open-grid/580.159.03" <<<"$got"
+  ' _ "$purge_regex"
+check "stale /usr/src trees are removed by name-embedded version" \
+  bash -c 'grep -Fq "for src in /usr/src/nvidia*" <<<"$1" && grep -Fq "rm -rf \"\$src\"" <<<"$1"' _ "$purge_dkms_block"
+check "stale /usr/src cleanup keeps the floor tree (name ends in -floor)" \
+  bash -c 'grep -Fq "$2" <<<"$1"' _ "$purge_dkms_block" '*"-$FLOOR")'
+check "floor DKMS entry is registered and installed per kernel" \
+  bash -c 'grep -Fq "dkms install -m \"\$floor_name\" -v \"\$FLOOR\" -k \"\$kernel\"" <<<"$1"' _ "$purge_dkms_block"
+check "fail-closed gate checks nvidia AND nvidia-uvm per kernel" \
+  bash -c 'grep -Fq "for module in nvidia nvidia-uvm" <<<"$1" && grep -Fq "modinfo -k \"\$kernel\" -F version \"\$module\"" <<<"$1"' _ "$purge_dkms_block"
+check "fail-closed gate exits 1 naming module, observed, and expected" \
+  bash -c 'grep -Fq "exit 1" <<<"$1" && grep -Fq "expected \$FLOOR" <<<"$1" && grep -Fq "module for kernel" <<<"$1"' _ "$purge_dkms_block"
+check "stale userland packages (fabricmanager, nscq) are removed" \
+  bash -c 'grep -Fq "nvidia-fabricmanager" <<<"$1" && grep -Fq "libnvidia-nscq" <<<"$1" && grep -Fq "dnf remove" <<<"$1"' _ "$purge_dkms_block"
+check "depmod -a runs after module changes" \
+  bash -c 'grep -Fq "depmod -a" <<<"$1"' _ "$purge_dkms_block"
+check "PurgeStaleNvidiaDkms runs AFTER EstablishNvidiaDriverFloor (ordering)" \
+  bash -c '
+    a="$(grep -n "name: EstablishNvidiaDriverFloor" <<<"$1" | head -1 | cut -d: -f1)"
+    b="$(grep -n "name: PurgeStaleNvidiaDkms" <<<"$1" | head -1 | cut -d: -f1)"
+    [ -n "$a" ] && [ -n "$b" ] && [ "$b" -gt "$a" ]
+  ' _ "$component_block"
+check "PurgeStaleNvidiaDkms is the step immediately after the driver install" \
+  bash -c '
+    floor="$(grep -n "name: EstablishNvidiaDriverFloor" <<<"$1" | head -1 | cut -d: -f1)"
+    next="$(awk -v n="$floor" "NR > n && /- name: / {print NR; exit}" <<<"$1")"
+    purge="$(grep -n "name: PurgeStaleNvidiaDkms" <<<"$1" | head -1 | cut -d: -f1)"
+    [ -n "$next" ] && [ -n "$purge" ] && [ "$purge" -eq "$next" ]
+  ' _ "$component_block"
+check "PurgeStaleNvidiaDkms runs BEFORE image finalization (CleanNvmeResidue)" \
+  bash -c '
+    a="$(grep -n "name: PurgeStaleNvidiaDkms" <<<"$1" | head -1 | cut -d: -f1)"
+    b="$(grep -n "name: CleanNvmeResidue" <<<"$1" | head -1 | cut -d: -f1)"
+    [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+  ' _ "$component_block"
 
 if [[ "$failures" -eq 0 ]]; then
   echo "PASS: deploy-infra profile-run behaviour OK"

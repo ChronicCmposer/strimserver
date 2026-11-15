@@ -319,8 +319,8 @@ Resources:
       Name: strimserver-baked-base
       Description: strimserver baked base (driver floor, htop, openssh, containerd)
       Platform: Linux
-      Version: "1.0.1"
-      ChangeDescription: containerd NVMe mount drop-in + bake residue cleanup
+      Version: "1.0.2"
+      ChangeDescription: purge stale below-floor NVIDIA DKMS state before baking
       # Fn::Sub interpolates ONLY the two URL parameters; the sourced nvidia.sh
       # owns the floor version and the stage-then-swap logic, so a threshold
       # bump is a one-line change in deploy/aws/lib/nvidia.sh.
@@ -377,6 +377,147 @@ Resources:
                       # shellcheck disable=SC1091
                       . /tmp/nvidia.sh
                       SUDO="" nvidia_ensure_driver_floor
+              - name: PurgeStaleNvidiaDkms
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euo pipefail
+                      # The base AMI registers a stale nvidia-open/595.112.07
+                      # DKMS entry (plus nvidia-open-grid sources). The enabled
+                      # dkms.service rebuilds it at boot over the 620 modules the
+                      # driver step just baked, so nvidia-uvm ends up 595 and
+                      # CUDA fails. Purge every non-floor entry defensively and
+                      # gate the result before the image is finalized.
+                      if [ ! -f /tmp/nvidia.sh ]; then
+                        curl -fsSL "${NvidiaFloorMachineryUrl}" -o /tmp/nvidia.sh
+                      fi
+                      # shellcheck disable=SC1091
+                      . /tmp/nvidia.sh
+                      FLOOR="$NVIDIA_DRIVER_FLOOR"
+                      if [ -z "$FLOOR" ]; then
+                        echo "PurgeStaleNvidiaDkms: NVIDIA_DRIVER_FLOOR is empty" >&2
+                        exit 1
+                      fi
+                      # 1. Remove every nvidia* DKMS entry whose version is not
+                      #    the floor. Derived from `dkms status`, so the stale
+                      #    nvidia-open/595.112.07 and nvidia-open-grid/* entries
+                      #    are caught without a hardcoded version list.
+                      if command -v dkms >/dev/null 2>&1; then
+                        status="$(dkms status 2>/dev/null || true)"
+                        while IFS= read -r entry; do
+                          [ -n "$entry" ] || continue
+                          name="$(printf '%s' "$entry" | cut -d/ -f1)"
+                          version="$(printf '%s' "$entry" | cut -d/ -f2)"
+                          if [ "$version" = "$FLOOR" ]; then
+                            continue
+                          fi
+                          if ! dkms remove "$name/$version" --all; then
+                            echo "PurgeStaleNvidiaDkms: dkms remove $name/$version --all failed" >&2
+                            exit 1
+                          fi
+                        done < <(printf '%s\n' "$status" | grep -oE 'nvidia[A-Za-z0-9_.-]*/[0-9]+([.][0-9]+)*' | sort -u)
+                      fi
+                      # 2. Remove stale source trees under /usr/src whose
+                      #    name-embedded version is not the floor (for example
+                      #    nvidia-open-595.112.07 and nvidia-open-grid-580.159.03)
+                      #    while keeping /usr/src/nvidia-open-620.70.06.
+                      for src in /usr/src/nvidia*; do
+                        [ -e "$src" ] || continue
+                        src_base="$(basename "$src")"
+                        case "$src_base" in
+                          *"-$FLOOR") : ;;
+                          *)
+                            rm -rf "$src"
+                            ;;
+                        esac
+                      done
+                      # 3. Ensure the floor DKMS entry is registered and built
+                      #    for every kernel present in the image. A boot-time
+                      #    dkms.service with no 620 build would fall back to any
+                      #    stale source still on disk.
+                      kernel_list="$(ls -1 /lib/modules 2>/dev/null || true)"
+                      if [ -z "$kernel_list" ]; then
+                        echo "PurgeStaleNvidiaDkms: no kernels found under /lib/modules" >&2
+                        exit 1
+                      fi
+                      if command -v dkms >/dev/null 2>&1; then
+                        status="$(dkms status 2>/dev/null || true)"
+                        floor_token="$(printf '%s\n' "$status" | grep -oE 'nvidia[A-Za-z0-9_.-]*/[0-9]+([.][0-9]+)*' | awk -F/ -v f="$FLOOR" '$2 == f {print; exit}')"
+                        floor_name="$(printf '%s' "$floor_token" | cut -d/ -f1)"
+                        if [ -z "$floor_name" ]; then
+                          for candidate in nvidia nvidia-open; do
+                            if [ -f "/usr/src/$candidate-$FLOOR/dkms.conf" ]; then
+                              floor_name="$candidate"
+                              break
+                            fi
+                          done
+                          if [ -z "$floor_name" ]; then
+                            echo "PurgeStaleNvidiaDkms: no DKMS source for $FLOOR under /usr/src" >&2
+                            exit 1
+                          fi
+                          if ! dkms add "$floor_name/$FLOOR"; then
+                            echo "PurgeStaleNvidiaDkms: dkms add $floor_name/$FLOOR failed" >&2
+                            exit 1
+                          fi
+                        fi
+                        for kernel in $kernel_list; do
+                          status="$(dkms status 2>/dev/null || true)"
+                          if printf '%s\n' "$status" | grep -F "$floor_name/$FLOOR," | grep -F "$kernel" | grep -F "installed" >/dev/null; then
+                            continue
+                          fi
+                          if ! dkms install -m "$floor_name" -v "$FLOOR" -k "$kernel"; then
+                            echo "PurgeStaleNvidiaDkms: dkms install $floor_name/$FLOOR for $kernel failed" >&2
+                            exit 1
+                          fi
+                        done
+                      else
+                        # No DKMS tool: a pure kmod image is fine, but stale
+                        # DKMS state means the boot-time dkms.service would
+                        # still rebuild an old driver.
+                        if compgen -G '/usr/src/nvidia*' >/dev/null || [ -d /var/lib/dkms ]; then
+                          echo "PurgeStaleNvidiaDkms: dkms is absent but stale DKMS state remains" >&2
+                          exit 1
+                        fi
+                      fi
+                      # 4. Remove stale userland packages at a non-floor
+                      #    version (nvidia-fabricmanager-595.112.07 and
+                      #    libnvidia-nscq-595.112.07 in the incident). T4 does
+                      #    not need fabricmanager; never install a 620 one.
+                      for pkg in nvidia-fabricmanager libnvidia-nscq; do
+                        if rpm -q "$pkg" >/dev/null 2>&1; then
+                          installed_version="$(rpm -q --qf '%{VERSION}\n' "$pkg" | head -n1)"
+                          if [ -z "$installed_version" ]; then
+                            echo "PurgeStaleNvidiaDkms: cannot read installed version of $pkg" >&2
+                            exit 1
+                          fi
+                          if [ "$installed_version" != "$FLOOR" ]; then
+                            if ! dnf remove -y "$pkg-$installed_version"; then
+                              echo "PurgeStaleNvidiaDkms: dnf remove $pkg-$installed_version failed" >&2
+                              exit 1
+                            fi
+                          fi
+                        fi
+                      done
+                      # 5. Rebuild the module dependency graph after the
+                      #    module changes above.
+                      if ! depmod -a; then
+                        echo "PurgeStaleNvidiaDkms: depmod -a failed" >&2
+                        exit 1
+                      fi
+                      # 6. Fail-closed on-disk gate: for every kernel, BOTH
+                      #    nvidia and nvidia-uvm must report the floor. A 620
+                      #    nvidia with a stale 595 nvidia-uvm is exactly the
+                      #    skew that made cuInit fail with CUDA_ERROR_UNKNOWN.
+                      for kernel in $kernel_list; do
+                        for module in nvidia nvidia-uvm; do
+                          observed="$(modinfo -k "$kernel" -F version "$module" 2>/dev/null || true)"
+                          if [ "$observed" != "$FLOOR" ]; then
+                            echo "PurgeStaleNvidiaDkms: on-disk $module module for kernel $kernel reports '$observed', expected $FLOOR; refusing to bake" >&2
+                            exit 1
+                          fi
+                        done
+                      done
               - name: InstallExperimentalOpenSsh
                 action: ExecuteBash
                 inputs:
@@ -422,7 +563,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: strimserver-baked-recipe
-      Version: "1.0.1"
+      Version: "1.0.2"
       ParentImage: ami-0198b63ccfac121e8
       Components:
         - ComponentArn: !Ref BakedImageComponent
