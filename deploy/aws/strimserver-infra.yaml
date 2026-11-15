@@ -319,8 +319,8 @@ Resources:
       Name: strimserver-baked-base
       Description: strimserver baked base (driver floor, htop, openssh, containerd)
       Platform: Linux
-      Version: "1.0.3"
-      ChangeDescription: purge stale below-floor NVIDIA DKMS state before baking
+      Version: "1.0.4"
+      ChangeDescription: neutralize the DLAMI boot-time driver manager and its 595 tarball restore
       # Fn::Sub interpolates ONLY the two URL parameters; the sourced nvidia.sh
       # owns the floor version and the stage-then-swap logic, so a threshold
       # bump is a one-line change in deploy/aws/lib/nvidia.sh.
@@ -432,7 +432,38 @@ Resources:
                             ;;
                         esac
                       done
-                      # 3. Ensure the floor DKMS entry is registered and built
+                      # 3. Neutralize the DLAMI driver manager. Field evidence:
+                      #    /opt/aws/dlami/bin/nvidia-kmod-load.sh runs at every
+                      #    boot through nvidia-kmod-load.service and (a) removes
+                      #    any DKMS module that is not its pinned variant as
+                      #    "conflicting" (it deleted this bake's nvidia/
+                      #    620.70.06 registration and extra/*.ko), then (b)
+                      #    restores its pinned nvidia-open/595.112.07 from a
+                      #    PREBUILT tarball under /var/lib/dkms-archive via
+                      #    `dkms ldtarball` + `dkms install --force` (tar
+                      #    preserves the tarball mtimes), recreating the 595
+                      #    registration and overwriting the baked 620 modules on
+                      #    disk. The loaded core stays 620, so nvidia_uvm then
+                      #    fails with a symbol-version mismatch (-22) and cuInit
+                      #    returns CUDA_ERROR_UNKNOWN in the container. Disable
+                      #    AND mask the unit so a later enable cannot resurrect
+                      #    it, and fail closed if the mask is not in place.
+                      systemctl disable nvidia-kmod-load.service 2>/dev/null || true
+                      mkdir -p /etc/systemd/system
+                      ln -sf /dev/null /etc/systemd/system/nvidia-kmod-load.service
+                      if [ ! -L /etc/systemd/system/nvidia-kmod-load.service ]; then
+                        echo "PurgeStaleNvidiaDkms: nvidia-kmod-load.service is not masked" >&2
+                        exit 1
+                      fi
+                      # 4. Remove the prebuilt variant archives the DLAMI driver
+                      #    manager restores 595 from. No nvidia archive may
+                      #    survive the bake; fail closed if one does.
+                      rm -rf /var/lib/dkms-archive/nvidia* 2>/dev/null || true
+                      if compgen -G '/var/lib/dkms-archive/nvidia*' >/dev/null; then
+                        echo "PurgeStaleNvidiaDkms: nvidia DKMS archives remain under /var/lib/dkms-archive" >&2
+                        exit 1
+                      fi
+                      # 5. Ensure the floor DKMS entry is registered and built
                       #    for every kernel present in the image. A boot-time
                       #    dkms.service with no 620 build would fall back to any
                       #    stale source still on disk.
@@ -480,7 +511,7 @@ Resources:
                           exit 1
                         fi
                       fi
-                      # 4. Remove stale userland packages at a non-floor
+                      # 6. Remove stale userland packages at a non-floor
                       #    version (nvidia-fabricmanager-595.112.07 and
                       #    libnvidia-nscq-595.112.07 in the incident). T4 does
                       #    not need fabricmanager; never install a 620 one.
@@ -499,13 +530,13 @@ Resources:
                           fi
                         fi
                       done
-                      # 5. Rebuild the module dependency graph after the
+                      # 7. Rebuild the module dependency graph after the
                       #    module changes above.
                       if ! depmod -a; then
                         echo "PurgeStaleNvidiaDkms: depmod -a failed" >&2
                         exit 1
                       fi
-                      # 6. Fail-closed on-disk gate: for every kernel, BOTH
+                      # 8. Fail-closed on-disk gate: for every kernel, BOTH
                       #    nvidia and nvidia-uvm must report the floor. A 620
                       #    nvidia with a stale 595 nvidia-uvm is exactly the
                       #    skew that made cuInit fail with CUDA_ERROR_UNKNOWN.
@@ -563,7 +594,7 @@ Resources:
     Type: AWS::ImageBuilder::ImageRecipe
     Properties:
       Name: strimserver-baked-recipe
-      Version: "1.0.3"
+      Version: "1.0.4"
       ParentImage: ami-0198b63ccfac121e8
       Components:
         - ComponentArn: !Ref BakedImageComponent
@@ -571,18 +602,12 @@ Resources:
         Project: !Ref ProjectName
         "strimserver:nvidia-driver": !Ref NvidiaDriverFloor
 
-  # AMI build logs are ALWAYS retained (design rule). A bake without logs is
-  # undiagnosable: the DKMS incident shipped an image whose PurgeStaleNvidiaDkms
-  # effects were absent, and there was no build log to show why. Image Builder
-  # writes each phase/step's output here, so Logging is never left unset.
-  BakedImageBuilderLogs:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: /aws/imagebuilder/strimserver-baked
-      RetentionInDays: 90
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
+  # AMI build logs are ALWAYS retained (design rule) but Image Builder writes
+  # them automatically to /aws/imagebuilder/strimserver-baked-recipe (per-build
+  # streams <recipe-version>/<build>, e.g. 1.0.4/1) and
+  # /aws/imagebuilder/pipeline/strimserver-baked. Do NOT add a custom LogGroup or
+  # a Logging block here: the f763a68 attempt added a stack resource that broke a
+  # deploy and duplicates logs that were already being retained.
 
   # The build-instance profile is owned by the operator stack; reference it by
   # the same deterministic name (no cross-stack ImportValue, matching the
@@ -602,11 +627,6 @@ Resources:
       InstanceTypes:
         - g4dn.xlarge
       TerminateInstanceOnFailure: true
-      # Always-on build logging (see BakedImageBuilderLogs). Without this the
-      # bake retains no log anywhere and a bad image cannot be diagnosed.
-      Logging:
-        CloudWatchLogs:
-          LogGroupArn: !GetAtt BakedImageBuilderLogs.Arn
       Tags:
         Project: !Ref ProjectName
 

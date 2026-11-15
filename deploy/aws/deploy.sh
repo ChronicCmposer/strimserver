@@ -296,11 +296,26 @@ fi
 
 # --- NVIDIA GPU runtime: assert the baked driver floor ------------------------
 # The AMI bakes the driver, container toolkit and persistenced wiring, so the
-# deploy never upgrades the driver. It only asserts the LOADED module is at the
-# floor (a strict /proc read; an unloaded or below-floor driver is fatal) and
-# generates the amd64 CDI spec the controllers read from /var/run/cdi.
-if ! nvidia__proc_at_floor; then
-   printf "\n*** ERROR: the loaded NVIDIA driver is below the required %s floor. ***\n" "$NVIDIA_DRIVER_FLOOR"
+# deploy never upgrades the driver. The gate requires the LOADED core module to
+# be at the floor AND the on-disk nvidia AND nvidia-uvm modules for the running
+# kernel to report that exact loaded version AND nvidia_uvm to be loaded. A
+# loaded 620 core over a stale 595 nvidia-uvm.ko (the DLAMI boot-time tarball
+# restore) satisfies a proc-only check but dies at cuInit with
+# CUDA_ERROR_UNKNOWN, so proc-only is not enough.
+if ! nvidia__loaded_graph_consistent "${SUDO:-sudo}"; then
+   loaded_version="$(nvidia__proc_version 2>/dev/null || true)"
+   kernel_release="$(uname -r)"
+   on_disk_nvidia="$(nvidia__on_disk_kernel_version "${SUDO:-sudo}" nvidia 2>/dev/null || true)"
+   on_disk_uvm="$(nvidia__on_disk_kernel_version "${SUDO:-sudo}" nvidia-uvm 2>/dev/null || true)"
+   if nvidia__module_loaded "${SUDO:-sudo}" nvidia_uvm; then
+      uvm_state="loaded"
+   else
+      uvm_state="not loaded"
+   fi
+   printf "\n*** ERROR: the NVIDIA driver is not consistent at the required %s floor. ***\n" "$NVIDIA_DRIVER_FLOOR"
+   printf "loaded=%s on-disk nvidia=%s nvidia-uvm=%s (kernel %s); nvidia_uvm is %s.\n" \
+      "${loaded_version:-<unreadable>}" "${on_disk_nvidia:-<missing>}" \
+      "${on_disk_uvm:-<missing>}" "$kernel_release" "$uvm_state"
    printf "This fast path expects a baked AMI that already ships the GPU driver and\n"
    printf "container toolkit. Launch a current baked AMI (the image published at the\n"
    printf "SSM parameter /strimserver/ami/baked/latest in us-east-2) instead of an\n"

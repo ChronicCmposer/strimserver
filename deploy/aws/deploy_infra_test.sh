@@ -357,7 +357,6 @@ check "NvidiaDriverFloor parameter default equals the repo floor" \
 
 component_block="$(extract_template_resource BakedImageComponent)"
 recipe_block="$(extract_template_resource BakedImageRecipe)"
-log_group_block="$(extract_template_resource BakedImageBuilderLogs)"
 infra_config_block="$(extract_template_resource BakedInfrastructureConfiguration)"
 distribution_block="$(extract_template_resource BakedDistributionConfiguration)"
 pipeline_block="$(extract_template_resource BakedImagePipeline)"
@@ -414,21 +413,16 @@ check "InfrastructureConfiguration launches into the stack-managed subnet" \
   bash -c 'grep -Fq "SubnetId: !Ref ManagedSubnet" <<<"$1"' _ "$infra_config_block"
 check "InfrastructureConfiguration attaches the stack instance security group" \
   bash -c 'grep -Fq "SecurityGroupIds: [!Ref InstanceSecurityGroup]" <<<"$1"' _ "$infra_config_block"
-# AMI build logs are ALWAYS retained: without a Logging configuration the bake
-# produces no build log at all, so a bad bake (the DKMS incident) is
-# undiagnosable. The log group is a first-class resource with bounded retention.
-check "Image Builder build-log group exists (AWS::Logs::LogGroup)" \
-  bash -c 'grep -Fq "Type: AWS::Logs::LogGroup" <<<"$1"' _ "$log_group_block"
-check "build-log group is named /aws/imagebuilder/strimserver-baked" \
-  bash -c 'grep -Fq "LogGroupName: /aws/imagebuilder/strimserver-baked" <<<"$1"' _ "$log_group_block"
-check "build-log group retains logs for 90 days" \
-  bash -c 'grep -Fq "RetentionInDays: 90" <<<"$1"' _ "$log_group_block"
-check "build-log group carries the Project tag" \
-  bash -c 'grep -Fq "Key: Project" <<<"$1" && grep -Fq "Value: !Ref ProjectName" <<<"$1"' _ "$log_group_block"
-check "InfrastructureConfiguration enables CloudWatch logging" \
-  bash -c 'grep -Fq "Logging:" <<<"$1" && grep -Fq "CloudWatchLogs:" <<<"$1"' _ "$infra_config_block"
-check "CloudWatch logging wires the build-log group ARN (no empty s3Logs)" \
-  bash -c 'grep -Fq "LogGroupArn: !GetAtt BakedImageBuilderLogs.Arn" <<<"$1" && ! grep -Fq "s3Logs: {}" <<<"$1"' _ "$infra_config_block"
+# Image Builder writes every build to its own automatic CloudWatch groups:
+# /aws/imagebuilder/<recipe-name> (per-build streams <recipe-version>/<build>)
+# and /aws/imagebuilder/pipeline/<pipeline-name>. The custom LogGroup +
+# Logging/CloudWatchLogs wiring added in f763a68 was reverted: it created an
+# extra stack resource that broke a deploy and duplicated logging Image Builder
+# already retains. Pin the revert so it cannot creep back.
+check "infra template creates NO custom CloudWatch LogGroup (Image Builder logs automatically)" \
+  bash -c '! grep -Fq "AWS::Logs::LogGroup" "$1"' _ "$infra_template"
+check "InfrastructureConfiguration has no explicit Logging block (automatic Image Builder logging)" \
+  bash -c '! grep -Fq "Logging:" <<<"$1" && ! grep -Fq "CloudWatchLogs:" <<<"$1"' _ "$infra_config_block"
 
 # Image Builder publishes the produced AMI id natively during the DISTRIBUTION
 # phase. SsmParameterConfigurations is a SIBLING of AmiDistributionConfiguration
@@ -473,9 +467,9 @@ check "produced AMI id is published to /strimserver/ami/baked/latest" \
 # a sha256 content lock stored beside the expected version so any change forces a
 # conscious version bump.
 # ---------------------------------------------------------------------------
-expected_component_version="1.0.3"
-expected_recipe_version="1.0.3"
-expected_component_data_sha256="7ecd476d6ea6cc8ff6d45c46b275110f025358e1006f21f38a9284f7ae3eafa5"
+expected_component_version="1.0.4"
+expected_recipe_version="1.0.4"
+expected_component_data_sha256="9831c73671484168b674536473d51fcdb3a8c09ed1d6a14271f615a65d787c27"
 
 containerd_nvme_conf="$script_dir/containerd-nvme.conf"
 containerd_config_toml="$script_dir/containerd-config.toml"
@@ -646,6 +640,43 @@ check "stale userland packages (fabricmanager, nscq) are removed" \
   bash -c 'grep -Fq "nvidia-fabricmanager" <<<"$1" && grep -Fq "libnvidia-nscq" <<<"$1" && grep -Fq "dnf remove" <<<"$1"' _ "$purge_dkms_block"
 check "depmod -a runs after module changes" \
   bash -c 'grep -Fq "depmod -a" <<<"$1"' _ "$purge_dkms_block"
+
+# Boot-time DLAMI driver manager neutralization. Field evidence: the DLAMI's
+# nvidia-kmod-load.service runs nvidia-kmod-load.sh at every instance boot. It
+# (a) removes any DKMS module that is not its pinned variant as "conflicting"
+# (deleting the baked nvidia/620.70.06 registration and extra/*.ko), then
+# (b) restores its pinned nvidia-open/595.112.07 from a prebuilt tarball under
+# /var/lib/dkms-archive via `dkms ldtarball` + `dkms install --force`. The
+# result is a loaded 620 core with 595 on disk, so nvidia_uvm fails (-22) and
+# cuInit returns CUDA_ERROR_UNKNOWN. The bake must disable+mask the unit and
+# remove the tarballs, failing closed if either effect is missing.
+check "PurgeStaleNvidiaDkms disables the DLAMI nvidia-kmod-load.service (tolerant)" \
+  bash -c 'grep -Fq "systemctl disable nvidia-kmod-load.service" <<<"$1" && grep -Fq "|| true" <<<"$1"' _ "$purge_dkms_block"
+check "PurgeStaleNvidiaDkms masks nvidia-kmod-load.service via a /dev/null symlink" \
+  bash -c 'grep -Fq "ln -sf /dev/null /etc/systemd/system/nvidia-kmod-load.service" <<<"$1"' _ "$purge_dkms_block"
+check "PurgeStaleNvidiaDkms creates the systemd unit directory before masking" \
+  bash -c 'grep -Fq "mkdir -p /etc/systemd/system" <<<"$1"' _ "$purge_dkms_block"
+check "PurgeStaleNvidiaDkms fail-closed post-check requires the mask symlink" \
+  bash -c 'grep -Fq -- "-L /etc/systemd/system/nvidia-kmod-load.service" <<<"$1" && grep -Fq "not masked" <<<"$1" && grep -Fq "exit 1" <<<"$1"' _ "$purge_dkms_block"
+check "PurgeStaleNvidiaDkms removes the prebuilt nvidia DKMS archives" \
+  bash -c 'grep -Fq "rm -rf /var/lib/dkms-archive/nvidia*" <<<"$1"' _ "$purge_dkms_block"
+check "PurgeStaleNvidiaDkms fail-closed post-check rejects any remaining nvidia archive" \
+  bash -c 'grep -Fq "compgen -G '\''/var/lib/dkms-archive/nvidia*'\''" <<<"$1" && grep -Fq "archives remain" <<<"$1" && grep -Fq "exit 1" <<<"$1"' _ "$purge_dkms_block"
+check "PurgeStaleNvidiaDkms explains the boot-time 620 removal and 595 tarball restore" \
+  bash -c 'grep -Fq "nvidia-kmod-load" <<<"$1" && grep -Fq "dkms-archive" <<<"$1" && grep -Fq "595" <<<"$1"' _ "$purge_dkms_block"
+check "driver-manager neutralization runs before the final on-disk gate" \
+  bash -c '
+    a="$(grep -n "systemctl disable nvidia-kmod-load.service" <<<"$1" | head -1 | cut -d: -f1)"
+    b="$(grep -n "for module in nvidia nvidia-uvm" <<<"$1" | head -1 | cut -d: -f1)"
+    [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+  ' _ "$purge_dkms_block"
+check "archive removal runs before the final on-disk gate" \
+  bash -c '
+    a="$(grep -n "rm -rf /var/lib/dkms-archive/nvidia*" <<<"$1" | head -1 | cut -d: -f1)"
+    b="$(grep -n "for module in nvidia nvidia-uvm" <<<"$1" | head -1 | cut -d: -f1)"
+    [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+  ' _ "$purge_dkms_block"
+
 check "PurgeStaleNvidiaDkms runs AFTER EstablishNvidiaDriverFloor (ordering)" \
   bash -c '
     a="$(grep -n "name: EstablishNvidiaDriverFloor" <<<"$1" | head -1 | cut -d: -f1)"

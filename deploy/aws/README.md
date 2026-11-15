@@ -437,19 +437,26 @@ the baked AMI before falling back to the DLAMI.
 
 ### AMI build logs
 
-Every bake logs to the CloudWatch Logs group `/aws/imagebuilder/strimserver-baked`
-(us-east-2) with 90-day retention. Logs are **always on**: the infrastructure
-configuration sets `Logging.CloudWatchLogs`, and both Image Builder roles
-(instance profile and execution role) carry the `logs:*` write grant. A bake
-that emits no log is undiagnosable — the DKMS incident shipped an image whose
-`PurgeStaleNvidiaDkms` effects were absent, and there was no build log to show
-why.
+Image Builder logs every bake **automatically** — the template creates no
+custom log group and the infrastructure configuration sets no `Logging` block.
+Each build writes two CloudWatch Logs groups in the stack's region (us-east-2):
 
-View the latest build's per-step output in the Image Builder console (the
-pipeline's build history links to the log stream), or tail it:
+- `/aws/imagebuilder/strimserver-baked-recipe` — per-build log streams named
+  `<recipe-version>/<build>` (for example `1.0.4/1`). This is the per-step
+  output you read to diagnose a failed or suspicious bake.
+- `/aws/imagebuilder/pipeline/strimserver-baked` — pipeline execution logs.
+
+Bake logs are always retained (a design rule: the DKMS incident shipped an image
+whose `PurgeStaleNvidiaDkms` effects were absent, and there was no build log to
+show why), and they are now operator-readable: the operator stack grants the
+`[strimserver]` operator user `logs:DescribeLogStreams` / `GetLogEvents` /
+`FilterLogEvents` on `log-group:/aws/imagebuilder/*`. Open the Image Builder
+console's build history for the rendered per-step view, or tail the latest
+recipe stream:
 
 ```sh
-aws logs tail /aws/imagebuilder/strimserver-baked --follow
+aws logs tail /aws/imagebuilder/strimserver-baked-recipe \
+  --profile strimserver --region us-east-2 --follow
 ```
 
 Deploy in two steps. `provision-account` is the only admin-run script: it

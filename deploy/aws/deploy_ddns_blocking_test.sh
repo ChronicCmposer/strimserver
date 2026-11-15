@@ -40,7 +40,10 @@ begin_case() {
   case_tmp="$(mktemp -d)"
   case_out="$case_tmp/deploy.out"
   case_path="$PATH"
+  # Healthy baked graph: nvidia-open 620 on disk AND loaded, with nvidia_uvm
+  # loaded. deploy.sh's floor gate now requires all three to agree.
   export FAKE_ARCH=x86_64 FAKE_PROC_VERSION=620.70.06 FAKE_REPORTED_DRIVER=620.70.06
+  export FAKE_RPM_INSTALLED=1 FAKE_MODULES="nvidia nvidia_uvm"
   export FAKE_PUBLIC_IP=203.0.113.10
   fake_gpu_install
   fake_deploy_install
@@ -61,7 +64,7 @@ end_case() {
     FAKE_MOUNTPOINT_RC FAKE_CONTAINERD_ACTIVE FAKE_CONTAINERD_START_RC \
     FAKE_CONTAINERD_STAY_INACTIVE FAKE_DDNS_START_RC \
     FAKE_DDNS_VERIFY_START_RC FAKE_DDNS_STOP_RC FAKE_SYSTEMCTL_BLOCK_SECONDS \
-    FAKE_INVOCATION_ID DEPLOY_M1_ELAPSED_OVERRIDE FAKE_PGREP_RC \
+    FAKE_INVOCATION_ID DEPLOY_M1_ELAPSED_OVERRIDE FAKE_PGREP_RC FAKE_MODULES \
     DEPLOY_ROOT DEPLOY_LOGS_ROOT DEPLOY_LOCK_FILE 2>/dev/null || true
 }
 
@@ -160,6 +163,22 @@ check "static: no bare systemctl start/stop/disable" \
   bash -c 'awk "/systemctl (start|stop|disable)/ && !/printf/ && !/sudo timeout -k 5 [0-9]+ systemctl (start|stop|disable)/ { bad=1 } END { exit bad ? 1 : 0 }" "$1"' _ "$deploy_sh"
 check "static: every IMDS curl is bounded by --max-time 5" \
   bash -c 'n=$(grep -Ec "(^|[^[:alnum:]_])curl " "$1"); b=$(grep -E "(^|[^[:alnum:]_])curl " "$1" | grep -c -- "--max-time 5"); [ "$n" -gt 0 ] && [ "$n" -eq "$b" ]' _ "$script_dir/imdslib.sh"
+
+# The driver gate is on-disk-aware: a loaded 620 core over a stale 595
+# nvidia-uvm.ko (the DLAMI boot-time tarball restore) must not take the fast
+# path. The gate calls the lib helper that requires loaded >= floor, on-disk
+# nvidia AND nvidia-uvm == loaded, AND nvidia_uvm loaded. The old proc-only gate
+# is gone.
+check "static: deploy.sh gate uses the on-disk graph helper" \
+  grep -q 'nvidia__loaded_graph_consistent' "$deploy_sh"
+check "static: deploy.sh has no bare proc-only nvidia__proc_at_floor gate" \
+  bash -c '! grep -q "nvidia__proc_at_floor" "$1"' _ "$deploy_sh"
+check "static: gate reports loaded vs on-disk nvidia/nvidia-uvm and uvm state" \
+  bash -c 'grep -q "on-disk nvidia=" "$1" && grep -q "nvidia-uvm=" "$1" && grep -q "nvidia_uvm is" "$1"' _ "$deploy_sh"
+check "static: gate remediation names the SSM parameter and setup-gpu.sh" \
+  bash -c 'grep -q "/strimserver/ami/baked/latest" "$1" && grep -q "setup-gpu\.sh" "$1"' _ "$deploy_sh"
+check "static: success still prints the NVIDIA driver floor" \
+  grep -q 'NVIDIA driver floor satisfied' "$deploy_sh"
 
 # ===========================================================================
 # 0. orphan-import guard must not self-match its own timeout wrapper
@@ -588,6 +607,37 @@ containerd_still_inactive_case() {
   end_case
 }
 check "a start that leaves containerd inactive exits 1" containerd_still_inactive_case
+
+# ===========================================================================
+# 9b. on-disk / loaded driver skew fails the floor gate
+# ===========================================================================
+# The fake harness models the loaded version (proc file) separately from the
+# on-disk version (driver_version -> modinfo) and the module set (lsmod). Model
+# the field failure exactly: the core is loaded at 620, but the DLAMI restored
+# a 595 nvidia-uvm.ko on disk and nvidia_uvm is not loaded. The deploy must
+# refuse the fast path instead of printing "floor satisfied".
+driver_skew_case() {
+  begin_case
+  printf '595.112.07' >"$FAKE_GPU_STATE/driver_version"
+  printf 'nvidia\n' >"$FAKE_GPU_STATE/modules"
+  local rc
+  rc="$(run_deploy)"
+
+  check "driver skew: deploy exits 1" test "$rc" -eq 1
+  check "driver skew: names the loaded 620 core" grep -q 'loaded=620.70.06' "$case_out"
+  check "driver skew: names the on-disk nvidia 595" grep -q 'on-disk nvidia=595.112.07' "$case_out"
+  check "driver skew: names the on-disk nvidia-uvm 595" grep -q 'nvidia-uvm=595.112.07' "$case_out"
+  check "driver skew: reports nvidia_uvm is not loaded" grep -q 'nvidia_uvm is not loaded' "$case_out"
+  check "driver skew: never prints the floor-satisfied success line" \
+    bash -c '! grep -q "NVIDIA driver floor satisfied" "$1"' _ "$case_out"
+  check "driver skew: remediation names the SSM parameter" \
+    grep -q '/strimserver/ami/baked/latest' "$case_out"
+  check "driver skew: remediation names setup-gpu.sh" grep -q 'setup-gpu\.sh' "$case_out"
+  check "driver skew: aborts before CDI generation" not_called 'nvidia-ctk cdi generate'
+  check "driver skew: aborts before image import" not_called ' i import '
+  end_case
+}
+check "a loaded/on-disk driver skew fails the floor gate with diagnostics" driver_skew_case
 
 # ===========================================================================
 # 10. M1 overrun is warn-only

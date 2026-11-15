@@ -39,6 +39,9 @@ begin_case() {
   case_tmp="$(mktemp -d)"
   case_out="$case_tmp/deploy.out"
   case_path="$PATH"
+  # deploy.sh's floor gate requires the on-disk nvidia + nvidia-uvm modules to
+  # match the loaded version and nvidia_uvm to be loaded. Model a baked host.
+  export FAKE_RPM_INSTALLED=1 FAKE_MODULES="nvidia nvidia_uvm"
   fake_gpu_install
   fake_deploy_install
   fake_deploy_seed_baseline
@@ -51,7 +54,7 @@ end_case() {
   rm -rf "$case_tmp"
   unset NVIDIA_PROC_VERSION_FILE NVIDIA_DEVICE_NODE NVIDIA_STAGE_DIR \
     NVIDIA_FIRMWARE_ROOT NVIDIA_RESUME_MARKER SUDO FAKE_ARCH FAKE_PROC_VERSION \
-    FAKE_REPORTED_DRIVER FAKE_RPM_INSTALLED FAKE_PUBLIC_IP FAKE_CTR_DELAY \
+    FAKE_REPORTED_DRIVER FAKE_RPM_INSTALLED FAKE_MODULES FAKE_PUBLIC_IP FAKE_CTR_DELAY \
     FAKE_CTR_FAIL_IMAGE FAKE_GPU_BINDIR FAKE_GPU_CALLS FAKE_GPU_STATE \
     FAKE_DNF_ARGV FAKE_PROC_FILE FAKE_SUDO_ACTIVE FAKE_DEPLOY_BINDIR \
     FAKE_DEPLOY_ROOT FAKE_SYSROOT FAKE_DEPLOY_SLEEP_LOG FAKE_CTR_STARTS \
