@@ -787,5 +787,5 @@ git_override(
     # git.cmposer.cc serves git over ssh only (no https endpoint); the host
     # ssh key must be present and known_hosts pre-seeded for Bazel's fetch.
     remote = "ssh://git@git.cmposer.cc/stackctl.git",
-    commit = "v0.1.6",
+    commit = "3f561cafcffa07bb5b9511304da0cf040b10685c",
 )
