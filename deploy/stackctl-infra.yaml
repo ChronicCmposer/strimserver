@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.2 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.9 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl regional infra stack - VPC, subnet, security group, retained buckets, optional Image Builder and spot alerts.
 Parameters:
@@ -8,11 +8,13 @@ Parameters:
     Description: Project identifier - hyphen-free and equal to the stack name prefix. The per-REGION length bound (derived from the longest S3 bucket name) is enforced by stackctl config validation, the single source of truth.
   ReleaseTag:
     Type: String
-    Description: Release tag recorded as stack metadata and resource metadata.
+    Default: ""
+    Description: Release tag recorded as stack metadata and resource metadata. Empty during the first-deploy CREATE bootstrap so the artifact bucket exists before stackctl publishes.
   ReleaseManifestSha256:
     Type: String
-    AllowedPattern: "^[a-f0-9]{64}$"
-    Description: SHA-256 of the release manifest recorded as resource metadata.
+    Default: ""
+    AllowedPattern: "^([a-f0-9]{64})?$"
+    Description: SHA-256 of the release manifest recorded as resource metadata. Empty during the first-deploy CREATE bootstrap; set by the recording UPDATE.
   AmiPolicy:
     Type: String
     AllowedValues:
