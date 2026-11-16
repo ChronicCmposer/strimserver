@@ -137,10 +137,21 @@ normalize_model() {
       | sed -e 's/^ //' -e 's/ $//'
 }
 
-select_instance_store() {
-   local listing name type model wanted best="" best_key=""
-   local key
+# True when the device is an EC2 instance-store NVMe disk. lsblk's MODEL
+# column can be empty or truncated on some util-linux builds (observed on
+# the baked AL2023 DLAMI), so fall back to the sysfs model exactly like the
+# predecessor setup_strimserver's proven-live detection chain did.
+is_instance_store() {
+   local name="$1" model="$2" sysfs_model wanted
    wanted="$(normalize_model "$INSTANCE_STORE_MODEL")"
+   [ "$(normalize_model "$model")" = "$wanted" ] && return 0
+   sysfs_model="$(cat "/sys/block/${name}/device/model" 2>/dev/null || true)"
+   [ "$(normalize_model "$sysfs_model")" = "$wanted" ]
+}
+
+select_instance_store() {
+   local listing name type model best="" best_key=""
+   local key
    listing="$(lsblk -dnrno NAME,TYPE,MODEL)" \
       || die "could not enumerate block devices (lsblk failed)"
    while read -r name type model; do
@@ -149,7 +160,7 @@ select_instance_store() {
          nvme[0-9]*n[0-9]*) ;;
          *) continue ;;
       esac
-      [ "$(normalize_model "$model")" = "$wanted" ] || continue
+      is_instance_store "$name" "$model" || continue
       key="${name#nvme}"
       key="${key%%n*}"
       if [ -z "$best" ] || [ "$key" -lt "$best_key" ]; then
