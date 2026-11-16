@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.9 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.11 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl account-global operator stack - instance role, operator managed policy, optional CI user and Image Builder roles.
 Parameters:
@@ -266,11 +266,95 @@ Resources:
               - ec2:DescribeVpcs
               - ec2:DescribeSubnets
               - ec2:DescribeSecurityGroups
+              - ec2:DescribeSecurityGroupRules
               - ec2:DescribeKeyPairs
               - ec2:DescribeVolumes
               - ec2:DescribeInstanceStatus
               - ec2:DescribeSpotPriceHistory
+              # VPC-lifecycle reads the CloudFormation resource handlers issue
+              # under the caller's identity (live failures during the
+              # strimserver pilot rollback: DescribeInternetGateways; the rest
+              # of the set is the complete handler read surface for the
+              # VPC/subnet/IGW/route-table/SG resources this template's infra
+              # stack creates).
+              - ec2:DescribeInternetGateways
+              - ec2:DescribeRouteTables
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeTags
+              - ec2:DescribeVpcAttribute
+              - ec2:DescribeSubnetAttribute
             Resource: "*"
+          # The infra stack creates the baked-image Image Builder
+          # component/recipe/infrastructure/distribution/pipeline as this
+          # identity, so the lifecycle actions must exist only when image
+          # building is enabled. CloudFormation also issues TagResource after a
+          # tagged create and UntagResource on update; without them the first
+          # tagged create is denied. Account-scoped and region-wild like the
+          # rest of this account-global operator policy.
+          - Fn::If:
+              - EnableImageBuilderCondition
+              - Sid: ImageBuilderLifecycle
+                Effect: Allow
+                Action:
+                  - imagebuilder:CreateComponent
+                  - imagebuilder:DeleteComponent
+                  - imagebuilder:CreateImageRecipe
+                  - imagebuilder:DeleteImageRecipe
+                  - imagebuilder:CreateInfrastructureConfiguration
+                  - imagebuilder:UpdateInfrastructureConfiguration
+                  - imagebuilder:DeleteInfrastructureConfiguration
+                  - imagebuilder:CreateDistributionConfiguration
+                  - imagebuilder:UpdateDistributionConfiguration
+                  - imagebuilder:DeleteDistributionConfiguration
+                  - imagebuilder:CreateImagePipeline
+                  - imagebuilder:UpdateImagePipeline
+                  - imagebuilder:DeleteImagePipeline
+                  - imagebuilder:TagResource
+                  - imagebuilder:UntagResource
+                Resource: !Sub arn:aws:imagebuilder:*:${AWS::AccountId}:*
+              - !Ref "AWS::NoValue"
+          # CloudFormation wires these roles into Image Builder and the instance
+          # profile, so it must pass exactly those roles (never an arbitrary
+          # role) to their services. The ARNs are constructed from the fixed
+          # names defined in this template, so there is no cross-stack cycle.
+          - Fn::If:
+              - EnableImageBuilderCondition
+              - Sid: PassImageBuilderRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-baked-imagebuilder-instance-role
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-imagebuilder-execution-role
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - ec2.amazonaws.com
+                      - imagebuilder.amazonaws.com
+                      # The distribution handler may pass the role to VM
+                      # Import/Export during AMI distribution.
+                      - vmie.amazonaws.com
+              - !Ref "AWS::NoValue"
+          # Creating/updating the infrastructure configuration reads the
+          # referenced instance profile under the caller's identity, so scope
+          # iam:GetInstanceProfile to the one baked Image Builder profile.
+          - Fn::If:
+              - EnableImageBuilderCondition
+              - Sid: GetImageBuilderInstanceProfile
+                Effect: Allow
+                Action: iam:GetInstanceProfile
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/${ProjectName}-baked-imagebuilder-instance-profile
+              - !Ref "AWS::NoValue"
+          # Image Builder creates this service-linked role on first-ever use in
+          # the account; scope the grant to exactly that ARN so the operator can
+          # never create arbitrary service-linked roles.
+          - Fn::If:
+              - EnableImageBuilderCondition
+              - Sid: ImageBuilderServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/imagebuilder.amazonaws.com/AWSServiceRoleForImageBuilder
+              - !Ref "AWS::NoValue"
   OperatorUser:
     Type: AWS::IAM::User
     Properties:
