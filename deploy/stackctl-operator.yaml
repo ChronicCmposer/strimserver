@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.12 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.13 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl account-global operator stack - instance role, operator managed policy, optional CI user and Image Builder roles.
 Parameters:
@@ -258,6 +258,34 @@ Resources:
               - s3:GetObject
               - s3:DeleteObject
             Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
+          # The infra stack creates and configures the artifact and cert
+          # buckets through CloudFormation's S3 resource handlers, which issue
+          # their bucket-level API calls under THIS (the caller's) identity.
+          # Object access above is not enough: creating the bucket, applying
+          # its public-access-block/encryption/versioning/lifecycle/tag
+          # configuration, and deleting a just-created bucket during a
+          # rollback (DeletionPolicy RetainExceptOnCreate) all need these
+          # bucket-lifecycle actions. Enumerated, never wildcarded.
+          - Sid: BucketLifecycle
+            Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning
+              - s3:GetBucketTagging
+              - s3:PutBucketTagging
+              - s3:DeleteBucketTagging
+              - s3:GetPublicAccessBlock
+              - s3:PutPublicAccessBlock
+              - s3:GetEncryptionConfiguration
+              - s3:PutEncryptionConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:PutLifecycleConfiguration
+            Resource:
+              - !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*
+              - !Sub arn:aws:s3:::${ProjectName}-certs-${AWS::AccountId}-*
           - Sid: ReadOnlyDescribe
             Effect: Allow
             Action:
