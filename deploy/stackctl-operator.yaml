@@ -1,5 +1,4 @@
-# Vendored from stackctl v0.1.19 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
-AWSTemplateFormatVersion: "2010-09-09"
+# Vendored from stackctl v0.1.20 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 Description: stackctl account-global operator stack - instance role, operator managed policy, optional CI user and Image Builder roles.
 Parameters:
   ProjectName:
@@ -122,13 +121,17 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
+          # RunInstances must NOT be gated on ec2:CreateAction: that key only
+          # exists while CreateTags/DeleteTags run as part of resource creation,
+          # so a StringEquals on it is false when IAM evaluates RunInstances and
+          # the grant never matches. CreateAction belongs only on the
+          # CreateTagsOnLaunch tag-on-create statement below.
           - Sid: RunInstancesTagged
             Effect: Allow
             Action: ec2:RunInstances
             Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
             Condition:
               StringEquals:
-                ec2:CreateAction: ec2:RunInstances
                 aws:RequestTag/Project: !Ref ProjectName
               ForAllValues:StringEquals:
                 ec2:InstanceType: !Ref InstanceTypeAllowlist
@@ -147,6 +150,10 @@ Resources:
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:network-interface/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:subnet/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
+              # Public AMIs (e.g. the DLAMI fallback) live in the empty-account
+              # partition namespace, so keep that image ARN alongside the
+              # account-scoped one.
+              - arn:aws:ec2:*::image/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:image/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:key-pair/*
           - Sid: TerminateTagged
