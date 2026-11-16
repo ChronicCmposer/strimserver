@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.24 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.25 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 Description: stackctl account-global operator stack - instance role, operator managed policy, optional CI user and Image Builder roles.
 Parameters:
   ProjectName:

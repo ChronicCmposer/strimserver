@@ -780,12 +780,12 @@ register_toolchains(
 # re-run against a conforming stack failed under v0.1.3).
 # v0.1.5: fresh-key identity verification gets a ~54s exponential-backoff
 # budget (IAM propagation; 2.5s budget failed live under v0.1.4).
-bazel_dep(name = "stackctl", version = "0.1.24")
+bazel_dep(name = "stackctl", version = "0.1.25")
 
 git_override(
     module_name = "stackctl",
     # git.cmposer.cc serves git over ssh only (no https endpoint); the host
     # ssh key must be present and known_hosts pre-seeded for Bazel's fetch.
     remote = "ssh://git@git.cmposer.cc/stackctl.git",
-    commit = "b43bc2b7f78757939ef0e6f195d09fca6d0fcbfd",
+    commit = "f89437cf09afbcc712b810d12d1b189cc634e2b4",
 )
