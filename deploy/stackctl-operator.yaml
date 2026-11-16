@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.15 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.16 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl account-global operator stack - instance role, operator managed policy, optional CI user and Image Builder roles.
 Parameters:
@@ -367,6 +367,31 @@ Resources:
                   - imagebuilder:DeleteImagePipeline
                   - imagebuilder:TagResource
                   - imagebuilder:UntagResource
+                Resource: !Sub arn:aws:imagebuilder:*:${AWS::AccountId}:*
+              - !Ref "AWS::NoValue"
+          # CloudFormation's ImageBuilder resource handlers issue Get*/List*
+          # reads under the CALLER's identity while creating and deleting each
+          # resource; without them a create fails with AccessDenied. Enumerate
+          # the read surface for the same resource families the lifecycle
+          # statement manages (plus tag reads), never a wildcard.
+          - Fn::If:
+              - EnableImageBuilderCondition
+              - Sid: ImageBuilderRead
+                Effect: Allow
+                Action:
+                  - imagebuilder:GetComponent
+                  - imagebuilder:GetImageRecipe
+                  - imagebuilder:GetInfrastructureConfiguration
+                  - imagebuilder:GetDistributionConfiguration
+                  - imagebuilder:GetImagePipeline
+                  - imagebuilder:GetImage
+                  - imagebuilder:ListComponents
+                  - imagebuilder:ListImageRecipes
+                  - imagebuilder:ListInfrastructureConfigurations
+                  - imagebuilder:ListDistributionConfigurations
+                  - imagebuilder:ListImagePipelines
+                  - imagebuilder:ListImages
+                  - imagebuilder:ListTagsForResource
                 Resource: !Sub arn:aws:imagebuilder:*:${AWS::AccountId}:*
               - !Ref "AWS::NoValue"
           # CloudFormation wires these roles into Image Builder and the instance
