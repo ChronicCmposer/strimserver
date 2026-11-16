@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.14 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.15 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl account-global operator stack - instance role, operator managed policy, optional CI user and Image Builder roles.
 Parameters:
@@ -112,6 +112,8 @@ Resources:
       InstanceProfileName: !Sub ${ProjectName}-instance-profile
       Roles:
         - !Ref InstanceRole
+  # Core operator permissions: stack/change-set lifecycle, EC2 instance
+  # lifecycle, S3 release object access, SSM reads, and key self-rotation.
   OperatorPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -199,6 +201,49 @@ Resources:
             Effect: Allow
             Action: cloudformation:DeleteStack
             Resource: !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/${ProjectName}-infra/*
+          - Sid: DdnsSecretRead
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+            Resource: !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/*
+          - Sid: ConsoleOutputTagged
+            Effect: Allow
+            Action: ec2:GetConsoleOutput
+            Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ec2:ResourceTag/Project: !Ref ProjectName
+          - Sid: ArtifactBucketList
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - releases/*
+                  - releases
+          - Sid: ArtifactReleases
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
+  # CloudFormation handler support for the infra stack: VPC/subnet/route-table
+  # lifecycle, bucket lifecycle, and read-only describe calls the handlers
+  # issue under the caller's identity.
+  OperatorInfraPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-operator-infra
+      Description: CloudFormation handler support for the project infra stack.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # The infra stack creates the VPC, subnets, gateways, route tables
+          # and security groups through CloudFormation's EC2 resource handlers,
+          # which issue these calls under the caller's identity.
           - Sid: VpcLifecycle
             Effect: Allow
             Action:
@@ -229,35 +274,6 @@ Resources:
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:internet-gateway/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:route-table/*
-          - Sid: DdnsSecretRead
-            Effect: Allow
-            Action:
-              - ssm:GetParameter
-              - ssm:GetParameters
-            Resource: !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/*
-          - Sid: ConsoleOutputTagged
-            Effect: Allow
-            Action: ec2:GetConsoleOutput
-            Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
-            Condition:
-              StringEquals:
-                ec2:ResourceTag/Project: !Ref ProjectName
-          - Sid: ArtifactBucketList
-            Effect: Allow
-            Action: s3:ListBucket
-            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*
-            Condition:
-              StringLike:
-                s3:prefix:
-                  - releases/*
-                  - releases
-          - Sid: ArtifactReleases
-            Effect: Allow
-            Action:
-              - s3:PutObject
-              - s3:GetObject
-              - s3:DeleteObject
-            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
           # The infra stack creates and configures the artifact and cert
           # buckets through CloudFormation's S3 resource handlers, which issue
           # their bucket-level API calls under THIS (the caller's) identity.
@@ -313,6 +329,17 @@ Resources:
               - ec2:DescribeVpcAttribute
               - ec2:DescribeSubnetAttribute
             Resource: "*"
+  # Image Builder lifecycle support, gated on EnableImageBuilder. CloudFormation
+  # creates the baked-image resources as this identity.
+  OperatorImageBuilderPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: EnableImageBuilderCondition
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-operator-imagebuilder
+      Description: Image Builder lifecycle support for the baked-image pipeline.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
           # The infra stack creates the baked-image Image Builder
           # component/recipe/infrastructure/distribution/pipeline as this
           # identity, so the lifecycle actions must exist only when image
@@ -389,6 +416,8 @@ Resources:
       UserName: !Ref ProjectName
       ManagedPolicyArns:
         - !Ref OperatorPolicy
+        - !Ref OperatorInfraPolicy
+        - !If [EnableImageBuilderCondition, !Ref OperatorImageBuilderPolicy, !Ref "AWS::NoValue"]
       Tags:
         - Key: Project
           Value: !Ref ProjectName

@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.14 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.15 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl regional infra stack - VPC, subnet, security group, retained buckets, optional Image Builder and spot alerts.
 Parameters:
