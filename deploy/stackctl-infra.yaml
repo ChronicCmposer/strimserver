@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.13 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.14 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl regional infra stack - VPC, subnet, security group, retained buckets, optional Image Builder and spot alerts.
 Parameters:
@@ -33,8 +33,8 @@ Parameters:
     Description: Pinned arm64 AMI id used when AmiPolicy is pinned.
   ImageBuilderParentImage:
     Type: String
-    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
-    Description: SSM public parameter path used as the Image Builder parent image.
+    Default: ""
+    Description: "Image Builder parent image: an EC2 AMI id (ami-...) or a full SSM parameter ARN (arn:aws:ssm:...). Required when EnableImageBuilder is true."
   OperatorCidr:
     Type: String
     Default: ""
@@ -532,7 +532,7 @@ Resources:
     Properties:
       Name: !Sub ${ProjectName}-baked-image-recipe
       Version: 1.0.0
-      ParentImage: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ImageBuilderParentImage}
+      ParentImage: !Ref ImageBuilderParentImage
       Components:
         - ComponentArn: !Ref BakedImageComponent
   BakedImageInfrastructure:
