@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.20 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.21 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 Description: stackctl account-global operator stack - instance role, operator managed policy, optional CI user and Image Builder roles.
 Parameters:
   ProjectName:
@@ -125,7 +125,9 @@ Resources:
           # exists while CreateTags/DeleteTags run as part of resource creation,
           # so a StringEquals on it is false when IAM evaluates RunInstances and
           # the grant never matches. CreateAction belongs only on the
-          # CreateTagsOnLaunch tag-on-create statement below.
+          # CreateTagsOnLaunch tag-on-create statement below. ec2:CreateAction
+          # values are the bare API action name without the service prefix, so
+          # that statement tests for RunInstances, not ec2:RunInstances.
           - Sid: RunInstancesTagged
             Effect: Allow
             Action: ec2:RunInstances
@@ -169,7 +171,7 @@ Resources:
             Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
             Condition:
               StringEquals:
-                ec2:CreateAction: ec2:RunInstances
+                ec2:CreateAction: RunInstances
               ForAllValues:StringEquals:
                 aws:TagKeys:
                   - Project

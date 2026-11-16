@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.20 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.21 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 Description: stackctl regional infra stack - VPC, subnet, security group, retained buckets, optional Image Builder and spot alerts.
 Parameters:
   ProjectName:
