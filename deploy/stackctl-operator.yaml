@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.16 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.17 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl account-global operator stack - instance role, operator managed policy, optional CI user and Image Builder roles.
 Parameters:
@@ -257,6 +257,10 @@ Resources:
               - ec2:DeleteSecurityGroup
               - ec2:AuthorizeSecurityGroupIngress
               - ec2:RevokeSecurityGroupIngress
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupEgress
+              - ec2:UpdateSecurityGroupRuleDescriptionsIngress
+              - ec2:UpdateSecurityGroupRuleDescriptionsEgress
               - ec2:CreateInternetGateway
               - ec2:DeleteInternetGateway
               - ec2:AttachInternetGateway
@@ -265,9 +269,12 @@ Resources:
               - ec2:DeleteRouteTable
               - ec2:CreateRoute
               - ec2:DeleteRoute
+              - ec2:ReplaceRoute
               - ec2:AssociateRouteTable
               - ec2:DisassociateRouteTable
+              - ec2:ReplaceRouteTableAssociation
               - ec2:CreateTags
+              - ec2:DeleteTags
             Resource:
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:vpc/*
               - !Sub arn:aws:ec2:*:${AWS::AccountId}:subnet/*
@@ -288,17 +295,31 @@ Resources:
               - s3:CreateBucket
               - s3:DeleteBucket
               - s3:GetBucketLocation
+              - s3:GetBucketAcl
               - s3:GetBucketVersioning
               - s3:PutBucketVersioning
               - s3:GetBucketTagging
               - s3:PutBucketTagging
-              - s3:DeleteBucketTagging
-              - s3:GetPublicAccessBlock
-              - s3:PutPublicAccessBlock
+              - s3:TagResource
+              - s3:UntagResource
+              # The IAM action names are not the S3 API names: the public
+              # access block is PutBucketPublicAccessBlock (DELETE reuses the
+              # PUT permission), encryption is *EncryptionConfiguration, and
+              # ownership controls are Put/GetBucketOwnershipControls.
+              - s3:GetBucketPublicAccessBlock
+              - s3:PutBucketPublicAccessBlock
               - s3:GetEncryptionConfiguration
               - s3:PutEncryptionConfiguration
+              - s3:DeleteBucketEncryption
+              - s3:GetBucketOwnershipControls
+              - s3:PutBucketOwnershipControls
               - s3:GetLifecycleConfiguration
               - s3:PutLifecycleConfiguration
+              - s3:DeleteBucketLifecycle
+              # ListBucket is HeadBucket's permission; the bucket handlers use
+              # it for existence checks. It is bucket-scoped and grants no
+              # object content access.
+              - s3:ListBucket
             Resource:
               - !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*
               - !Sub arn:aws:s3:::${ProjectName}-certs-${AWS::AccountId}-*
@@ -323,12 +344,51 @@ Resources:
               # stack creates).
               - ec2:DescribeInternetGateways
               - ec2:DescribeRouteTables
+              - ec2:DescribeNetworkAcls
               - ec2:DescribeAvailabilityZones
               - ec2:DescribeNetworkInterfaces
               - ec2:DescribeTags
               - ec2:DescribeVpcAttribute
               - ec2:DescribeSubnetAttribute
             Resource: "*"
+          # The infra stack optionally creates a spot-interruption alert: an
+          # SNS topic + email subscription and an EventBridge rule targeting
+          # it. CloudFormation runs those handlers under the caller's identity,
+          # so the same identity needs the lifecycle and read calls. Resource
+          # ARNs are derived from the fixed template names, never wildcarded.
+          - Sid: SpotAlertTopicLifecycle
+            Effect: Allow
+            Action:
+              - sns:CreateTopic
+              - sns:DeleteTopic
+              - sns:GetTopicAttributes
+              - sns:SetTopicAttributes
+              - sns:Subscribe
+              - sns:Unsubscribe
+              - sns:GetSubscriptionAttributes
+              - sns:SetSubscriptionAttributes
+              - sns:ListSubscriptionsByTopic
+              - sns:ListTagsForResource
+              - sns:TagResource
+              - sns:UntagResource
+            Resource:
+              - !Sub arn:aws:sns:*:${AWS::AccountId}:${ProjectName}-spot-alerts
+              - !Sub arn:aws:sns:*:${AWS::AccountId}:${ProjectName}-spot-alerts:*
+          - Sid: SpotAlertRuleLifecycle
+            Effect: Allow
+            Action:
+              - events:PutRule
+              - events:DeleteRule
+              - events:DescribeRule
+              - events:EnableRule
+              - events:DisableRule
+              - events:PutTargets
+              - events:RemoveTargets
+              - events:ListTargetsByRule
+              - events:ListTagsForResource
+              - events:TagResource
+              - events:UntagResource
+            Resource: !Sub arn:aws:events:*:${AWS::AccountId}:rule/${ProjectName}-spot-interruption
   # Image Builder lifecycle support, gated on EnableImageBuilder. CloudFormation
   # creates the baked-image resources as this identity.
   OperatorImageBuilderPolicy:
@@ -424,6 +484,26 @@ Resources:
                 Effect: Allow
                 Action: iam:GetInstanceProfile
                 Resource: !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/${ProjectName}-baked-imagebuilder-instance-profile
+              - !Ref "AWS::NoValue"
+          # The Image Builder handlers validate the roles referenced by the
+          # pipeline and infrastructure configuration with iam:GetRole, and the
+          # distribution handler reads the baked AMI SSM parameter. Scope both
+          # to the fixed project names.
+          - Fn::If:
+              - EnableImageBuilderCondition
+              - Sid: GetImageBuilderRoles
+                Effect: Allow
+                Action: iam:GetRole
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-baked-imagebuilder-instance-role
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-imagebuilder-execution-role
+              - !Ref "AWS::NoValue"
+          - Fn::If:
+              - EnableImageBuilderCondition
+              - Sid: ReadBakedAmiParameter
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/ami/baked/*
               - !Ref "AWS::NoValue"
           # Image Builder creates this service-linked role on first-ever use in
           # the account; scope the grant to exactly that ARN so the operator can
