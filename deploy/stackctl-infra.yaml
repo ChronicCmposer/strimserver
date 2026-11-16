@@ -1,4 +1,4 @@
-# Vendored from stackctl v0.1.11 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.1.12 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl regional infra stack - VPC, subnet, security group, retained buckets, optional Image Builder and spot alerts.
 Parameters:
@@ -554,7 +554,14 @@ Resources:
       Distributions:
         - Region: !Ref "AWS::Region"
           AmiDistributionConfiguration:
-            Name: !Sub ${ProjectName}-baked-ami-{{ imagebuilder:buildVersion }}
+            Name: !Sub ${ProjectName}-baked-ami-{{ imagebuilder:buildDate }}
+          # Native publish: during the DISTRIBUTION phase Image Builder writes
+          # the output AMI id to this parameter. SsmParameterConfigurations is a
+          # SIBLING of AmiDistributionConfiguration, not nested inside it; the
+          # pipeline execution role performs the write.
+          SsmParameterConfigurations:
+            - ParameterName: !Sub /${ProjectName}/ami/baked/latest
+              DataType: aws:ec2:image
   BakedImagePipeline:
     Type: AWS::ImageBuilder::ImagePipeline
     Condition: EnableImageBuilderCondition
@@ -564,29 +571,9 @@ Resources:
       ImageRecipeArn: !Ref BakedImageRecipe
       InfrastructureConfigurationArn: !Ref BakedImageInfrastructure
       DistributionConfigurationArn: !Ref BakedImageDistribution
-  BakedAmiPublishDocument:
-    Type: AWS::SSM::Document
-    Condition: EnableImageBuilderCondition
-    Properties:
-      DocumentType: Automation
-      Content: "schemaVersion: '0.3'\nmainSteps:\n  - name: publishBakedAmi\n    action: aws:executeAwsApi\n    inputs:\n      Service: ssm\n      Api: PutParameter\n      Name: /${ProjectName}/ami/baked/latest\n      Type: String\n      Value: '{{ BuildImage.ImageId }}'\n"
-  BakedImageBuildRule:
-    Type: AWS::Events::Rule
-    Condition: EnableImageBuilderCondition
-    Properties:
-      Name: !Sub ${ProjectName}-imagebuilder-complete
-      EventPattern:
-        source:
-          - aws.imagebuilder
-        detail-type:
-          - EC2 Image Builder Image Build State Change
-        detail:
-          state:
-            - AVAILABLE
-      Targets:
-        - Arn: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:automation-definition/${BakedAmiPublishDocument}:$DEFAULT
-          Id: baked-ami-publish
-          RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-baked-ami-publish-role
+      # The execution role lives in the operator stack under a fixed
+      # ProjectName-derived name; pass it by ARN so the pipeline actually runs.
+      ExecutionRole: !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-imagebuilder-execution-role
   SpotAlertTopic:
     Type: AWS::SNS::Topic
     Condition: EnableSpotAlertsCondition
