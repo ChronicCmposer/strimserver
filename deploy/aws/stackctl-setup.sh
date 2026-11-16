@@ -216,6 +216,13 @@ mount_instance_store() {
    fi
    [ -n "$dev" ] \
       || die "no Amazon EC2 NVMe Instance Storage device found (set NVME_DEVICE to override)"
+   # select_instance_store returns a bare kernel name (nvme1n1); every consumer
+   # below ([ -b ], blkid, mkfs, mount, swapon) needs the /dev path. NVME_DEVICE
+   # overrides arrive already prefixed.
+   case "$dev" in
+      /*) ;;
+      *) dev="/dev/${dev}" ;;
+   esac
    log "selected instance-store device: ${dev}"
    assert_safe_target "$dev"
 
