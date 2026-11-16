@@ -103,7 +103,7 @@ fetch_ssm_securestring() {
 
    canonical_headers="content-type:application/x-amz-json-1.1${nl}host:${host}${nl}x-amz-date:${amz_date}${nl}x-amz-security-token:${session_token}${nl}x-amz-target:AmazonSSM.GetParameter${nl}"
    signed_headers="content-type;host;x-amz-date;x-amz-security-token;x-amz-target"
-   canonical_request="POST${nl}/${nl}${nl}${canonical_headers}${signed_headers}${nl}${payload_hash}"
+    canonical_request="POST${nl}/${nl}${nl}${canonical_headers}${nl}${signed_headers}${nl}${payload_hash}"
 
    credential_scope="${date_stamp}/${region}/ssm/aws4_request"
    string_to_sign="AWS4-HMAC-SHA256${nl}${amz_date}${nl}${credential_scope}${nl}$(sha256_hex "$canonical_request")"
