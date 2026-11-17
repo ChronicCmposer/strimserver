@@ -77,6 +77,8 @@ esac
 new_tag="v$major.$minor.$patch"
 
 echo "bumping $latest_tag -> $new_tag ($level)"
-git tag "$new_tag"
+# Annotated, not lightweight: the stackctl provenance gate requires an
+# annotated vX.Y.Z tag on HEAD (see deploy/aws/STACKCTL_MIGRATION.md).
+git tag -a "$new_tag" -m "strimserver $new_tag"
 git push origin "$new_tag"
 echo "tagged and pushed $new_tag — run 'make release' to build and publish it"
