@@ -97,8 +97,8 @@ pkg_files(
         "//deploy/aws:imdslib.sh",
         "//deploy/aws:prompt_login.fish",
         "//core:strimserver.env",
-        # Rendered by stackctl-setup.sh at boot (Twitch key from SSM).
-        "//core:strimserver.env.template",
+        # strimserver.env is the render source: stackctl-setup.sh overlays the
+        # SSM-fetched Twitch key onto its TWITCH_STREAM_KEY= line at boot.
         "//core:mediamtx.yaml.template",
         # Static template shipped at the bundle root; deploy.sh substitutes
         # __EXPECTED_IP__ at deploy time (reads it from $script_dir).

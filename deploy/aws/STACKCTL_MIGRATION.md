@@ -166,7 +166,7 @@ sudo rm -f /etc/systemd/system/strim-ddns.service \
 sudo systemctl daemon-reload
 ```
 
-Keep `ENABLE_DDNS="false"` in `core/strimserver.env.template`. The old
+Keep `ENABLE_DDNS="false"` in `core/strimserver.env`. The old
 `deploy.sh` still honors the flag, but the stackctl path never sets it to true.
 
 ## Vendored templates

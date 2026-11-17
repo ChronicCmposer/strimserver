@@ -16,7 +16,9 @@ set -euo pipefail
 umask 077
 
 readonly PROJECT="${STACKCTL_PROJECT:-strimserver}"
-readonly NVME_MOUNT="/mnt/nvme"
+# Overridable so tests can point render_env at a fixture; production leaves it
+# unset and gets the real instance-store mount.
+readonly NVME_MOUNT="${NVME_MOUNT:-/mnt/nvme}"
 readonly INSTANCE_STORE_MODEL="Amazon EC2 NVMe Instance Storage"
 readonly SERVICE_USER="${STRIMSERVER_SERVICE_USER:-ec2-user}"
 readonly TWITCH_PARAM="/${PROJECT}/twitch-stream-key"
@@ -247,8 +249,8 @@ stage_bundle() {
    bundle_root="$(pwd)"
    [ -f "${bundle_root}/deploy.sh" ] \
       || die "deploy.sh is missing from the release bundle"
-   [ -f "${bundle_root}/strimserver.env.template" ] \
-      || die "strimserver.env.template is missing from the release bundle"
+   [ -f "${bundle_root}/strimserver.env" ] \
+      || die "strimserver.env is missing from the release bundle"
 
    # Never let a stale helper from a previous bundle shadow the new one.
    rm -f "${NVME_MOUNT}/lib/deploy.sh" "${NVME_MOUNT}/lib/nvidia.sh"
@@ -270,33 +272,70 @@ stage_bundle() {
 
 # --- Render the runtime env ------------------------------------------------
 render_env() {
-   local template="${NVME_MOUNT}/strimserver.env.template"
+   local packaged_env="${NVME_MOUNT}/strimserver.env"
    local target="${NVME_MOUNT}/config/strimserver.env"
-   local key escaped_key tmp
+   local stream_key escaped_stream_key tmp_env grep_rc prev_exit_trap
 
-   key="$(fetch_ssm_securestring "$TWITCH_PARAM" "$(resolve_region)")"
-   [ -n "$key" ] || die "empty Twitch stream key returned by SSM"
+   # The packaged env is the render source; fail loud if the bundle is missing it
+   # or if it cannot carry the overlay at all.
+   [ -f "$packaged_env" ] \
+      || die "packaged ${packaged_env} is missing from the release bundle"
+   # grep exits 1 for "no match" and >=2 for an unreadable input; report the
+   # real cause instead of collapsing both into the missing-line diagnostic.
+   grep_rc=0
+   grep -q '^TWITCH_STREAM_KEY=' "$packaged_env" || grep_rc=$?
+   case "$grep_rc" in
+      0) ;;
+      1) die "packaged ${packaged_env} has no TWITCH_STREAM_KEY= line" ;;
+      *) die "could not read packaged ${packaged_env} (grep exit ${grep_rc})" ;;
+   esac
 
-   escaped_key="$(printf '%s' "$key" | sed -e 's/[\\|&]/\\&/g')"
-   mkdir -p "${NVME_MOUNT}/config"
+   stream_key="$(fetch_ssm_securestring "$TWITCH_PARAM" "$(resolve_region)")"
+   [ -n "$stream_key" ] || die "empty Twitch stream key returned by SSM"
+
+   escaped_stream_key="$(printf '%s' "$stream_key" | sed -e 's/[\\|&]/\\&/g')" \
+      || die "failed to escape TWITCH_STREAM_KEY"
+   mkdir -p "${NVME_MOUNT}/config" \
+      || die "could not create ${NVME_MOUNT}/config"
    if id "$SERVICE_USER" >/dev/null 2>&1; then
       chown "${SERVICE_USER}:${SERVICE_USER}" "${NVME_MOUNT}/config" \
          || die "failed to chown ${NVME_MOUNT}/config"
    fi
 
-   tmp="$(mktemp "${NVME_MOUNT}/config/.strimserver.env.XXXXXX")" \
+   tmp_env="$(mktemp "${NVME_MOUNT}/config/.strimserver.env.XXXXXX")" \
       || die "could not create a temp env file"
-   sed -e "s|__TWITCH_STREAM_KEY__|${escaped_key}|g" "$template" >"$tmp" \
-      || { rm -f "$tmp"; die "failed to render ${target}"; }
+   # Scoped cleanup: a function cannot scope a trap to itself, so remember the
+   # caller's EXIT trap, install ours across the temp window, and disarm it after
+   # the atomic mv. The trap removes the secret-bearing temp on any abnormal exit
+   # (die, signal). In a subshell the caller's trap must NOT be reinstalled (it
+   # would fire at subshell exit and destroy the caller's fixture), so only the
+   # owning shell restores it; the explicit rm -f arms below stay as the normal
+   # failure path. Bash runs the EXIT trap on SIGTERM/SIGINT, covering signals.
+   prev_exit_trap="$(trap -p EXIT)"
+   trap 'rm -f "$tmp_env"' EXIT
+   # Overlay the SSM key onto the packaged line; render into the config temp so
+   # the packaged source is never mutated in place.
+   sed -e "s|^TWITCH_STREAM_KEY=.*|TWITCH_STREAM_KEY=\"${escaped_stream_key}\"|" "$packaged_env" >"$tmp_env" \
+      || { rm -f "$tmp_env"; die "failed to render ${target}"; }
 
-   mv "$tmp" "$target" || { rm -f "$tmp"; die "failed to install ${target}"; }
-   chmod 600 "$target" || die "failed to chmod 600 ${target}"
+   # Pin mode/ownership on the TEMP before publishing: the target never exists
+   # with the wrong attributes, and any failure here leaves nothing installed.
+   chmod 600 "$tmp_env" || { rm -f "$tmp_env"; die "failed to chmod 600 ${tmp_env}"; }
    if id "$SERVICE_USER" >/dev/null 2>&1; then
-      chown "${SERVICE_USER}:${SERVICE_USER}" "$target" \
-         || die "failed to chown ${target}"
+      chown "${SERVICE_USER}:${SERVICE_USER}" "$tmp_env" \
+         || { rm -f "$tmp_env"; die "failed to chown ${tmp_env}"; }
    fi
-   # Do not leave the template (or any transfer copy) holding a secret.
-   unset key escaped_key
+
+   # Atomic install: rename the fully-pinned temp onto the target path.
+   mv "$tmp_env" "$target" || { rm -f "$tmp_env"; die "failed to install ${target}"; }
+   # Publish succeeded: disarm the cleanup trap so it cannot remove the installed
+   # target, then restore the caller's trap when this is the owning shell.
+   trap - EXIT
+   if [ -n "$prev_exit_trap" ] && [ "$$" = "$BASHPID" ]; then
+      eval "$prev_exit_trap"
+   fi
+   # Do not leave the stream_key (or any transfer copy) holding a secret.
+   unset stream_key escaped_stream_key
 }
 
 # --- Main ------------------------------------------------------------------

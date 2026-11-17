@@ -223,6 +223,17 @@ sh_test(
     ],
 )
 
+# stackctl_render_env_test.sh sources stackctl-setup.sh (BASH_SOURCE dir) and
+# asserts render_env's merge/overlay behavior: the packaged strimserver.env is the
+# render source, with the SSM-fetched Twitch key overlaid onto its
+# TWITCH_STREAM_KEY= line. Keep this in the `//deploy/aws:all` regression gate or
+# a future render_env break would ship example env values unnoticed.
+sh_test(
+    name = "stackctl_render_env_test",
+    srcs = ["stackctl_render_env_test.sh"],
+    data = ["stackctl-setup.sh"],
+)
+
 # Real-hardware acceptance only (T4/T4G, GSP, NVENC, CDI, containerd). Excluded
 # from wildcards; run directly on a GPU host:
 #   bash deploy/aws/gpu_acceptance_test.sh

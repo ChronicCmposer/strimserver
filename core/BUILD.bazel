@@ -9,7 +9,6 @@ load("//tools/bazel:deb_file.bzl", "deb_file")
 
 exports_files([
     "strimserver.env.example",
-    "strimserver.env.template",
     "mediamtx.yaml.template",
     "transcode.sh",
 ])
