@@ -7,7 +7,7 @@ module(
 
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
-bazel_dep(name = "rules_shell", version = "0.8.0")
+bazel_dep(name = "rules_shell", version = "0.10.0")
 
 # rules_cc is pinned to 0.2.28 (not the historical 0.1.1): hermetic_cc_toolchain
 # 4.3.0 requires >= 0.2.14, and bzlmod's max-version selection already resolves
@@ -612,15 +612,15 @@ http_file(
 http_archive(
     name = "mediamtx_dist",
     build_file_content = "exports_files([\"mediamtx\"])",
-    sha256 = "0a2ea7eba96023631efa1bea7804823a9145b043b6646a8a05798d4ac24ed635",
-    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.3/mediamtx_v1.21.3_linux_amd64.tar.gz",
+    sha256 = "be0c05d9c8af8338116977e7f1c3fcb409fbf882075e5ab075cf8baad76a59d2",
+    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.4/mediamtx_v1.21.4_linux_amd64.tar.gz",
 )
 
 http_archive(
     name = "mediamtx_dist_arm64",
     build_file_content = "exports_files([\"mediamtx\"])",
-    sha256 = "27f038237cb5f77a724f6afc58eca2798f2bc4edf9989895631a80eeb41a4fe2",
-    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.3/mediamtx_v1.21.3_linux_arm64.tar.gz",
+    sha256 = "47784081da54c0608ea4dc359f5cfb19880209434769c532b3ed3a67ea99c29d",
+    url = "https://github.com/bluenviron/mediamtx/releases/download/v1.21.4/mediamtx_v1.21.4_linux_arm64.tar.gz",
 )
 
 # --- FFmpeg -------------------------------------------------------------
