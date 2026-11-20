@@ -397,12 +397,17 @@ qemu_x86_64 = repository_rule(
 	}
 }
 
-// TestScrapeDlami proves deploy/aws/launch's pinned DEFAULT_AMI_ID yields
-// exactly one ami/dlami dependency carrying the pinned id, the launch file,
-// and a us-east-2 annotation.
+// TestScrapeDlami proves deploy/aws/.env.example's pinned
+// IMAGE_BUILDER_PARENT_IMAGE yields exactly one ami/dlami dependency carrying
+// the pinned id, the env example file, and a us-east-2 annotation. The
+// commented AMI_ID_* placeholder lines around it must never match.
 func TestScrapeDlami(t *testing.T) {
-	const script = `DEFAULT_AMI_ID = "ami-07626c4fc6797c8e0"`
-	deps, unknowns := scrapeDlami([]byte(script), "deploy/aws/launch")
+	const script = `# AMI_ID_AMD64=ami-0123456789abcdef0
+# AMI_ID_ARM64=ami-0123456789abcdef0
+ENABLE_IMAGE_BUILDER=true
+IMAGE_BUILDER_PARENT_IMAGE=ami-07626c4fc6797c8e0
+`
+	deps, unknowns := scrapeDlami([]byte(script), "deploy/aws/.env.example")
 	if len(unknowns) != 0 {
 		t.Fatalf("scrapeDlami unknowns = %v, want none", unknowns)
 	}
@@ -413,18 +418,18 @@ func TestScrapeDlami(t *testing.T) {
 	if got.Category != common.CategoryAMI || got.Name != "dlami" || got.Version != "ami-07626c4fc6797c8e0" {
 		t.Errorf("dlami dep = %v, want ami/dlami ami-07626c4fc6797c8e0", got)
 	}
-	if got.File != "deploy/aws/launch" {
-		t.Errorf("dlami file = %q, want deploy/aws/launch", got.File)
+	if got.File != "deploy/aws/.env.example" {
+		t.Errorf("dlami file = %q, want deploy/aws/.env.example", got.File)
 	}
 	if !strings.Contains(got.Note, "us-east-2") {
 		t.Errorf("dlami note = %q, want one mentioning us-east-2", got.Note)
 	}
 }
 
-// TestScrapeDlamiMissingPin proves a launch file without the pinned constant
-// surfaces as an extraction unknown, never a silent drop.
+// TestScrapeDlamiMissingPin proves an env example without the pinned
+// assignment surfaces as an extraction unknown, never a silent drop.
 func TestScrapeDlamiMissingPin(t *testing.T) {
-	deps, unknowns := scrapeDlami([]byte("# no DEFAULT_AMI_ID here"), "deploy/aws/launch")
+	deps, unknowns := scrapeDlami([]byte("# no IMAGE_BUILDER_PARENT_IMAGE here"), "deploy/aws/.env.example")
 	if len(deps) != 0 {
 		t.Fatalf("scrapeDlami deps = %v, want none", deps)
 	}
@@ -682,5 +687,47 @@ func findModuleRoot(t *testing.T) string {
 			t.Skip("no MODULE.bazel above test working directory; skipping repo integration test")
 		}
 		dir = parent
+	}
+}
+
+// TestParseModuleBazelGitOverrideAnnotation pins the git_override stamping:
+// a bazel_dep redirected by git_override carries the override's remote in
+// Source and the commit in its Note, so the resolver registry can dispatch it
+// to the remote's tag resolver instead of BCR. A dep without an override is
+// untouched.
+func TestParseModuleBazelGitOverrideAnnotation(t *testing.T) {
+	const module = `
+bazel_dep(name = "rules_go", version = "0.63.0")
+bazel_dep(name = "stackctl", version = "0.1.25")
+git_override(
+    module_name = "stackctl",
+    remote = "https://github.com/ChronicCmposer/stackctl.git",
+    commit = "f89437cf09afbcc712b810d12d1b189cc634e2b4",
+)
+`
+	deps, unknowns := parseModuleBazel([]byte(module), "MODULE.bazel")
+	if len(unknowns) != 0 {
+		t.Fatalf("parseModuleBazel unknowns = %v, want none", unknowns)
+	}
+	var rulesGo, stackctl *common.Dependency
+	for i := range deps {
+		switch deps[i].Name {
+		case "rules_go":
+			rulesGo = &deps[i]
+		case "stackctl":
+			stackctl = &deps[i]
+		}
+	}
+	if stackctl == nil || rulesGo == nil {
+		t.Fatalf("parseModuleBazel deps = %v, want rules_go and stackctl", deps)
+	}
+	if stackctl.Source != "https://github.com/ChronicCmposer/stackctl.git" {
+		t.Errorf("stackctl Source = %q, want the git_override remote", stackctl.Source)
+	}
+	if want := "pinned by git_override at f89437cf09af"; stackctl.Note != want {
+		t.Errorf("stackctl Note = %q, want %q", stackctl.Note, want)
+	}
+	if rulesGo.Source != "" || rulesGo.Note != "" {
+		t.Errorf("rules_go Source/Note = %q/%q, want untouched empty values", rulesGo.Source, rulesGo.Note)
 	}
 }

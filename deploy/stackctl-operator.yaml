@@ -216,6 +216,15 @@ Resources:
               - ssm:GetParameter
               - ssm:GetParameters
             Resource: !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/*
+          # Read-only access to the public AWS DLAMI SSM parameters the
+          # check-deps freshness resolver queries. Like public AMIs, the
+          # /aws/service/deeplearning/ami/* parameters live in the
+          # empty-account partition namespace, so the resource carries no
+          # account id.
+          - Sid: PublicDlamiParameterRead
+            Effect: Allow
+            Action: ssm:GetParameter
+            Resource: arn:aws:ssm:*::parameter/aws/service/deeplearning/ami/*
           - Sid: ConsoleOutputTagged
             Effect: Allow
             Action: ec2:GetConsoleOutput
@@ -434,6 +443,7 @@ Resources:
                   - imagebuilder:CreateImagePipeline
                   - imagebuilder:UpdateImagePipeline
                   - imagebuilder:DeleteImagePipeline
+                  - imagebuilder:StartImagePipelineExecution
                   - imagebuilder:TagResource
                   - imagebuilder:UntagResource
                 Resource: !Sub arn:aws:imagebuilder:*:${AWS::AccountId}:*
@@ -460,8 +470,39 @@ Resources:
                   - imagebuilder:ListDistributionConfigurations
                   - imagebuilder:ListImagePipelines
                   - imagebuilder:ListImages
+                  - imagebuilder:ListImageBuildVersions
                   - imagebuilder:ListTagsForResource
                 Resource: !Sub arn:aws:imagebuilder:*:${AWS::AccountId}:*
+              - !Ref "AWS::NoValue"
+          # Bake logs: Image Builder writes every build to CloudWatch Logs
+          # automatically. The operator must be able to read them to diagnose
+          # a failed bake; scoped to the Image Builder log namespace.
+          - Fn::If:
+              - EnableImageBuilderCondition
+              - Sid: BakeBuildLogsRead
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogStreams
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                Resource: !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/imagebuilder/*
+              - !Ref "AWS::NoValue"
+          # Log-group lifecycle for the CloudFormation ImageBuilder handlers:
+          # a bake was once undiagnosable because CreateLogGroup -- and,
+          # during rollback, DeleteLogGroup -- were denied, orphaning the
+          # group. Grant exactly the group lifecycle the handler needs.
+          - Fn::If:
+              - EnableImageBuilderCondition
+              - Sid: BakeBuildLogsLifecycle
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteRetentionPolicy
+                Resource: !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/imagebuilder/*
               - !Ref "AWS::NoValue"
           # CloudFormation wires these roles into Image Builder and the instance
           # profile, so it must pass exactly those roles (never an arbitrary
@@ -576,6 +617,15 @@ Resources:
     Condition: EnableImageBuilderCondition
     Properties:
       RoleName: !Sub ${ProjectName}-baked-imagebuilder-instance-role
+      # Image Builder drives the build instance via Systems Manager; without
+      # the SSM managed-instance core the instance never registers and the
+      # bake fails in LaunchBuildInstance with InvalidInstanceId.
+      # EC2InstanceProfileForImageBuilder is the AWS-documented baseline for
+      # build-instance profiles (EC2 describe/tag surface the on-host agent
+      # needs).
+      ManagedPolicyArns:
+        - !Sub arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -583,6 +633,10 @@ Resources:
             Principal:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
+      # Image Builder delivers build logs through the build-instance profile.
+      # The execution-role logs grant alone proved insufficient (the
+      # InfrastructureConfiguration's Logging property is never set), so both
+      # roles carry the grant (belt and suspenders).
       Policies:
         - PolicyName: BakedImageArtifactRead
           PolicyDocument:
@@ -593,6 +647,13 @@ Resources:
                 Action:
                   - s3:GetObject
                 Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
+              - Sid: BuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/imagebuilder/*
   BakedImageBuilderInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Condition: EnableImageBuilderCondition
@@ -605,6 +666,14 @@ Resources:
     Condition: EnableImageBuilderCondition
     Properties:
       RoleName: !Sub ${ProjectName}-imagebuilder-execution-role
+      # AWS-managed policy covering the EC2 surface an Image Builder
+      # execution role needs during a build (DescribeImages for parent-AMI
+      # validation, DescribeInstanceTypeOfferings for capacity checks, tag
+      # lifecycle, etc.). The inline policy below adds only what the managed
+      # policy cannot know: the artifact-bucket read and the custom SSM
+      # publish path.
+      ManagedPolicyArns:
+        - !Sub arn:aws:iam::aws:policy/EC2ImageBuilderExecutionPolicy
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -631,6 +700,102 @@ Resources:
                   - ssm:PutParameter
                   - ssm:GetParameter
                 Resource: !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/ami/baked/*
+              - Sid: BakedAmiValidation
+                Effect: Allow
+                # aws:ec2:image DataType validation calls ec2:DescribeImages
+                # to confirm the published AMI id exists. DescribeImages has no
+                # resource-level permissions, so the resource must be "*".
+                Action:
+                  - ec2:DescribeImages
+                Resource: "*"
+              - Sid: ImageBuilderResources
+                Effect: Allow
+                # The bake workflow reads its own resources and creates the
+                # image build under the execution role. The AWS-managed
+                # baseline covers the generic workflow; this keeps the
+                # project-scoped reads explicit (parity with the pre-stackctl
+                # template).
+                Action:
+                  - imagebuilder:GetComponent
+                  - imagebuilder:GetImageRecipe
+                  - imagebuilder:GetInfrastructureConfiguration
+                  - imagebuilder:GetDistributionConfiguration
+                  - imagebuilder:GetImagePipeline
+                  - imagebuilder:GetImage
+                  - imagebuilder:ListImageBuildVersions
+                  - imagebuilder:CreateImage
+                  - imagebuilder:StartImagePipelineExecution
+                Resource: !Sub arn:aws:imagebuilder:*:${AWS::AccountId}:*
+              - Sid: BuildInstanceReads
+                Effect: Allow
+                # Describe-class reads for the throwaway build instance.
+                # Resource "*" is permitted for exactly this describe set
+                # (these EC2 actions have no resource-level permissions).
+                # DescribeInstanceTypes/DescribeInstanceTypeOfferings are
+                # covered by the AWS-managed EC2ImageBuilderExecutionPolicy.
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstanceStatus
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcs
+                Resource: "*"
+              - Sid: BuildInstanceRun
+                Effect: Allow
+                # Image Builder launches the build instance under the
+                # execution role; resource grammar mirrors the operator's
+                # RunInstancesDependencies statement (public parent AMIs live
+                # in the empty-account partition namespace).
+                Action:
+                  - ec2:RunInstances
+                  - ec2:CreateVolume
+                  - ec2:CreateNetworkInterface
+                Resource:
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:volume/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:network-interface/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:subnet/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
+                  - arn:aws:ec2:*::image/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:image/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:key-pair/*
+              - Sid: BuildInstanceTerminate
+                Effect: Allow
+                # Unconditional on Project tag: Image Builder's build instance
+                # carries the infrastructure-configuration tags, not the
+                # operator launch tags.
+                Action:
+                  - ec2:TerminateInstances
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+              - Sid: BuildInstanceTags
+                Effect: Allow
+                # AMI creation tags the build instance, the output image and
+                # its snapshots.
+                Action:
+                  - ec2:CreateTags
+                Resource:
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:image/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:snapshot/*
+              - Sid: PassImageBuilderInstanceRole
+                Effect: Allow
+                # Image Builder launches the build instance under the
+                # execution role; without this PassRole the bake fails at
+                # LaunchBuildInstance.
+                Action: iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-baked-imagebuilder-instance-role
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com
+              - Sid: BuildLogs
+                Effect: Allow
+                # Belt and suspenders with the instance-role grant: Image
+                # Builder writes build logs under both identities.
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/imagebuilder/*
 Outputs:
   InstanceRoleArn:
     Value: !GetAtt InstanceRole.Arn

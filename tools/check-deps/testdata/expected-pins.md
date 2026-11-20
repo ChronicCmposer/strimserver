@@ -24,9 +24,9 @@ from the **actual working tree** (no invented values).
 
 | Metric | Count |
 |---|---|
-| Total pin tokens | **195** |
+| Total pin tokens | **193** |
 | Currently tracked (`tracked_now=yes`) | **86** |
-| Newly to track (`tracked_now=no`) | **109** |
+| Newly to track (`tracked_now=no`) | **107** |
 | Distinct sources | **31** |
 
 ### Counts by source
@@ -54,7 +54,7 @@ from the **actual working tree** (no invented values).
 | tools/ffmpeg-dist/publish.sh | 8 |
 | scripts/upload-artifact.sh | 1 |
 | deploy/aws/fish-deploy.sh | 2 |
-| deploy/aws/launch | 3 |
+| deploy/aws/.env.example | 1 |
 | third_party/pin.json | 18 |
 | .env | 14 |
 | streamdeck manifest | 4 |
@@ -186,9 +186,7 @@ from the **actual working tree** (no invented values).
 | scripts/upload-artifact.sh | `scripts/upload-artifact.sh` | EXPECTED_SHA256 | 3531de59f1964dd849780d3d247993a1f2028e950873b47ccc05df154eda7e21 | integrity | no |
 | deploy/aws/fish-deploy.sh | `deploy/aws/fish-deploy.sh` | fish | 4.9.3 | version | no |
 | deploy/aws/fish-deploy.sh | `deploy/aws/fish-deploy.sh` | fish-4.9.3-linux-x86_64.tar.xz:sha256 | 8f643d10ad1abb0ef7072764c01ceb5cf61b2d373fda400cf60f0bad69b7e095 | integrity | no |
-| deploy/aws/launch | `deploy/aws/launch` | dlami | ami-0198b63ccfac121e8 | version | yes |
-| deploy/aws/launch | `deploy/aws/launch` | DEPLOYMENT_TAR_GO_ARM64 | strimserver-deployment-go-arm64.tar | version | no |
-| deploy/aws/launch | `deploy/aws/launch` | RELEASE_DOWNLOAD_URL | https://github.com/ChronicCmposer/strimserver/releases/latest/download/{asset} | version | no |
+| deploy/aws/.env.example | `deploy/aws/.env.example` | dlami | ami-0198b63ccfac121e8 | version | yes |
 | third_party/pin.json | `third_party/libmicrohttpd/pin.json` | libmicrohttpd | 1.0.10 | version | no |
 | third_party/pin.json | `third_party/libmicrohttpd/pin.json` | libmicrohttpd:sha256 | 04bfe8ef75db7d629a33de767599765cecadc56274a39822d5d081030d577685 | integrity | no |
 | third_party/pin.json | `third_party/wslay/pin.json` | wslay | 1.1.1 | version | no |

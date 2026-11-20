@@ -203,7 +203,38 @@ func parseBazelDep(content, file string) ([]common.Dependency, []common.Extracti
 			File:     file,
 		})
 	}
+	annotateGitOverrides(content, deps)
 	return deps, unknowns
+}
+
+// annotateGitOverrides stamps every bazel_dep dependency that a git_override
+// redirects with the override's remote and commit, so the resolver registry
+// can dispatch the dep to the git remote's tag resolver instead of BCR (a
+// git_override module never resolves through the registry's metadata.json).
+func annotateGitOverrides(content string, deps []common.Dependency) {
+	for _, args := range scanCallArgs(content, "git_override") {
+		name := attrValue(args, "module_name")
+		remote := attrValue(args, "remote")
+		commit := attrValue(args, "commit")
+		if name == "" || remote == "" {
+			continue
+		}
+		for i := range deps {
+			if deps[i].Category == common.CategoryBazelModule && deps[i].Name == name {
+				deps[i].Source = remote
+				deps[i].Note = "pinned by git_override at " + shortCommit(commit)
+			}
+		}
+	}
+}
+
+// shortCommit trims a 40-hex git commit to its 12-char short form for notes;
+// a non-40-hex value is returned unchanged.
+func shortCommit(commit string) string {
+	if len(commit) == 40 {
+		return commit[:12]
+	}
+	return commit
 }
 
 func parseSingleVersionOverride(content, file string) ([]common.Dependency, []common.ExtractionUnknown) {

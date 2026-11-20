@@ -784,8 +784,8 @@ bazel_dep(name = "stackctl", version = "0.1.25")
 
 git_override(
     module_name = "stackctl",
-    # git.cmposer.cc serves git over ssh only (no https endpoint); the host
-    # ssh key must be present and known_hosts pre-seeded for Bazel's fetch.
-    remote = "ssh://git@git.cmposer.cc/stackctl.git",
+    # Public GitHub mirror; https is served, so Bazel's fetch needs no host
+    # ssh key (the former git.cmposer.cc remote was ssh-only).
+    remote = "https://github.com/ChronicCmposer/stackctl.git",
     commit = "f89437cf09afbcc712b810d12d1b189cc634e2b4",
 )

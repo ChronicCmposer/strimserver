@@ -171,7 +171,7 @@ func TestClassifyDebianDateTagUnparseable(t *testing.T) {
 func TestClassifyAMI(t *testing.T) {
 	c := testClassifier()
 	pinned := "ami-07626c4fc6797c8e0"
-	dep := common.Dependency{Category: common.CategoryAMI, Name: "dlami", Version: pinned, File: "deploy/aws/launch"}
+	dep := common.Dependency{Category: common.CategoryAMI, Name: "dlami", Version: pinned, File: "deploy/aws/.env.example"}
 
 	// Pinned == latest -> ok, resting T1.
 	r := c.Classify(dep, common.VersionInfo{Version: pinned})

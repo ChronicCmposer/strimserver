@@ -46,10 +46,12 @@ var (
 	cudaManifestRe   = regexp.MustCompile(`CUDA_MANIFEST_URL:[-=][^"}]*redistrib_([0-9]+\.[0-9]+\.[0-9]+)\.json`)
 	debianSnapshotRe = regexp.MustCompile(`DEBIAN_SNAPSHOT:[-=]([0-9]{8}T[0-9]{6}Z)\}`)
 
-	// dlamiAmiIDRe targets the pinned AMI constant in deploy/aws/launch. The
-	// launch default is a hard-coded ami id (not the floating SSM resolution),
-	// so the regex reads exactly the DEFAULT_AMI_ID assignment.
-	dlamiAmiIDRe = regexp.MustCompile(`DEFAULT_AMI_ID = "(ami-[0-9a-f]{8,17})"`)
+	// dlamiAmiIDRe targets the baked-image parent AMI pin in
+	// deploy/aws/.env.example. The former launch-script DEFAULT_AMI_ID pin was
+	// removed with the stackctl migration; the Image Builder parent image is
+	// the tracked successor, so the regex reads exactly that assignment and
+	// never the commented AMI_ID_* placeholders above it.
+	dlamiAmiIDRe = regexp.MustCompile(`(?m)^IMAGE_BUILDER_PARENT_IMAGE=(ami-[0-9a-f]{8,17})$`)
 
 	// ffmpegCommitRe and nvCodecHeadersCommitRe capture the exact 40-hex git
 	// commits the two ffmpeg-dist components are checked out at (the tag is
@@ -114,7 +116,7 @@ var scriptSourceSpecs = []common.SourceSpec{
 	{RelPath: "tools/ffmpeg-dist/publish.sh", Parse: scrapeFfmpeg},
 	{RelPath: "tools/ffmpeg-dist/publish.sh", Parse: scrapeQemuConsumer("ffmpeg-dist")},
 	{RelPath: "tools/bazel/qemu_x86_64.bzl", Parse: scrapeBzlPinQemu},
-	{RelPath: "deploy/aws/launch", Parse: scrapeDlami},
+	{RelPath: "deploy/aws/.env.example", Parse: scrapeDlami},
 	{RelPath: "scripts/upload-artifact.sh", Parse: scrapeUploadArtifact},
 	{RelPath: "deploy/aws/fish-deploy.sh", Parse: scrapeFish},
 }
@@ -125,8 +127,8 @@ var scriptRoots = []string{"tools", "scripts", "deploy"}
 
 // scriptExtensions are the shell-family extensions the discovery pass treats
 // as script files. Extension-less executable files are also considered (see
-// isScriptFile) so a pinned interpreter script such as deploy/aws/launch is
-// never silently skipped.
+// isScriptFile) so a pinned interpreter script such as deploy/aws/stackctl.sh
+// is never silently skipped.
 var scriptExtensions = map[string]bool{
 	".sh":   true,
 	".bash": true,
@@ -369,10 +371,11 @@ func scrapeBzlPinQemu(data []byte, file string) ([]common.Dependency, []common.E
 	}})
 }
 
-// scrapeDlami extracts the pinned us-east-2 Deep Learning AMI id from
-// deploy/aws/launch. The pin replaces the former /latest SSM float, so the
-// AMI is tracked like any other pinned dependency: check-deps compares it to
-// the current upstream id and flags when it goes stale.
+// scrapeDlami extracts the pinned us-east-2 Deep Learning AMI id from the
+// IMAGE_BUILDER_PARENT_IMAGE assignment in deploy/aws/.env.example (the
+// successor of the removed launch script's DEFAULT_AMI_ID pin). The AMI is
+// tracked like any other pinned dependency: check-deps compares it to the
+// current upstream id and flags when it goes stale.
 func scrapeDlami(data []byte, file string) ([]common.Dependency, []common.ExtractionUnknown) {
 	content := string(data)
 	return scrapeScript(content, file, []pinSpec{{

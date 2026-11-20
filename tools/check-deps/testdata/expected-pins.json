@@ -28,7 +28,7 @@
     "tools/ffmpeg-dist/publish.sh": 8,
     "scripts/upload-artifact.sh": 1,
     "deploy/aws/fish-deploy.sh": 2,
-    "deploy/aws/launch": 3,
+    "deploy/aws/.env.example": 1,
     "third_party/pin.json": 18,
     ".env": 14,
     "streamdeck manifest": 4,
@@ -40,9 +40,9 @@
     "lockfile transitive inventory": 4
   },
   "totals": {
-    "total": 195,
+    "total": 193,
     "tracked_now": 86,
-    "to_add": 109,
+    "to_add": 107,
     "sources": 31
   },
   "entries": [
@@ -184,9 +184,7 @@
     {"source": "deploy/aws/fish-deploy.sh", "file": "deploy/aws/fish-deploy.sh", "name": "fish", "version": "4.9.3", "kind": "version", "tracked_now": false},
     {"source": "deploy/aws/fish-deploy.sh", "file": "deploy/aws/fish-deploy.sh", "name": "fish-4.9.3-linux-x86_64.tar.xz:sha256", "version": "8f643d10ad1abb0ef7072764c01ceb5cf61b2d373fda400cf60f0bad69b7e095", "kind": "integrity", "tracked_now": false},
 
-    {"source": "deploy/aws/launch", "file": "deploy/aws/launch", "name": "dlami", "version": "ami-0198b63ccfac121e8", "kind": "version", "tracked_now": true},
-    {"source": "deploy/aws/launch", "file": "deploy/aws/launch", "name": "DEPLOYMENT_TAR_GO_ARM64", "version": "strimserver-deployment-go-arm64.tar", "kind": "version", "tracked_now": false},
-    {"source": "deploy/aws/launch", "file": "deploy/aws/launch", "name": "RELEASE_DOWNLOAD_URL", "version": "https://github.com/ChronicCmposer/strimserver/releases/latest/download/{asset}", "kind": "version", "tracked_now": false},
+    {"source": "deploy/aws/.env.example", "file": "deploy/aws/.env.example", "name": "dlami", "version": "ami-0198b63ccfac121e8", "kind": "version", "tracked_now": true},
 
     {"source": "third_party/pin.json", "file": "third_party/libmicrohttpd/pin.json", "name": "libmicrohttpd", "version": "1.0.10", "kind": "version", "tracked_now": false},
     {"source": "third_party/pin.json", "file": "third_party/libmicrohttpd/pin.json", "name": "libmicrohttpd:sha256", "version": "04bfe8ef75db7d629a33de767599765cecadc56274a39822d5d081030d577685", "kind": "integrity", "tracked_now": false},

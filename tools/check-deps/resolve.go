@@ -234,6 +234,18 @@ func matchesCategory(category string) func(common.Dependency) bool {
 	}
 }
 
+// matchesGitOverrideModule selects the bazel-module dependencies a
+// git_override redirected to a GitHub remote (the extractor stamps the
+// remote into Source), so they resolve against the remote's tags instead of
+// BCR.
+func matchesGitOverrideModule(dep common.Dependency) bool {
+	if dep.Category != common.CategoryBazelModule {
+		return false
+	}
+	_, _, ok := resolverimpl.GitHubRemoteOwnerRepo(dep.Source)
+	return ok
+}
+
 // githubDep builds a network-backed resolver entry for a dependency pinned
 // from a fixed GitHub owner/repo pair, collapsing the repeated category/name
 // -> owner/repo registrations.

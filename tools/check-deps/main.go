@@ -126,6 +126,11 @@ func main() {
 	}
 
 	resolvers := []ResolverEntry{
+		// A bazel_dep redirected by git_override carries the git remote in
+		// its Source; resolve those against the remote's GitHub tags, not
+		// BCR (whose metadata.json 404s for overridden modules). Registered
+		// before the BCR catch-all because matching is first-match-wins.
+		networkedDep(matchesGitOverrideModule, resolverimpl.GitOverrideResolve(fetcher)),
 		networkedDep(matchesCategory(common.CategoryBazelModule), resolverimpl.BCRResolve(fetcher)),
 		githubMatchDep(MatchesNamePrefix(common.CategoryToolBinary, "golangci_lint_linux_amd64"), "golangci", "golangci-lint", fetcher),
 		githubMatchDep(MatchesNamePrefix(common.CategoryToolBinary, "mediamtx_dist"), "bluenviron", "mediamtx", fetcher),
