@@ -5,8 +5,76 @@ strimserver pilot. This file is owned by strimserver; it is not part of the
 stackctl repository. The old `deploy/aws/` shell pipeline stays in place and is
 the rollback path until the final phase.
 
-Pinned deploy tool: stackctl **v0.1.2** (`97a72d1`), via `MODULE.bazel`'s
+Pinned deploy tool: stackctl **v0.2.0** (`34badac`), via `MODULE.bazel`'s
 `git_override`. Operators run it through `bazel run //deploy/aws:stackctl --`.
+
+## Upgrading to v0.2.0
+
+stackctl **v0.2.0** (commit `34badac`) is a breaking release for this project:
+it replaces the CI prefix list with an explicit boolean, removes the
+`ReleasePrefixes` CloudFormation parameter, and changes the S3 grant model for
+the operator and CI users. Re-vendor the templates and re-run `provision` as
+described below.
+
+### Pin
+
+- `MODULE.bazel`: `bazel_dep(name = "stackctl", version = "0.2.0")` with
+  `git_override(commit = "34badacf99bf69e7fc772126561df5d4003e339f")`; the
+  remote stays `https://github.com/ChronicCmposer/stackctl.git`.
+
+### `ENABLE_CI_USER` replaces the CI prefix list
+
+- `ENABLE_CI_USER` is a **required boolean** (`true` or `false`); any other
+  value is rejected.
+- The CI user exists iff `ENABLE_CI_USER` is true in the **any-true union**
+  across the active `.env` and all `.env.*` siblings (the same merge as
+  `ENABLE_IMAGE_BUILDER`). Clearing it in one file does not disable CI while a
+  sibling still sets it true.
+- When enabled, the CI user is a **read-only reader**: `s3:GetObject` on
+  `arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/*` and
+  `s3:ListBucket` on the bucket ARN — no writes (`PutObject`/`DeleteObject`).
+
+### S3 grant model
+
+- The operator user now has **bucket-wide** access on the project artifacts
+  bucket: `GetObject`, `PutObject`, and `DeleteObject` on
+  `arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/*`, plus an
+  unconditioned `ListBucket` on the bucket ARN. The old `releases/*`-scoped
+  grants are gone.
+
+### Removed config key and parameter
+
+- The legacy CI prefix-list key is removed in v0.2.0. A config that still
+  contains it fails closed with exactly this stackctl error:
+
+  ```text
+  RELEASE\_PREFIXES was removed in v0.2.0; set ENABLE\_CI\_USER=true if it was non-empty, false if it was empty
+  ```
+
+  Replace a non-empty list with `ENABLE_CI_USER=true`; use
+  `ENABLE_CI_USER=false` where the old list was empty.
+- The `ReleasePrefixes` CloudFormation parameter is removed from **both** the
+  operator and infra templates. `provision` no longer sends it; re-copy the
+  canonical templates.
+
+### `provision` refuses a true-to-false CI transition
+
+- A `true`→`false` transition of `ENABLE_CI_USER` deletes the CI user and
+  invalidates its access keys. `provision` **refuses** it before running the
+  change set unless `--delete-ci-user` is passed; with the flag it proceeds and
+  prints a **warning**. Capture or rotate any CI credentials you still need
+  first.
+
+### Re-vendoring
+
+- Both `deploy/stackctl-operator.yaml` and `deploy/stackctl-infra.yaml` are
+  copied **verbatim** from stackctl v0.2.0 with only the prepended line-1
+  header
+  `# Vendored from stackctl v0.2.0 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).`
+  Because the header is a single prepended line, `AWSTemplateFormatVersion:
+  "2010-09-09"` is restored at line 2 of each file.
+- Do not hand-edit policy content; re-copy on every pin move and re-run the
+  two checker commands below.
 
 ## Runbook order (revised after the Phase 0 inventory)
 
@@ -172,6 +240,6 @@ Keep `ENABLE_DDNS="false"` in `core/strimserver.env`. The old
 ## Vendored templates
 
 `deploy/stackctl-operator.yaml` and `deploy/stackctl-infra.yaml` are copied
-verbatim from stackctl v0.1.2 (plus a source-version header comment). Re-copy
-both files whenever the `git_override` pin moves, then re-run the two checker
-commands above.
+verbatim from stackctl v0.2.0 (plus the single prepended source-version header
+comment). Re-copy both files whenever the `git_override` pin moves, then re-run
+the two checker commands above.

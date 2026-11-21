@@ -1,4 +1,5 @@
-# Vendored from stackctl v0.1.26 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.2.0 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl account-global operator stack - instance role, operator managed policy, optional CI user and Image Builder roles.
 Parameters:
   ProjectName:
@@ -8,9 +9,6 @@ Parameters:
   InstanceTypeAllowlist:
     Type: CommaDelimitedList
     Description: Union of instance types allowed for this project across all region variants.
-  ReleasePrefixes:
-    Type: CommaDelimitedList
-    Description: S3 release prefixes readable by the CI reader role.
   EnableImageBuilder:
     Type: String
     AllowedValues:
@@ -236,18 +234,13 @@ Resources:
             Effect: Allow
             Action: s3:ListBucket
             Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*
-            Condition:
-              StringLike:
-                s3:prefix:
-                  - releases/*
-                  - releases
           - Sid: ArtifactReleases
             Effect: Allow
             Action:
               - s3:PutObject
               - s3:GetObject
               - s3:DeleteObject
-            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
+            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/*
   # CloudFormation handler support for the infra stack: VPC/subnet/route-table
   # lifecycle, bucket lifecycle, and read-only describe calls the handlers
   # issue under the caller's identity.
@@ -594,7 +587,7 @@ Resources:
     Condition: EnableCiUserCondition
     Properties:
       ManagedPolicyName: !Sub ${ProjectName}-artifact-reader
-      Description: CI reader scoped to configured release prefixes.
+      Description: CI reader scoped to the project artifact bucket.
       Users:
         - !Ref CiUser
       PolicyDocument:
@@ -604,14 +597,11 @@ Resources:
             Effect: Allow
             Action: s3:ListBucket
             Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*
-            Condition:
-              StringLike:
-                s3:prefix: !Ref ReleasePrefixes
           - Sid: ReleaseRead
             Effect: Allow
             Action:
               - s3:GetObject
-            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/releases/*
+            Resource: !Sub arn:aws:s3:::${ProjectName}-artifacts-${AWS::AccountId}-*/*
   BakedImageBuilderInstanceRole:
     Type: AWS::IAM::Role
     Condition: EnableImageBuilderCondition

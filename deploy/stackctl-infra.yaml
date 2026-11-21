@@ -1,4 +1,5 @@
-# Vendored from stackctl v0.1.26 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+# Vendored from stackctl v0.2.0 -- re-copy on upgrade (see STACKCTL_MIGRATION.md).
+AWSTemplateFormatVersion: "2010-09-09"
 Description: stackctl regional infra stack - VPC, subnet, security group, retained buckets, optional Image Builder and spot alerts.
 Parameters:
   ProjectName:
@@ -34,14 +35,6 @@ Parameters:
     Type: String
     Default: ""
     Description: "Image Builder parent image: an EC2 AMI id (ami-...) or a full SSM parameter ARN (arn:aws:ssm:...). Required when EnableImageBuilder is true."
-  NvidiaFloorMachineryUrl:
-    Type: String
-    Default: "https://raw.githubusercontent.com/ChronicCmposer/strimserver/dev/deploy/aws/lib/nvidia.sh"
-    Description: "Location of the repo's lib/nvidia.sh -- the single source of truth for the driver floor and the stage-then-swap upgrade. The Image Builder component sources it instead of duplicating the floor logic. Point this at the exact revision you are deploying (a fork or a release tag)."
-  OpensshExperimentalRpmUrl:
-    Type: String
-    Default: "https://github.com/ChronicCmposer/strimserver/releases/download/openssh-dist/openssh-experimental.rpm"
-    Description: "The pinned @openssh_dist openssh-experimental RPM (see MODULE.bazel s3_key openssh/openssh-experimental.rpm) baked into the image."
   OperatorCidr:
     Type: String
     Default: ""
@@ -530,24 +523,15 @@ Resources:
     Properties:
       Name: !Sub ${ProjectName}-baked-image-component
       Platform: Linux
-      # Version bumps are REQUIRED on any Data change: Data is a replacement
-      # property, and Image Builder refuses to recreate Name/Version pairs
-      # that already exist (the 1.0.0 AlreadyExists trap).
-      Version: 1.0.1
-      Description: strimserver baked base (driver floor, htop, openssh, containerd)
-      # Fn::Sub interpolates ONLY the two URL parameters; the sourced nvidia.sh
-      # owns the floor version and the stage-then-swap logic, so a threshold
-      # bump is a one-line change in deploy/aws/lib/nvidia.sh.
-      Data: !Sub "name: strimserver-baked-base\ndescription: strimserver baked base\nschemaVersion: 1.0\nphases:\n  - name: build\n    steps:\n      - name: InstallBaseTools\n        action: ExecuteBash\n        inputs:\n          commands:\n            - |\n              set -euo pipefail\n              mkdir -p /etc/containerd\n              if [ -f /etc/containerd/config.toml ]; then\n                grep -vE '^[[:space:]]*(root|state)[[:space:]]*=' /etc/containerd/config.toml > /tmp/containerd.toml || true\n              else\n                : > /tmp/containerd.toml\n              fi\n              cat > /etc/containerd/config.toml <<'STRIMSERVER_CONTAINERD_CONFIG_EOF'\n              root='/mnt/nvme/containerd'\n              state='/mnt/nvme/containerd-state'\n\n              STRIMSERVER_CONTAINERD_CONFIG_EOF\n              cat /tmp/containerd.toml >> /etc/containerd/config.toml\n              mkdir -p /etc/systemd/system/containerd.service.d\n              cat > /etc/systemd/system/containerd.service.d/10-strimserver-nvme.conf <<'STRIMSERVER_CONTAINERD_NVME_EOF'\n              [Unit]\n              ConditionPathIsMountPoint=/mnt/nvme\n              STRIMSERVER_CONTAINERD_NVME_EOF\n              dnf install -y htop\n              systemctl enable nvidia-persistenced\n      - name: EstablishNvidiaDriverFloor\n        action: ExecuteBash\n        inputs:\n          commands:\n            - |\n              set -euo pipefail\n              curl -fsSL \"${NvidiaFloorMachineryUrl}\" -o /tmp/nvidia.sh\n              . /tmp/nvidia.sh\n              SUDO=\"\" nvidia_ensure_driver_floor\n      - name: PurgeStaleNvidiaDkms\n        action: ExecuteBash\n        inputs:\n          commands:\n            - |\n              set -euo pipefail\n              if [ ! -f /tmp/nvidia.sh ]; then\n                curl -fsSL \"${NvidiaFloorMachineryUrl}\" -o /tmp/nvidia.sh\n              fi\n              . /tmp/nvidia.sh\n              FLOOR=\"$NVIDIA_DRIVER_FLOOR\"\n              if [ -z \"$FLOOR\" ]; then\n                echo \"PurgeStaleNvidiaDkms: NVIDIA_DRIVER_FLOOR is empty\" >&2\n                exit 1\n              fi\n              if command -v dkms >/dev/null 2>&1; then\n                status=\"$(dkms status 2>/dev/null || true)\"\n                while IFS= read -r entry; do\n                  [ -n \"$entry\" ] || continue\n                  name=\"$(printf '%s' \"$entry\" | cut -d/ -f1)\"\n                  version=\"$(printf '%s' \"$entry\" | cut -d/ -f2)\"\n                  if [ \"$version\" = \"$FLOOR\" ]; then\n                    continue\n                  fi\n                  if ! dkms remove \"$name/$version\" --all; then\n                    echo \"PurgeStaleNvidiaDkms: dkms remove $name/$version --all failed\" >&2\n                    exit 1\n                  fi\n                done < <(printf '%s\\n' \"$status\" | grep -oE 'nvidia[A-Za-z0-9_.-]*/[0-9]+([.][0-9]+)*' | sort -u)\n              fi\n              for src in /usr/src/nvidia*; do\n                [ -e \"$src\" ] || continue\n                src_base=\"$(basename \"$src\")\"\n                case \"$src_base\" in\n                  *\"-$FLOOR\") : ;;\n                  *)\n                    rm -rf \"$src\"\n                    ;;\n                esac\n              done\n              systemctl disable nvidia-kmod-load.service 2>/dev/null || true\n              mkdir -p /etc/systemd/system\n              ln -sf /dev/null /etc/systemd/system/nvidia-kmod-load.service\n              if [ ! -L /etc/systemd/system/nvidia-kmod-load.service ]; then\n                echo \"PurgeStaleNvidiaDkms: nvidia-kmod-load.service is not masked\" >&2\n                exit 1\n              fi\n              rm -rf /var/lib/dkms-archive/nvidia* 2>/dev/null || true\n              if compgen -G '/var/lib/dkms-archive/nvidia*' >/dev/null; then\n                echo \"PurgeStaleNvidiaDkms: nvidia DKMS archives remain under /var/lib/dkms-archive\" >&2\n                exit 1\n              fi\n              kernel_list=\"$(ls -1 /lib/modules 2>/dev/null || true)\"\n              if [ -z \"$kernel_list\" ]; then\n                echo \"PurgeStaleNvidiaDkms: no kernels found under /lib/modules\" >&2\n                exit 1\n              fi\n              if command -v dkms >/dev/null 2>&1; then\n                status=\"$(dkms status 2>/dev/null || true)\"\n                floor_token=\"$(printf '%s\\n' \"$status\" | grep -oE 'nvidia[A-Za-z0-9_.-]*/[0-9]+([.][0-9]+)*' | awk -F/ -v f=\"$FLOOR\" '$2 == f {print; exit}')\"\n                floor_name=\"$(printf '%s' \"$floor_token\" | cut -d/ -f1)\"\n                if [ -z \"$floor_name\" ]; then\n                  for candidate in nvidia nvidia-open; do\n                    if [ -f \"/usr/src/$candidate-$FLOOR/dkms.conf\" ]; then\n                      floor_name=\"$candidate\"\n                      break\n                    fi\n                  done\n                  if [ -z \"$floor_name\" ]; then\n                    echo \"PurgeStaleNvidiaDkms: no DKMS source for $FLOOR under /usr/src\" >&2\n                    exit 1\n                  fi\n                  if ! dkms add \"$floor_name/$FLOOR\"; then\n                    echo \"PurgeStaleNvidiaDkms: dkms add $floor_name/$FLOOR failed\" >&2\n                    exit 1\n                  fi\n                fi\n                for kernel in $kernel_list; do\n                  status=\"$(dkms status 2>/dev/null || true)\"\n                  if printf '%s\\n' \"$status\" | grep -F \"$floor_name/$FLOOR,\" | grep -F \"$kernel\" | grep -F \"installed\" >/dev/null; then\n                    continue\n                  fi\n                  if ! dkms install -m \"$floor_name\" -v \"$FLOOR\" -k \"$kernel\"; then\n                    echo \"PurgeStaleNvidiaDkms: dkms install $floor_name/$FLOOR for $kernel failed\" >&2\n                    exit 1\n                  fi\n                done\n              else\n                if compgen -G '/usr/src/nvidia*' >/dev/null || [ -d /var/lib/dkms ]; then\n                  echo \"PurgeStaleNvidiaDkms: dkms is absent but stale DKMS state remains\" >&2\n                  exit 1\n                fi\n              fi\n              for pkg in nvidia-fabricmanager libnvidia-nscq; do\n                if rpm -q \"$pkg\" >/dev/null 2>&1; then\n                  installed_version=\"$(rpm -q --qf '%{VERSION}\\n' \"$pkg\" | head -n1)\"\n                  if [ -z \"$installed_version\" ]; then\n                    echo \"PurgeStaleNvidiaDkms: cannot read installed version of $pkg\" >&2\n                    exit 1\n                  fi\n                  if [ \"$installed_version\" != \"$FLOOR\" ]; then\n                    if ! dnf remove -y \"$pkg-$installed_version\"; then\n                      echo \"PurgeStaleNvidiaDkms: dnf remove $pkg-$installed_version failed\" >&2\n                      exit 1\n                    fi\n                  fi\n                fi\n              done\n              if ! depmod -a; then\n                echo \"PurgeStaleNvidiaDkms: depmod -a failed\" >&2\n                exit 1\n              fi\n              for kernel in $kernel_list; do\n                for module in nvidia nvidia-uvm; do\n                  observed=\"$(modinfo -k \"$kernel\" -F version \"$module\" 2>/dev/null || true)\"\n                  if [ \"$observed\" != \"$FLOOR\" ]; then\n                    echo \"PurgeStaleNvidiaDkms: on-disk $module module for kernel $kernel reports '$observed', expected $FLOOR; refusing to bake\" >&2\n                    exit 1\n                  fi\n                done\n              done\n      - name: InstallExperimentalOpenSsh\n        action: ExecuteBash\n        inputs:\n          commands:\n            - |\n              set -euo pipefail\n              curl -fsSL \"${OpensshExperimentalRpmUrl}\" -o /tmp/openssh-experimental.rpm\n              dnf install -y /tmp/openssh-experimental.rpm\n      - name: CleanNvmeResidue\n        action: ExecuteBash\n        inputs:\n          commands:\n            - |\n              set -euo pipefail\n              systemctl stop containerd.service containerd.socket 2>/dev/null || true\n              rm -rf /mnt/nvme/nvidia-rpm /mnt/nvme/containerd /mnt/nvme/containerd-state\n              if [ -d /mnt/nvme ]; then\n                if ! residue=\"$(find /mnt/nvme -mindepth 1 -print -quit)\"; then\n                  echo \"CleanNvmeResidue: cannot inspect /mnt/nvme; failing closed\" >&2\n                  exit 1\n                fi\n                if [ -n \"$residue\" ]; then\n                  echo \"CleanNvmeResidue: /mnt/nvme is not empty after cleanup\" >&2\n                  exit 1\n                fi\n              fi\n              if [ -e /var/lib/strimserver/driver-upgrade.state ]; then\n                echo \"CleanNvmeResidue: /var/lib/strimserver/driver-upgrade.state present; refusing to bake\" >&2\n                exit 1\n              fi"
+      Version: 1.0.0
+      Description: stackctl baked image component
+      Data: "name: stackctl-baked\ndescription: no-op placeholder\nschemaVersion: 1.0\nphases:\n  - name: build\n    steps:\n      - name: noop\n        action: ExecuteBash\n        inputs:\n          commands:\n            - echo ok\n"
   BakedImageRecipe:
     Type: AWS::ImageBuilder::ImageRecipe
     Condition: EnableImageBuilderCondition
     Properties:
       Name: !Sub ${ProjectName}-baked-image-recipe
-      # Bumped with the component: the ComponentArn change forces recipe
-      # replacement, and Image Builder refuses to recreate an existing
-      # Name/Version pair.
-      Version: 1.0.2
+      Version: 1.0.0
       ParentImage: !Ref ImageBuilderParentImage
       Components:
         - ComponentArn: !Ref BakedImageComponent
@@ -557,12 +541,8 @@ Resources:
     Properties:
       Name: !Sub ${ProjectName}-baked-image-infra
       InstanceProfileName: !Sub ${ProjectName}-baked-imagebuilder-instance-profile
-      # GPU-class instance: the bake compiles the NVIDIA driver floor for the
-      # image's kernels (DKMS) and enables nvidia-persistenced; a t3 bake
-      # produced an AMI that failed the launch-time driver-floor gate.
       InstanceTypes:
-        - g4dn.xlarge
-      TerminateInstanceOnFailure: true
+        - t3.micro
       SubnetId: !Ref PublicSubnet
       SecurityGroupIds:
         - !Ref SecurityGroup
