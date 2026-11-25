@@ -19,8 +19,9 @@ exports_files([
 exports_files(["strimserver.env"])
 
 # Secret-leakage / log-hygiene gate: no xtrace in the runtime or deploy
-# scripts, `umask 027` before sourcing the env file, no passphrase prints, and
-# sentinel runtime tests proving the Twitch key never reaches stdout/stderr.
+# scripts, `umask 027` before sourcing the env file, the SRT passphrase only in
+# the operator-requested encoder command, and sentinel runtime tests proving the
+# Twitch key never reaches stdout/stderr.
 sh_test(
     name = "security_hygiene_test",
     srcs = ["security_hygiene_test.sh"],

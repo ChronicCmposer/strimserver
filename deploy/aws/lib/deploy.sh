@@ -46,7 +46,7 @@ deploy_generate_srt_passphrase() {
 
 # Create or re-tighten <file> as a 0600 root:root SRT passphrase.
 #
-# The value is never printed. A re-run keeps the operator's existing passphrase
+# This helper never prints the value. A re-run keeps the operator's existing passphrase
 # (only re-tightening mode/owner); a missing/empty file is generated once.
 # A missing parent directory is created 0750 root:root, but an existing parent
 # (e.g. the /mnt/nvme mount root) is left untouched so the rest of the deploy

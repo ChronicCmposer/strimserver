@@ -412,7 +412,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable strimserver.service
 printf "systemd service file installed and enabled!\n"
 
-# Generate an SRT passphrase once (0600 root:root), never printing its value.
+# Generate an SRT passphrase once (0600 root:root); the final encoder command
+# prints the value for operator convenience.
 SRT_PASSPHRASE_FILE="$DEPLOY_ROOT/srt-passphrase"
 printf "preparing SRT passphrase...\n"
 deploy_write_srt_passphrase "$SRT_PASSPHRASE_FILE" sudo
@@ -584,7 +585,9 @@ else
    printf "DDNS disabled; the box is reachable by public IP only.\n"
    printf 'ssh %s "sudo systemctl start strimserver.service"\n' "$PUBLIC_IP"
 fi
-printf 'SRT passphrase: read it on the host from %s (0600)\n' "$SRT_PASSPHRASE_FILE"
+# Prefer the DDNS FQDN whenever it is available; fall back to the public IP.
+ENCODER_HOST="${DDNS_FQDN:-$PUBLIC_IP}"
+printf "configure-local-encoder.zsh --strimserver-host %s --passphrase %s\n\n" "$ENCODER_HOST" "$SRT_READ_PASSPHRASE"
 
 # --- success-only cleanup ----------------------------------------------------
 # Reached only after every deploy step above succeeded, so a failed run keeps

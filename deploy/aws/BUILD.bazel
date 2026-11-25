@@ -109,7 +109,7 @@ expand_template(
 # deploy_helpers_test.sh drives the pure helpers in lib/deploy.sh (passphrase
 # generation/containerd root+state/logs-dir) through a recording fake sudo, so
 # the suite needs no root. `deploy.sh` is a data input for the static
-# no-passphrase-print assertion.
+# intentional-passphrase-print assertion.
 sh_test(
     name = "deploy_helpers_test",
     srcs = ["deploy_helpers_test.sh"],

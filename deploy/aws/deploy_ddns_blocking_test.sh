@@ -227,6 +227,10 @@ ddns_enabled_happy_case() {
     bash -c '[ "$(grep -v "^$" "$1" | tail -1)" = "$(grep "^M2:" "$1")" ]' _ "$case_out"
   check "enabled: M1 precedes M2" \
     bash -c 'a=$(grep -n "^M1:" "$1" | cut -d: -f1); b=$(grep -n "^M2:" "$1" | cut -d: -f1); [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]' _ "$case_out"
+  check "enabled: prints the encoder command with the DDNS FQDN and passphrase" \
+    bash -c 'grep -qE "^configure-local-encoder\.zsh --strimserver-host strim\.example\.com --passphrase [A-Za-z0-9]{70}$" "$1"' _ "$case_out"
+  check "enabled: encoder command precedes M2" \
+    bash -c 'a=$(grep -n "^configure-local-encoder" "$1" | head -1 | cut -d: -f1); b=$(grep -n "^M2:" "$1" | cut -d: -f1); [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]' _ "$case_out"
 
   # The DDNS block (between M1 and M2) performs no setup work.
   sed -n '/^M1:/,/^M2:/p' "$case_out" >"$case_tmp/ddns_block.txt"
@@ -396,6 +400,10 @@ ddns_disabled_case() {
   check "disabled: exits 0" test "$rc" -eq 0
   check "disabled: prints the disabled M2 literally last" \
     bash -c '[ "$(grep -v "^$" "$1" | tail -1)" = "M2: deploy complete (DDNS disabled)" ]' _ "$case_out"
+  check "disabled: prints the encoder command with the public IP and passphrase" \
+    bash -c 'grep -qE "^configure-local-encoder\.zsh --strimserver-host 203\.0\.113\.10 --passphrase [A-Za-z0-9]{70}$" "$1"' _ "$case_out"
+  check "disabled: encoder command precedes M2" \
+    bash -c 'a=$(grep -n "^configure-local-encoder" "$1" | head -1 | cut -d: -f1); b=$(grep -n "^M2:" "$1" | cut -d: -f1); [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]' _ "$case_out"
   check "disabled: disables the refresh timer" \
     has_call 'sudo timeout -k 5 10 systemctl disable --now strim-ddns.timer'
   check "disabled: disables verify enablement" \

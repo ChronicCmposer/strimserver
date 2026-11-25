@@ -6,8 +6,8 @@
 # cover the three fresh-instance hazards:
 #   * the 70-character SRT passphrase generator must not SIGPIPE under
 #     `set -euo pipefail`;
-#   * the passphrase file must be 0600, never printed, and must not widen on a
-#     re-run;
+#   * the passphrase file must be 0600, never printed by the helper, and must
+#     not widen on a re-run;
 #   * the containerd root/state rewrite must read the existing config, fail
 #     closed when it is unreadable, and be idempotent;
 #   * the logs directory must reject a symlink, be 0755 (traversable by the
@@ -513,17 +513,21 @@ SHIM
 check "atomic replace creates its scratch file in the target directory" atomic_replace_same_directory
 
 # --- deploy.sh static check -------------------------------------------------
-deploy_sh_has_no_passphrase_print() {
+deploy_sh_has_only_intentional_passphrase_print() {
   [ -f "$deploy_sh" ] || return 1
-  # No printf/echo may emit the passphrase value or interpolate the variable.
-  # `$SRT_READ_PASSPHRASE` (the value) must not be printed; the `_FILE` path
-  # variable is fine.
-  ! grep -qE '(printf|echo)[^#]*\$\{?SRT_READ_PASSPHRASE([^_A-Za-z0-9]|$)' "$deploy_sh" || return 1
-  ! grep -qE 'passphrase: %s' "$deploy_sh" || return 1
+  # The operator explicitly wants the final encoder command printed once, with
+  # the DDNS FQDN preferred over the public IP. Any other print is a leak.
+  local intended_re='^[[:space:]]*printf "configure-local-encoder\.zsh --strimserver-host %s --passphrase %s\\n\\n" "\$ENCODER_HOST" "\$SRT_READ_PASSPHRASE"$'
+  [ "$(grep -cE "$intended_re" "$deploy_sh" || true)" -eq 1 ] || return 1
+  grep -qF 'ENCODER_HOST="${DDNS_FQDN:-$PUBLIC_IP}"' "$deploy_sh" || return 1
+  local extra
+  extra="$(grep -E '(printf|echo)[^#]*\$\{?SRT_READ_PASSPHRASE([^_A-Za-z0-9]|$)' "$deploy_sh" \
+    | grep -vE "$intended_re" || true)"
+  [ -z "$extra" ] || return 1
   # The refactor must source the helper library.
   grep -q 'lib/deploy.sh' "$deploy_sh"
 }
-check "deploy.sh has no passphrase print and sources lib/deploy.sh" deploy_sh_has_no_passphrase_print
+check "deploy.sh prints only the intentional encoder command and sources lib/deploy.sh" deploy_sh_has_only_intentional_passphrase_print
 
 if [ "$failures" -ne 0 ]; then
   printf '\n%d check(s) failed\n' "$failures" >&2

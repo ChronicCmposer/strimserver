@@ -783,9 +783,10 @@ bundled defaults (DDNS disabled) stay in effect.
    failing image and aborts before any downstream step. Because `strim-ddns` is
    imported here, the post-M1 DDNS block performs no imports.
 6. Generate a 70-char SRT read passphrase into `/mnt/nvme/srt-passphrase`
-   (root:root `0600`, created once and kept on re-run). The value is **never
-   printed**: the deploy log names the file only, and the operator reads it on
-   the host with `sudo cat /mnt/nvme/srt-passphrase`.
+   (root:root `0600`, created once and kept on re-run). The value is printed
+   only in the final `configure-local-encoder.zsh` command; the deploy log also
+   names the file, and the operator can re-read it on the host with
+   `sudo cat /mnt/nvme/srt-passphrase`.
 7. `fish-deploy.sh` — skipped loudly on aarch64 (pinned fish 4.3.1 is
    x86_64-only; fish is an operator convenience shell, not a dependency).
 8. Host tools are baked: `htop` and the experimental OpenSSH RPM ship in the
@@ -827,8 +828,8 @@ start clock:
   passes (or DDNS is disabled). With DDNS enabled it prints
   `M2: DDNS verified, deploy complete (<Ys>)`; when disabled it prints
   `M2: deploy complete (DDNS disabled)`. The M2 line is **literally the last
-  output line before `exit 0`** (the SRT-passphrase note and the success-only
-  payload cleanup precede it).
+  output line before `exit 0`** (the encoder command with the passphrase and the
+  success-only payload cleanup precede it).
 
 With DDNS enabled the DDNS block contains **only** the two bounded unit starts
 plus their journal follower — every install, render, reload, enable, and disable

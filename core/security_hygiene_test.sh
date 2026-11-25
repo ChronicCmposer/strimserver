@@ -6,11 +6,12 @@
 #     or deploy/aws/deploy.sh (set -x, set -o xtrace, PS4, BASH_XTRACEFD, exported
 #     SHELLOPTS/BASHOPTS)
 #   * both runtime scripts set `umask 027` before sourcing the env file
-#   * deploy.sh has no passphrase print, and pins the passphrase/env files to 0600
+#   * deploy.sh prints the passphrase only in the operator-requested encoder
+#     command, and pins the passphrase/env files to 0600
 # Runtime checks:
 #   * sentinel runtime test: a TWITCH_STREAM_KEY value never reaches stdout/stderr
 #     through the entrypoint or the transcode redaction wrapper
-#   * deploy_prepare_logs_directory creates 0750 dirs and 0640 files
+#   * deploy_prepare_logs_directory creates 0755 dirs and 0640 files
 #
 # Usage under Bazel (args from `$(location ...)`):
 #   security_hygiene_test.sh <transcode> <entrypoint.sh> <deploy.sh> <lib/deploy.sh>
@@ -88,12 +89,23 @@ check_umask_before_source "core/transcode.sh" "$TRANSCODE"
 
 # --- static: deploy secret surface ------------------------------------------
 if [ -f "$DEPLOY" ]; then
-    # A passphrase may be written to its 0600 file, but never to stdout/stderr/logs.
+    # The operator explicitly wants the final encoder command printed. That is
+    # the ONLY permitted passphrase print; every other print is a leak.
+    intended_print_re='^[[:space:]]*printf "configure-local-encoder\.zsh --strimserver-host %s --passphrase %s\\n\\n" "\$ENCODER_HOST" "\$SRT_READ_PASSPHRASE"$'
     passphrase_prints="$(grep -nE '^[[:space:]]*(printf|echo|print)[^#]*\$SRT_READ_PASSPHRASE([^_[:alnum:]]|$)' "$DEPLOY" \
         | grep -vE '> *"?\$SRT_READ_PASSPHRASE_FILE' || true)"
-    if [ -n "$passphrase_prints" ]; then
-        note_fail "deploy/aws/deploy.sh prints the SRT passphrase:"
-        printf '%s\n' "$passphrase_prints" >&2
+    unexpected_passphrase_prints="$(printf '%s\n' "$passphrase_prints" \
+        | grep -vE "^[0-9]+:${intended_print_re#^}" || true)"
+    if [ -n "$unexpected_passphrase_prints" ]; then
+        note_fail "deploy/aws/deploy.sh prints the SRT passphrase outside the encoder command:"
+        printf '%s\n' "$unexpected_passphrase_prints" >&2
+    fi
+    intended_print_count="$(grep -cE "$intended_print_re" "$DEPLOY" || true)"
+    if [ "$intended_print_count" -ne 1 ]; then
+        note_fail "deploy/aws/deploy.sh must print the encoder command exactly once (found $intended_print_count)"
+    fi
+    if ! grep -qF 'ENCODER_HOST="${DDNS_FQDN:-$PUBLIC_IP}"' "$DEPLOY"; then
+        note_fail "deploy/aws/deploy.sh does not prefer the DDNS FQDN for the encoder host"
     fi
 
     if ! grep -qE '(chmod[[:space:]]+0?600[^#]*SRT_READ_PASSPHRASE_FILE|install[[:space:]][^#]*-m[[:space:]]*0?600[^#]*SRT_READ_PASSPHRASE_FILE)' "$DEPLOY"; then
@@ -231,8 +243,8 @@ EOF
     ' _ "$DEPLOY_LIB" "$logs_dir" >/dev/null 2>"$tmp/helper.err"; then
         if [ -d "$logs_dir" ]; then
             dir_mode="$(stat -c %a "$logs_dir" 2>/dev/null || stat -f %Lp "$logs_dir")"
-            if [ "$dir_mode" != "750" ]; then
-                note_fail "deploy_prepare_logs_directory set dir mode $dir_mode (want 750)"
+            if [ "$dir_mode" != "755" ]; then
+                note_fail "deploy_prepare_logs_directory set dir mode $dir_mode (want 755)"
             fi
             file_mode="$(stat -c %a "$logs_dir/sample.log" 2>/dev/null || stat -f %Lp "$logs_dir/sample.log")"
             if [ "$file_mode" != "640" ]; then

@@ -224,8 +224,9 @@ gracefully on shutdown.
   GPU driver to the pinned `620.70.06` floor (fail-closed, no
   reboot; see `deploy/aws/lib/nvidia.sh`), installing the systemd
   unit, importing the OCI images into containerd, generating the
-  SRT passphrase (`0600`, never printed), and preparing
-  config/log/video directories (logs `0750`/`0640` root:root). The
+  SRT passphrase (`0600`; printed only in the final encoder command),
+  and preparing
+  config/log/video directories (logs `0755`/`0640` root:root). The
   on-box `deploy.sh` sources pure helpers from `lib/deploy.sh` for
   the passphrase, containerd root/state, and log-directory work.
 - Local encoder helper scripts for pointing the encoder at
@@ -1174,7 +1175,9 @@ deploy holds the lock; `129`/`130`/`143` signalled; `255` ssh connection lost
 `deploy/aws/README.md` for recovery.
 
 When setup completes, it prints the generated SRT passphrase
-and a suggested local encoder configuration command. Start
+inside a ready-to-run local encoder configuration command. The
+same value remains on the host in `/mnt/nvme/srt-passphrase`
+(`0600`) for re-runs and backups. Start
 and stop the systemd service with:
 
 ```bash
