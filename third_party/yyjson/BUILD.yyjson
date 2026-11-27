@@ -1,0 +1,39 @@
+# Overlaid BUILD for the upstream yyjson repo (applied as BUILD.bazel).
+#
+# The upstream 0.13.0 tarball ships the amalgamated sources under src/
+# (src/yyjson.c, src/yyjson.h), so this overlay references those paths.
+# This file executes inside the external yyjson repository, therefore every
+# self-label is //:... and the architecture config_settings are defined here
+# locally so the overlay builds standalone.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+config_setting(
+    name = "is_amd64_target",
+    constraint_values = ["@platforms//cpu:x86_64"],
+)
+
+config_setting(
+    name = "is_arm64_target",
+    constraint_values = ["@platforms//cpu:aarch64"],
+)
+
+cc_library(
+    name = "yyjson",
+    srcs = ["src/yyjson.c"],
+    hdrs = ["src/yyjson.h"],
+    includes = ["src"],
+    features = ["-supports_dynamic_linker"],
+    copts = [
+        "-std=gnu11",
+        "-DYYJSON_DISABLE_FAST_FP_CONV=1",
+        "-DYYJSON_DISABLE_NON_STANDARD=1",
+    ],
+    target_compatible_with = select({
+        "//:is_amd64_target": [],
+        "//:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
+)

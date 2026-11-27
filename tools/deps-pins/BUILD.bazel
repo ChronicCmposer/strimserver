@@ -18,6 +18,7 @@ go_test(
     srcs = [
         "ffmpeg_dist_test.go",
         "pins_test.go",
+        "third_party_archive_pins_test.go",
     ],
     tags = [
         "external",

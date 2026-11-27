@@ -1,0 +1,64 @@
+# Overlaid BUILD for the upstream libmicrohttpd repo (applied as BUILD.bazel).
+#
+# This file executes inside the external libmicrohttpd repository, so every
+# self-label is //:.... MHD_config.h is overlaid at the repo root by
+# MODULE.bazel's http_archive(files = ...), matching configure output.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+config_setting(
+    name = "is_amd64_target",
+    constraint_values = ["@platforms//cpu:x86_64"],
+)
+
+config_setting(
+    name = "is_arm64_target",
+    constraint_values = ["@platforms//cpu:aarch64"],
+)
+
+cc_library(
+    name = "libmicrohttpd",
+    srcs = [
+        "MHD_config.h",
+        "src/microhttpd/connection.c",
+        "src/microhttpd/daemon.c",
+        "src/microhttpd/internal.c",
+        "src/microhttpd/memorypool.c",
+        "src/microhttpd/mhd_compat.c",
+        "src/microhttpd/mhd_itc.c",
+        "src/microhttpd/mhd_mono_clock.c",
+        "src/microhttpd/mhd_panic.c",
+        "src/microhttpd/mhd_send.c",
+        "src/microhttpd/mhd_sockets.c",
+        "src/microhttpd/mhd_str.c",
+        "src/microhttpd/mhd_threads.c",
+        "src/microhttpd/reason_phrase.c",
+        "src/microhttpd/response.c",
+    ] + glob([
+        "src/microhttpd/*.h",
+        "src/include/*.h",
+    ]),
+    hdrs = ["src/include/microhttpd.h"],
+    # "." exposes MHD_config.h to MHD's own sources; "src/include" exposes
+    # the public header to consumers. "src/microhttpd" is intentionally NOT
+    # in includes: cc_library.includes propagates to every consumer, and a
+    # propagated external/libmicrohttpd/src/microhttpd would let main.c's
+    # `#include "internal.h"` resolve to MHD's private header. MHD's own
+    # sources find same-directory quoted headers without an -I path.
+    includes = [
+        ".",
+        "src/include",
+    ],
+    features = ["-supports_dynamic_linker"],
+    copts = [
+        "-DBUILDING_MHD_LIB=1",
+        "-std=gnu11",
+    ],
+    target_compatible_with = select({
+        "//:is_amd64_target": [],
+        "//:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
+)

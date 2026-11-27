@@ -35,8 +35,8 @@ cc_library(
     linkstatic = True,
     deps = [
         "//core/controller/c:http_lib",
-        "//third_party/libmicrohttpd:libmicrohttpd",
-        "//third_party/wslay:wslay",
+        "@libmicrohttpd//:libmicrohttpd",
+        "@wslay//:wslay",
     ],
 )
 
@@ -66,6 +66,6 @@ cc_test(
         # implementations are NOT linked yet (they land with core_lib in the
         # parallel Wave 1 core lane).
         "//core/controller/c:core_lib",
-        "//third_party/yyjson:yyjson",
+        "@yyjson//:yyjson",
     ],
 )

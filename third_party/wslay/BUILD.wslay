@@ -1,0 +1,49 @@
+# Overlaid BUILD for the upstream wslay repo (applied as BUILD.bazel).
+#
+# This file executes inside the external wslay repository, so every
+# self-label is //:.... config.h is overlaid at the repo root by
+# MODULE.bazel's http_archive(files = ...), matching configure output.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+config_setting(
+    name = "is_amd64_target",
+    constraint_values = ["@platforms//cpu:x86_64"],
+)
+
+config_setting(
+    name = "is_arm64_target",
+    constraint_values = ["@platforms//cpu:aarch64"],
+)
+
+cc_library(
+    name = "wslay",
+    srcs = [
+        "lib/wslay_event.c",
+        "lib/wslay_frame.c",
+        "lib/wslay_net.c",
+        "lib/wslay_queue.c",
+        "config.h",
+    ] + glob(["lib/*.h"]),
+    hdrs = [
+        "lib/includes/wslay/wslay.h",
+        "lib/includes/wslay/wslayver.h",
+    ],
+    includes = [
+        ".",
+        "lib",
+        "lib/includes",
+    ],
+    features = ["-supports_dynamic_linker"],
+    copts = [
+        "-DHAVE_CONFIG_H=1",
+        "-std=gnu11",
+    ],
+    target_compatible_with = select({
+        "//:is_amd64_target": [],
+        "//:is_arm64_target": ["@platforms//cpu:aarch64"],
+        "//conditions:default": ["@platforms//cpu:aarch64"],
+    }),
+)

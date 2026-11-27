@@ -7,7 +7,7 @@
   "kind_definition": "kind=version when `version` holds a version/tag/commit/date/AMI-id/epoch; kind=integrity when `version` holds a sha256/sha digest",
   "tracked_now_definition": "tracked_now=true when the CURRENT (committed-baseline) check-deps pipeline already surfaces this (source,file,name) pin: the extractorimpl extractors plus the native go list -u / pnpm outdated batch resolver registered in main.go. false = a new extractor (this wave: custom-rule parsing, extra script pins, .env, manifest, CI with: inputs, lockfile-transitive inventory, third_party pin.json) must surface it.",
   "by_source": {
-    "MODULE.bazel:http_archive": 22,
+    "MODULE.bazel:http_archive": 28,
     "MODULE.bazel:http_file": 4,
     "MODULE.bazel:bazel_dep": 14,
     "MODULE.bazel:single_version_override": 2,
@@ -40,8 +40,8 @@
     "lockfile transitive inventory": 4
   },
   "totals": {
-    "total": 193,
-    "tracked_now": 86,
+    "total": 199,
+    "tracked_now": 92,
     "to_add": 107,
     "sources": 31
   },
@@ -68,6 +68,12 @@
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist:sha256", "version": "121be6e00397e473a95d83c75f4fcd3819a6af3b0e1a50889cba43ab4fab6a27", "kind": "integrity", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist_arm64", "version": "1.21.3", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist_arm64:sha256", "version": "180a235374a548d9133cdd5e20f5dbd8b01317be1c86e0d7e66df585dc42ed6f", "kind": "integrity", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "yyjson", "version": "0.13.0", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "yyjson:sha256", "version": "34e0f62a2bc11ab20d601e8ca1cc2b2079503aa45119a19133d89d19b94a0fae", "kind": "integrity", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "libmicrohttpd", "version": "1.0.10", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "libmicrohttpd:sha256", "version": "04bfe8ef75db7d629a33de767599765cecadc56274a39822d5d081030d577685", "kind": "integrity", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "wslay", "version": "1.1.1", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "wslay:sha256", "version": "90ce68c6dfd614722d44fbb14563a3f6dacc68b548b20ae382ac4f4952c55268", "kind": "integrity", "tracked_now": true},
 
     {"source": "MODULE.bazel:http_file", "file": "MODULE.bazel", "name": "iperf3_apk", "version": "3.19.1-r1", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:http_file", "file": "MODULE.bazel", "name": "iperf3_apk:sha256", "version": "c8fa78ac30761d2dc47d5db7b9056a3b5cfdd565af173a4be1e4449a6b7fd664", "kind": "integrity", "tracked_now": true},

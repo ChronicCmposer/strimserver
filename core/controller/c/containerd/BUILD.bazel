@@ -18,7 +18,7 @@
 # headers (//core/controller/c:containerd_lib -> :core_lib for spec.h/cdi.h),
 # the core lane's implementation (//core/controller/c/core:core_lib — the
 # production strim_default_unix_env / spec constructors / stage-argv helper),
-# and the vendored yyjson (//third_party/yyjson:yyjson). Static musl for both
+# and the externalized yyjson (@yyjson//:yyjson). Static musl for both
 # arches (--config=amd64 / --config=arm64).
 #
 # Threading: the client serializes its shared-connection RPCs with a pthread
@@ -78,7 +78,7 @@ cc_library(
         "//core/controller/c:containerd_lib",
         "//core/controller/c:core_lib",
         "//core/controller/c/core:core_lib",
-        "//third_party/yyjson:yyjson",
+        "@yyjson//:yyjson",
     ],
 )
 

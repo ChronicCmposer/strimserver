@@ -24,8 +24,8 @@ from the **actual working tree** (no invented values).
 
 | Metric | Count |
 |---|---|
-| Total pin tokens | **193** |
-| Currently tracked (`tracked_now=yes`) | **86** |
+| Total pin tokens | **199** |
+| Currently tracked (`tracked_now=yes`) | **92** |
 | Newly to track (`tracked_now=no`) | **107** |
 | Distinct sources | **31** |
 
@@ -33,7 +33,7 @@ from the **actual working tree** (no invented values).
 
 | Source | Entries |
 |---|---|
-| MODULE.bazel:http_archive | 22 |
+| MODULE.bazel:http_archive | 28 |
 | MODULE.bazel:http_file | 4 |
 | MODULE.bazel:bazel_dep | 14 |
 | MODULE.bazel:single_version_override | 2 |
@@ -91,6 +91,12 @@ from the **actual working tree** (no invented values).
 | MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist:sha256 | 121be6e00397e473a95d83c75f4fcd3819a6af3b0e1a50889cba43ab4fab6a27 | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist_arm64 | 1.21.3 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist_arm64:sha256 | 180a235374a548d9133cdd5e20f5dbd8b01317be1c86e0d7e66df585dc42ed6f | integrity | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | yyjson | 0.13.0 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | yyjson:sha256 | 34e0f62a2bc11ab20d601e8ca1cc2b2079503aa45119a19133d89d19b94a0fae | integrity | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | libmicrohttpd | 1.0.10 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | libmicrohttpd:sha256 | 04bfe8ef75db7d629a33de767599765cecadc56274a39822d5d081030d577685 | integrity | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | wslay | 1.1.1 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | wslay:sha256 | 90ce68c6dfd614722d44fbb14563a3f6dacc68b548b20ae382ac4f4952c55268 | integrity | yes |
 | MODULE.bazel:http_file | `MODULE.bazel` | iperf3_apk | 3.19.1-r1 | version | yes |
 | MODULE.bazel:http_file | `MODULE.bazel` | iperf3_apk:sha256 | c8fa78ac30761d2dc47d5db7b9056a3b5cfdd565af173a4be1e4449a6b7fd664 | integrity | yes |
 | MODULE.bazel:http_file | `MODULE.bazel` | iperf3_apk_arm64 | 3.19.1-r1 | version | yes |

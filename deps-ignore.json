@@ -343,5 +343,23 @@
     "file": "core/controller/go.mod",
     "reason": "Pre-1.0 module (v0.4.0 -> v0.5.0 may break API); not imported by containerd v2.3.6 or by this controller's compiled graph, so controller tests cannot validate compatibility, and no containerd release coordinates it. Re-evaluate on a containerd release that ships capability v0.5.x.",
     "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/yyjson",
+    "file": "MODULE.bazel",
+    "reason": "yyjson source archive fetched by MODULE.bazel's http_archive; the same pin is audited through third_party/yyjson/pin.json, and no automated upstream resolver is wired. Re-evaluate when a yyjson resolver is added.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/libmicrohttpd",
+    "file": "MODULE.bazel",
+    "reason": "libmicrohttpd source archive fetched by MODULE.bazel's http_archive; the same pin is audited through third_party/libmicrohttpd/pin.json, and no automated upstream resolver is wired. Re-evaluate when a GNU FTP scraper is added.",
+    "until": "2027-06-30"
+  },
+  {
+    "id": "tool-binary/wslay",
+    "file": "MODULE.bazel",
+    "reason": "wslay source archive fetched by MODULE.bazel's http_archive; the same pin is audited through third_party/wslay/pin.json, and no automated upstream resolver is wired. Re-evaluate when a wslay resolver is added.",
+    "until": "2027-06-30"
   }
 ]

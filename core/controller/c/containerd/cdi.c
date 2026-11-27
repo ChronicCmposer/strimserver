@@ -2,8 +2,8 @@
  * cdi.c — CDI (Container Device Interface) resolution + OCI edit merge.
  *
  * Implements cdi.h. Scans the host CDI spec directories (/etc/cdi and
- * /var/run/cdi), parses every *.json with yyjson (vendored at
- * //third_party/yyjson), indexes devices by vendor/class, and resolves a
+ * /var/run/cdi), parses every *.json with yyjson (@yyjson//:yyjson,
+ * externalized source), indexes devices by vendor/class, and resolves a
  * "vendor/class=id" reference (e.g. "nvidia.com/gpu=0") into the merged
  * containerEdits (env, mounts, deviceNodes, hooks, additionalGIDs) that the
  * OCI spec builder applies — the same behavior as containerd's pkg/cdi.

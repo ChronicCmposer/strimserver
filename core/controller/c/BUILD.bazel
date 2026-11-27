@@ -172,7 +172,7 @@ cc_binary(
         "//core/controller/c/containerd:containerd_lib",
         "//core/controller/c/core:core_lib",
         "//core/controller/c/http:http_lib",
-        "//third_party/yyjson:yyjson",
+        "@yyjson//:yyjson",
     ],
 )
 
