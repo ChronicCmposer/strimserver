@@ -144,7 +144,7 @@ annotated-tag sequence, latest `v1.0.79`).
       not needed; the old key dies with the old stack.
 - [ ] Create `deploy/aws/.env` from `.env.example` with real values
       (`OPERATOR_CIDR=104.218.148.0/24`, `KEY_NAME`, `SSH_IDENTITY`,
-      `DDNS_DOMAIN`, `IMAGE_BUILDER_PARENT_IMAGE=ami-0198b63ccfac121e8`,
+      `DDNS_DOMAIN`, `IMAGE_BUILDER_PARENT_IMAGE=ami-0eb917ce8b21a5a71`,
       `INSTANCE_TYPES_AMD64=g4dn.xlarge`, `ROOT_VOLUME_SIZE=100`).
 - [ ] Lower the DDNS record TTL in Namecheap (still worthwhile: the record may
       be resolving to a stale IP until first launch).

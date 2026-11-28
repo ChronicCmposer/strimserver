@@ -8,8 +8,11 @@ from the **actual working tree** (no invented values).
 
 - `kind=version` → `version` holds a version / tag / commit / date / AMI-id /
   epoch.
-- `kind=integrity` → `version` holds a sha256/sha digest (names of digest rows
-  carry a `:sha256` suffix so `(source,file,name)` stays unique).
+- `kind=integrity` → `version` holds a sha256/sha digest. For `http_archive` and
+  `http_file` rows the digest name carries a `:sha256` suffix (e.g.
+  `cares:sha256`) so `(source,file,name)` stays unique; `oci.pull` digest rows
+  keep the base image name (e.g. `alpine`) with the `sha256:` digest in
+  `version`.
 - `tracked_now=yes` → the **current committed-baseline** check-deps pipeline
   already surfaces this pin (the `extractorimpl` extractors plus the native
   `go list -u` / `pnpm outdated` batch resolver in `main.go`).
@@ -24,8 +27,8 @@ from the **actual working tree** (no invented values).
 
 | Metric | Count |
 |---|---|
-| Total pin tokens | **199** |
-| Currently tracked (`tracked_now=yes`) | **92** |
+| Total pin tokens | **200** |
+| Currently tracked (`tracked_now=yes`) | **93** |
 | Newly to track (`tracked_now=no`) | **107** |
 | Distinct sources | **31** |
 
@@ -35,7 +38,7 @@ from the **actual working tree** (no invented values).
 |---|---|
 | MODULE.bazel:http_archive | 28 |
 | MODULE.bazel:http_file | 4 |
-| MODULE.bazel:bazel_dep | 14 |
+| MODULE.bazel:bazel_dep | 15 |
 | MODULE.bazel:single_version_override | 2 |
 | MODULE.bazel:apt.sources_list | 1 |
 | MODULE.bazel:apt.install | 13 |
@@ -70,9 +73,9 @@ from the **actual working tree** (no invented values).
 | source | file | name | version | kind | tracked_now |
 |---|---|---|---|---|---|
 | MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_amd64 | 2.15.0 | version | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_amd64:sha256 | ab90aeb7b066f92a33415b638a50fe5344bbb75a0d32ad30cc248d88f81032ab | integrity | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_amd64:sha256 | 9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_arm64 | 2.15.0 | version | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_arm64:sha256 | ee7ec5f3453d15ddf106fae5a4d6c71737712348a979d1fe9cd52ec7ea299bae | integrity | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | golangci_lint_linux_arm64:sha256 | b4d8f17068b35ee6060cc2f69a16fb48740d706fbba81661c318649c114a6998 | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | protobuf_c | 1.5.2 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | protobuf_c:sha256 | e2c86271873a79c92b58fef7ebf8de1aa0df4738347a8bd5d4e65a80a16d0d24 | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | protoc_linux_aarch64 | 36.2 | version | no |
@@ -86,11 +89,11 @@ from the **actual working tree** (no invented values).
 | MODULE.bazel:http_archive | `MODULE.bazel` | mbedtls | 3.6.7 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | mbedtls:sha256 | a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6 | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | cares | 1.34.9 | version | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | cares:sha256 | c222b6d681096f9444d2c4863d2c1174019e27cacca0a4a5c114d36dd7d7bf78 | integrity | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist | 1.21.3 | version | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist:sha256 | 121be6e00397e473a95d83c75f4fcd3819a6af3b0e1a50889cba43ab4fab6a27 | integrity | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist_arm64 | 1.21.3 | version | yes |
-| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist_arm64:sha256 | 180a235374a548d9133cdd5e20f5dbd8b01317be1c86e0d7e66df585dc42ed6f | integrity | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | cares:sha256 | 9364b70a12eb59a06830fb488d9357f90100dff0d98b23ea3593a183d43e6f2f | integrity | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist | 1.21.4 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist:sha256 | be0c05d9c8af8338116977e7f1c3fcb409fbf882075e5ab075cf8baad76a59d2 | integrity | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist_arm64 | 1.21.4 | version | yes |
+| MODULE.bazel:http_archive | `MODULE.bazel` | mediamtx_dist_arm64:sha256 | 47784081da54c0608ea4dc359f5cfb19880209434769c532b3ed3a67ea99c29d | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | yyjson | 0.13.0 | version | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | yyjson:sha256 | 34e0f62a2bc11ab20d601e8ca1cc2b2079503aa45119a19133d89d19b94a0fae | integrity | yes |
 | MODULE.bazel:http_archive | `MODULE.bazel` | libmicrohttpd | 1.0.10 | version | yes |
@@ -103,7 +106,7 @@ from the **actual working tree** (no invented values).
 | MODULE.bazel:http_file | `MODULE.bazel` | iperf3_apk_arm64:sha256 | da2a7b7eaaa0fc1427897999578cef7deb9b283fe220ac0ae38f80e1fc584199 | integrity | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | platforms | 1.1.0 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | bazel_skylib | 1.9.2 | version | yes |
-| MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_shell | 0.8.0 | version | yes |
+| MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_shell | 0.10.0 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_cc | 0.2.28 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | hermetic_cc_toolchain | 4.3.0 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_go | 0.65.0 | version | yes |
@@ -115,6 +118,7 @@ from the **actual working tree** (no invented values).
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | aspect_rules_js | 3.6.1 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | aspect_rules_ts | 3.10.1 | version | yes |
 | MODULE.bazel:bazel_dep | `MODULE.bazel` | rules_nodejs | 6.7.7 | version | yes |
+| MODULE.bazel:bazel_dep | `MODULE.bazel` | stackctl | 0.2.0 | version | yes |
 | MODULE.bazel:single_version_override | `MODULE.bazel` | aspect_bazel_lib | 2.22.5 | version | yes |
 | MODULE.bazel:single_version_override | `MODULE.bazel` | bazel_lib | 3.8.0 | version | yes |
 | MODULE.bazel:apt.sources_list | `MODULE.bazel` | debian | 20261104T000000Z | version | yes |
@@ -192,7 +196,7 @@ from the **actual working tree** (no invented values).
 | scripts/upload-artifact.sh | `scripts/upload-artifact.sh` | EXPECTED_SHA256 | 3531de59f1964dd849780d3d247993a1f2028e950873b47ccc05df154eda7e21 | integrity | no |
 | deploy/aws/fish-deploy.sh | `deploy/aws/fish-deploy.sh` | fish | 4.9.3 | version | no |
 | deploy/aws/fish-deploy.sh | `deploy/aws/fish-deploy.sh` | fish-4.9.3-linux-x86_64.tar.xz:sha256 | 8f643d10ad1abb0ef7072764c01ceb5cf61b2d373fda400cf60f0bad69b7e095 | integrity | no |
-| deploy/aws/.env.example | `deploy/aws/.env.example` | dlami | ami-0198b63ccfac121e8 | version | yes |
+| deploy/aws/.env.example | `deploy/aws/.env.example` | dlami | ami-0eb917ce8b21a5a71 | version | yes |
 | third_party/pin.json | `third_party/libmicrohttpd/pin.json` | libmicrohttpd | 1.0.10 | version | no |
 | third_party/pin.json | `third_party/libmicrohttpd/pin.json` | libmicrohttpd:sha256 | 04bfe8ef75db7d629a33de767599765cecadc56274a39822d5d081030d577685 | integrity | no |
 | third_party/pin.json | `third_party/wslay/pin.json` | wslay | 1.1.1 | version | no |
@@ -229,7 +233,7 @@ from the **actual working tree** (no invented values).
 | streamdeck manifest | `tools/streamdeck-plugin/com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl` | Software.MinimumVersion | 6.6 | version | no |
 | streamdeck manifest | `tools/streamdeck-plugin/com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl` | Nodejs.Version | 24 | version | no |
 | streamdeck manifest | `tools/streamdeck-plugin/com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl` | OS.mac.MinimumVersion | 13 | version | no |
-| package.json | `tools/streamdeck-plugin/package.json` | packageManager | pnpm@12.18.0 | version | yes |
+| package.json | `tools/streamdeck-plugin/package.json` | packageManager | pnpm@12.23.0 | version | yes |
 | package.json | `tools/streamdeck-plugin/package.json` | engines.node | >=26 | version | no |
 | package.json | `tools/streamdeck-plugin/package.json` | dependencies:@elgato/streamdeck | ^2 | version | yes |
 | package.json | `tools/streamdeck-plugin/package.json` | devDependencies:@rollup/plugin-commonjs | 29.0.3 | version | yes |
@@ -253,7 +257,7 @@ from the **actual working tree** (no invented values).
 | CI uses | `.github/workflows/deps-check.yml` | actions/setup-node | v7.0.0 | version | yes |
 | CI uses | `.github/workflows/deps-check.yml` | bazelbuild/setup-bazelisk | v3 | version | yes |
 | CI uses | `.github/workflows/controller-ci.yml` | bazelbuild/setup-bazelisk | v3 | version | yes |
-| toolchain | `.bazelversion` | Bazel | 9.3.2 | version | yes |
+| toolchain | `.bazelversion` | Bazel | 9.3.3 | version | yes |
 | toolchain | `tools/streamdeck-plugin/.nvmrc` | Node | 26.13.1 | version | yes |
 | toolchain | `core/controller/go.mod` | Go | 1.27.4 | version | yes |
 | core/controller/go.mod require | `core/controller/go.mod` | github.com/coder/websocket | v1.8.15 | version | yes |
@@ -264,7 +268,7 @@ from the **actual working tree** (no invented values).
 | core/controller/go.mod require | `core/controller/go.mod` | github.com/opencontainers/image-spec | v1.1.1 | version | yes |
 | core/controller/go.mod require | `core/controller/go.mod` | github.com/opencontainers/runtime-spec | v1.3.0 | version | yes |
 | core/controller/go.mod require | `core/controller/go.mod` | google.golang.org/protobuf | v1.36.12-0.20260120151049-f2248ac996af | version | yes |
-| lockfile transitive inventory | `core/controller/go.sum` | go.sum:transitive-module-pairs | 132 | version | no |
+| lockfile transitive inventory | `core/controller/go.sum` | go.sum:transitive-module-pairs | 128 | version | no |
 | lockfile transitive inventory | `tools/streamdeck-plugin/pnpm-lock.yaml` | pnpm-lock:transitive-packages | 53 | version | no |
 | lockfile transitive inventory | `MODULE.bazel.lock` | MODULE.bazel.lock:bcr-registry-modules | 49 | version | no |
 | lockfile transitive inventory | `MODULE.bazel.lock` | MODULE.bazel.lock:bcr-registry-file-hashes | 281 | version | no |
@@ -272,7 +276,7 @@ from the **actual working tree** (no invented values).
 ## Notes / caveats
 
 - **Transitive inventory counts are approximate** (as specified): `go.sum`
-  yields 132 unique `(module,version)` pairs not covered by a `require`;
+  yields 128 unique `(module,version)` pairs not covered by a `require`;
   `pnpm-lock.yaml` yields 53 package instances not declared by an importer;
   `MODULE.bazel.lock` records 49 distinct BCR modules across 281 registry file
   hashes. The wave extractors (`gosum.go`, `pnpmlock.go`) emit these as

@@ -1,7 +1,7 @@
 {
   "schema": "strimserver-check-deps/expected-pins/v1",
   "repo": "strimserver",
-  "generated": "2026-10-29",
+  "generated": "2026-11-28",
   "generated_from": "actual working tree (values read from the files, never invented)",
   "grouping": "entries are grouped/sorted by `source`; `by_source` indexes the group sizes",
   "kind_definition": "kind=version when `version` holds a version/tag/commit/date/AMI-id/epoch; kind=integrity when `version` holds a sha256/sha digest",
@@ -9,7 +9,7 @@
   "by_source": {
     "MODULE.bazel:http_archive": 28,
     "MODULE.bazel:http_file": 4,
-    "MODULE.bazel:bazel_dep": 14,
+    "MODULE.bazel:bazel_dep": 15,
     "MODULE.bazel:single_version_override": 2,
     "MODULE.bazel:apt.sources_list": 1,
     "MODULE.bazel:apt.install": 13,
@@ -40,16 +40,16 @@
     "lockfile transitive inventory": 4
   },
   "totals": {
-    "total": 199,
-    "tracked_now": 92,
+    "total": 200,
+    "tracked_now": 93,
     "to_add": 107,
     "sources": 31
   },
   "entries": [
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "golangci_lint_linux_amd64", "version": "2.15.0", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "golangci_lint_linux_amd64:sha256", "version": "ab90aeb7b066f92a33415b638a50fe5344bbb75a0d32ad30cc248d88f81032ab", "kind": "integrity", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "golangci_lint_linux_amd64:sha256", "version": "9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea", "kind": "integrity", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "golangci_lint_linux_arm64", "version": "2.15.0", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "golangci_lint_linux_arm64:sha256", "version": "ee7ec5f3453d15ddf106fae5a4d6c71737712348a979d1fe9cd52ec7ea299bae", "kind": "integrity", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "golangci_lint_linux_arm64:sha256", "version": "b4d8f17068b35ee6060cc2f69a16fb48740d706fbba81661c318649c114a6998", "kind": "integrity", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "protobuf_c", "version": "1.5.2", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "protobuf_c:sha256", "version": "e2c86271873a79c92b58fef7ebf8de1aa0df4738347a8bd5d4e65a80a16d0d24", "kind": "integrity", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "protoc_linux_aarch64", "version": "36.2", "kind": "version", "tracked_now": false},
@@ -63,11 +63,11 @@
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mbedtls", "version": "3.6.7", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mbedtls:sha256", "version": "a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6", "kind": "integrity", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "cares", "version": "1.34.9", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "cares:sha256", "version": "c222b6d681096f9444d2c4863d2c1174019e27cacca0a4a5c114d36dd7d7bf78", "kind": "integrity", "tracked_now": true},
-    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist", "version": "1.21.3", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist:sha256", "version": "121be6e00397e473a95d83c75f4fcd3819a6af3b0e1a50889cba43ab4fab6a27", "kind": "integrity", "tracked_now": true},
-    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist_arm64", "version": "1.21.3", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist_arm64:sha256", "version": "180a235374a548d9133cdd5e20f5dbd8b01317be1c86e0d7e66df585dc42ed6f", "kind": "integrity", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "cares:sha256", "version": "9364b70a12eb59a06830fb488d9357f90100dff0d98b23ea3593a183d43e6f2f", "kind": "integrity", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist", "version": "1.21.4", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist:sha256", "version": "be0c05d9c8af8338116977e7f1c3fcb409fbf882075e5ab075cf8baad76a59d2", "kind": "integrity", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist_arm64", "version": "1.21.4", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "mediamtx_dist_arm64:sha256", "version": "47784081da54c0608ea4dc359f5cfb19880209434769c532b3ed3a67ea99c29d", "kind": "integrity", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "yyjson", "version": "0.13.0", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "yyjson:sha256", "version": "34e0f62a2bc11ab20d601e8ca1cc2b2079503aa45119a19133d89d19b94a0fae", "kind": "integrity", "tracked_now": true},
     {"source": "MODULE.bazel:http_archive", "file": "MODULE.bazel", "name": "libmicrohttpd", "version": "1.0.10", "kind": "version", "tracked_now": true},
@@ -82,7 +82,7 @@
 
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "platforms", "version": "1.1.0", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "bazel_skylib", "version": "1.9.2", "kind": "version", "tracked_now": true},
-    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_shell", "version": "0.8.0", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_shell", "version": "0.10.0", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_cc", "version": "0.2.28", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "hermetic_cc_toolchain", "version": "4.3.0", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_go", "version": "0.65.0", "kind": "version", "tracked_now": true},
@@ -94,6 +94,7 @@
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "aspect_rules_js", "version": "3.6.1", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "aspect_rules_ts", "version": "3.10.1", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "rules_nodejs", "version": "6.7.7", "kind": "version", "tracked_now": true},
+    {"source": "MODULE.bazel:bazel_dep", "file": "MODULE.bazel", "name": "stackctl", "version": "0.2.0", "kind": "version", "tracked_now": true},
 
     {"source": "MODULE.bazel:single_version_override", "file": "MODULE.bazel", "name": "aspect_bazel_lib", "version": "2.22.5", "kind": "version", "tracked_now": true},
     {"source": "MODULE.bazel:single_version_override", "file": "MODULE.bazel", "name": "bazel_lib", "version": "3.8.0", "kind": "version", "tracked_now": true},
@@ -190,7 +191,7 @@
     {"source": "deploy/aws/fish-deploy.sh", "file": "deploy/aws/fish-deploy.sh", "name": "fish", "version": "4.9.3", "kind": "version", "tracked_now": false},
     {"source": "deploy/aws/fish-deploy.sh", "file": "deploy/aws/fish-deploy.sh", "name": "fish-4.9.3-linux-x86_64.tar.xz:sha256", "version": "8f643d10ad1abb0ef7072764c01ceb5cf61b2d373fda400cf60f0bad69b7e095", "kind": "integrity", "tracked_now": false},
 
-    {"source": "deploy/aws/.env.example", "file": "deploy/aws/.env.example", "name": "dlami", "version": "ami-0198b63ccfac121e8", "kind": "version", "tracked_now": true},
+    {"source": "deploy/aws/.env.example", "file": "deploy/aws/.env.example", "name": "dlami", "version": "ami-0eb917ce8b21a5a71", "kind": "version", "tracked_now": true},
 
     {"source": "third_party/pin.json", "file": "third_party/libmicrohttpd/pin.json", "name": "libmicrohttpd", "version": "1.0.10", "kind": "version", "tracked_now": false},
     {"source": "third_party/pin.json", "file": "third_party/libmicrohttpd/pin.json", "name": "libmicrohttpd:sha256", "version": "04bfe8ef75db7d629a33de767599765cecadc56274a39822d5d081030d577685", "kind": "integrity", "tracked_now": false},
@@ -231,7 +232,7 @@
     {"source": "streamdeck manifest", "file": "tools/streamdeck-plugin/com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl", "name": "Nodejs.Version", "version": "24", "kind": "version", "tracked_now": false},
     {"source": "streamdeck manifest", "file": "tools/streamdeck-plugin/com.chroniccmposer.strimserver.sdPlugin/manifest.json.tpl", "name": "OS.mac.MinimumVersion", "version": "13", "kind": "version", "tracked_now": false},
 
-    {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "packageManager", "version": "pnpm@12.18.0", "kind": "version", "tracked_now": true},
+    {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "packageManager", "version": "pnpm@12.23.0", "kind": "version", "tracked_now": true},
     {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "engines.node", "version": ">=26", "kind": "version", "tracked_now": false},
     {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "dependencies:@elgato/streamdeck", "version": "^2", "kind": "version", "tracked_now": true},
     {"source": "package.json", "file": "tools/streamdeck-plugin/package.json", "name": "devDependencies:@rollup/plugin-commonjs", "version": "29.0.3", "kind": "version", "tracked_now": true},
@@ -258,7 +259,7 @@
     {"source": "CI uses", "file": ".github/workflows/deps-check.yml", "name": "bazelbuild/setup-bazelisk", "version": "v3", "kind": "version", "tracked_now": true},
     {"source": "CI uses", "file": ".github/workflows/controller-ci.yml", "name": "bazelbuild/setup-bazelisk", "version": "v3", "kind": "version", "tracked_now": true},
 
-    {"source": "toolchain", "file": ".bazelversion", "name": "Bazel", "version": "9.3.2", "kind": "version", "tracked_now": true},
+    {"source": "toolchain", "file": ".bazelversion", "name": "Bazel", "version": "9.3.3", "kind": "version", "tracked_now": true},
     {"source": "toolchain", "file": "tools/streamdeck-plugin/.nvmrc", "name": "Node", "version": "26.13.1", "kind": "version", "tracked_now": true},
     {"source": "toolchain", "file": "core/controller/go.mod", "name": "Go", "version": "1.27.4", "kind": "version", "tracked_now": true},
 
@@ -271,7 +272,7 @@
     {"source": "core/controller/go.mod require", "file": "core/controller/go.mod", "name": "github.com/opencontainers/runtime-spec", "version": "v1.3.0", "kind": "version", "tracked_now": true},
     {"source": "core/controller/go.mod require", "file": "core/controller/go.mod", "name": "google.golang.org/protobuf", "version": "v1.36.12-0.20260120151049-f2248ac996af", "kind": "version", "tracked_now": true},
 
-    {"source": "lockfile transitive inventory", "file": "core/controller/go.sum", "name": "go.sum:transitive-module-pairs", "version": "132", "kind": "version", "tracked_now": false},
+    {"source": "lockfile transitive inventory", "file": "core/controller/go.sum", "name": "go.sum:transitive-module-pairs", "version": "128", "kind": "version", "tracked_now": false},
     {"source": "lockfile transitive inventory", "file": "tools/streamdeck-plugin/pnpm-lock.yaml", "name": "pnpm-lock:transitive-packages", "version": "53", "kind": "version", "tracked_now": false},
     {"source": "lockfile transitive inventory", "file": "MODULE.bazel.lock", "name": "MODULE.bazel.lock:bcr-registry-modules", "version": "49", "kind": "version", "tracked_now": false},
     {"source": "lockfile transitive inventory", "file": "MODULE.bazel.lock", "name": "MODULE.bazel.lock:bcr-registry-file-hashes", "version": "281", "kind": "version", "tracked_now": false}

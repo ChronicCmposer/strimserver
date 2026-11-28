@@ -4,10 +4,11 @@ This runbook walks the staged cutover from the existing **amd64** deployment to
 the **arm64** (`g5g.2xlarge`) deployment, and is the reference for anyone
 re-deploying later. The build produces one self-contained deployment bundle per
 controller language and architecture (the Go controller and the C controller,
-each for amd64 and arm64); `deploy/aws/launch` picks an architecture-aware AMI
-from the instance type, so the operator's cutover decision is just **which
-bundle URL and instance type to point at**. Section 7 lists blockers that gate
-the production cutover — read it before any arm64 launch.
+each for amd64 and arm64); under `AMI_POLICY=baked` the runtime AMI is whatever
+`/strimserver/ami/baked/latest` publishes, baked from the
+`IMAGE_BUILDER_PARENT_IMAGE` DLAMI, so the operator's cutover decision is just
+**which bundle URL and instance type to point at**. Section 7 lists blockers that
+gate the production cutover — read it before any arm64 launch.
 
 ## 1. Architecture overview
 
@@ -16,7 +17,7 @@ the production cutover — read it before any arm64 launch.
 | Instance | `g4dn.xlarge` (x86_64 + T4) / `g6.xlarge` (L4) | `g5g.2xlarge` (Graviton2 + T4G) |
 | CPU ISA | x86_64 | arm64, armv8.2-a (Neoverse N1) |
 | GPU / gencode | T4 `sm_75` (L4 `sm_89` on g6) | T4G `sm_75` — same gencode as T4 |
-| AMI | Pinned x86_64 AL2023 NVIDIA DLAMI 20261106 (`DEFAULT_AMI_ID`, us-east-2) — **pins the AMI, not the installed driver** (see §1.1) | arm64 AL2023 NVIDIA DLAMI via the SSM float `.../arm64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id` — also does not pin the installed driver |
+| AMI | Baked runtime AMI: whatever `/strimserver/ami/baked/latest` publishes (Image Builder parent `ami-0eb917ce8b21a5a71`, us-east-2 AL2023 NVIDIA DLAMI 20261120) — **pins the bake input, not the installed driver** (see §1.1) | Baked runtime AMI from the same `/strimserver/ami/baked/latest` parameter (arm64 bake) — also does not pin the installed driver |
 | Driver (installed) | `nvidia-open 620.70.06` floor, enforced by `setup-gpu.sh`; the staged-version validator covers `kmod-nvidia-open*` and exempts only the policy-only `nvidia-driver-selinux` (see §1.1) | same `620.70.06` floor via `nvidia-open-620.70.06-1.amzn2023.noarch` (arm64 caveat in §1.1) |
 | Controller in image | Go controller (the oracle), pure-Go static `linux/amd64` | Go controller (the oracle), pure-Go static `linux/arm64`; the alternate asm build (`//core/controller/alternate/asm:controller_asm`) is explicit/manual |
 
@@ -34,11 +35,16 @@ property. Both architectures require driver **620.70.06** with CUDA 13.5:
 | GPU / gencode | `sm_75` (T4 and T4G) |
 | GSP firmware | **required** — `gsp_tu10x.bin`; never set `NVreg_EnableGpuFirmware=0` |
 
-The AMI is pinned for **determinism** (`DEFAULT_AMI_ID`,
-`ami-0198b63ccfac121e8`), but the AMI pin does **not** pin the installed driver:
-the DLAMI ships whatever driver its build carried, and the arm64 `/latest`
-float likewise does not pin it. `setup-gpu.sh` (via `lib/nvidia.sh`) enforces the
-floor: it detects the installed driver, upgrades to the pinned NEVRA when below
+Two distinct AMIs matter here, and they are **not** the same image. The
+**runtime** AMI is whatever `/strimserver/ami/baked/latest` publishes; under
+`AMI_POLICY=baked` every launch reads that parameter, so a fresh bake becomes
+the running image without an operator-side pin. The **Image Builder parent** is
+fixed by `IMAGE_BUILDER_PARENT_IMAGE` = `ami-0eb917ce8b21a5a71` (us-east-2
+AL2023 NVIDIA DLAMI 20261120) — it pins the bake *input*, never the runtime
+image. Neither the parent nor the baked output pins the installed driver: the
+DLAMI ships whatever driver its build carried. `setup-gpu.sh` (via
+`lib/nvidia.sh`) enforces the floor: it detects the installed driver, upgrades
+to the pinned NEVRA when below
 the floor, never downgrades, confirms `gsp_tu10x.bin`, and **fails closed** if
 the floor cannot be met.
 
@@ -611,32 +617,24 @@ set -a; . deploy/aws/.env; set +a
      --query 'Images[0].BlockDeviceMappings[*].Ebs.VolumeSize'
    ```
 
-### 4.2 amd64 path — unchanged
+### 4.2 amd64 path — baked runtime
 
-```sh
-deploy/aws/launch --type g4dn.xlarge --wait
-# or: deploy/aws/launch --type g6.xlarge --wait
-```
-
-The amd64 AMI stays the pinned `DEFAULT_AMI_ID`
-(`ami-0198b63ccfac121e8`, us-east-2 AL2023 NVIDIA DLAMI 20261106) so the containerd
-runtime is deterministic across launches. For a non-us-east-2 region, set
-`AMI_ID` or `DLAMI_SSM_PARAM` explicitly.
+Under `AMI_POLICY=baked` the runtime AMI is whatever
+`/strimserver/ami/baked/latest` publishes, so the containerd runtime follows the
+current bake rather than a hand-pinned id. The Image Builder pipeline bakes that
+image from `IMAGE_BUILDER_PARENT_IMAGE` = `ami-0eb917ce8b21a5a71` (us-east-2
+AL2023 NVIDIA DLAMI 20261120) — the parent pins the bake input, not the runtime
+AMI. `DEFAULT_AMI_ID` is **obsolete**: it no longer selects the runtime image.
+The cutover from the legacy `deploy/aws/launch` entrypoint to the
+baked-image/stackctl flow is covered by `deploy/aws/STACKCTL_MIGRATION.md`.
 
 ### 4.3 arm64 path
 
-```sh
-INSTANCE_TYPE=g5g.2xlarge deploy/aws/launch --wait
-# ARCH is inferred from the type family; ARCH=arm64 is an explicit override
-```
-
-AMI selection order in `launch`: `AMI_ID` → explicit `DLAMI_SSM_PARAM` → the
-architecture default. The arm64 default resolves the SSM float
-(`resolve:ssm:<arm64 param>`), so no pin goes stale. `--wait` prints the public
-IP, cleans up stale `/etc/hosts` entries left by pre-DDNS launches (the old
-`/etc/hosts` upsert is gone — the box is bootstrapped by its raw public IP
-because `strim.example.com` doesn't resolve until `deploy.sh` registers it),
-polls SSH, and hands off to `setup_strimserver` (execve).
+Under `AMI_POLICY=baked` the arm64 runtime AMI is whatever
+`/strimserver/ami/baked/latest` publishes for the arm64 bake; the Image Builder
+parent stays fixed by `IMAGE_BUILDER_PARENT_IMAGE`. `ARCH=arm64` (or
+`ARCH=both`) selects the arm64 instance types. The baked-image/stackctl launch
+flow is documented in `deploy/aws/STACKCTL_MIGRATION.md`.
 
 `DEPLOYMENT_SRC` is the primary source selector (`s3://`, `http(s)://`, or a
 local path). When `DEPLOYMENT` is unset, `setup_strimserver` derives the on-box
@@ -1080,8 +1078,9 @@ for that case; do not pre-install `kernel-devel`/`kernel-headers` by name (see
 **Rollback:** the deployment tar is fully self-contained — the three image tars
 plus config/scripts live inside it, with no external runtime dependencies. To
 revert, point `DEPLOYMENT_SRC` at the previously published bundle (keeping
-`DEPLOYMENT_SHA256` authoritative), then relaunch the previous architecture,
-e.g. `deploy/aws/launch --type g4dn.xlarge --wait`. Tear down the abandoned
+`DEPLOYMENT_SHA256` authoritative), then relaunch the previous architecture
+(see `deploy/aws/STACKCTL_MIGRATION.md` for the current launch path). Tear down
+the abandoned
 instance with `deploy/aws/terminate -y` (matches the `Project` tag). This
 reverts the application only; driver rollback has a separate artifact
 requirement, covered next.

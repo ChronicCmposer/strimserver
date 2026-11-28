@@ -255,13 +255,13 @@ gracefully on shutdown.
 | FFmpeg CUDA `-gencode` | `arch=compute_75,code=sm_75` (Turing / T4 class) | Baked into the prebuilt artifact; see the EC2 note below |
 | Runtime Debian snapshot | `20261104T000000Z` | The single Debian snapshot for both the prebuilt FFmpeg artifact (`DEBIAN_SNAPSHOT` in `tools/ffmpeg-dist/{build,publish}.sh`) and the scratch-image runtime debs (`@trixie` rules_distroless apt extension in `MODULE.bazel`); see FFmpeg reproducibility below |
 | Go toolchain | `go 1.27.4` (rules_go `go_sdk` from `core/controller/go.mod`) | Controller build and test targets |
-| [Bazel](https://bazel.build) | `9.3.2` (pinned in `.bazelversion`; launched via Bazelisk) | Build system for every target; downloads the pinned Go, Node.js, and other toolchains |
-| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.21.3`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
+| [Bazel](https://bazel.build) | `9.3.3` (pinned in `.bazelversion`; launched via Bazelisk) | Build system for every target; downloads the pinned Go, Node.js, and other toolchains |
+| [MediaMTX](https://github.com/bluenviron/mediamtx) | `v1.21.4`, Linux amd64 release tarball (`@mediamtx_dist` http_archive) | SRT ingest, RTSP routing, Unix MPEG-TS source, recording hooks, and process hooks |
 | `libfdk-aac` | `libfdk-aac2t64` (Debian trixie package from `@trixie`) | AAC encode support through FFmpeg (`libfdk-aac.so.2` in the ffmpeg image) |
 | busybox / `gettext-base` (`envsubst`) | Debian trixie packages from `@trixie` | Shell + tools for the scratch ffmpeg runtime image |
 | iperf3 | `3.19.1-r1` `.apk` (`@iperf3_apk` http_file) on alpine `3.23.3` (digest-pinned `@alpine_linux_amd64` oci.pull) | Optional bandwidth-test image |
 | Node.js | `26.13.1` (from `tools/streamdeck-plugin/.nvmrc` via rules_nodejs `node_version_from_nvmrc`) | Stream Deck plugin build |
-| [pnpm](https://pnpm.io) | `12.18.0` (from `tools/streamdeck-plugin/package.json` `packageManager`) | Stream Deck plugin dependency install and build |
+| [pnpm](https://pnpm.io) | `12.23.0` (from `tools/streamdeck-plugin/package.json` `packageManager`) | Stream Deck plugin dependency install and build |
 
 > Note: the FFmpeg build currently compiles for `sm_75`
 > (Turing, e.g. the T4 in `g4dn` instances). To run the
@@ -937,12 +937,15 @@ schema and policy are in
 The intended deployment target is an AWS EC2 GPU instance
 running an Amazon Linux 2023 Deep Learning AMI (DLAMI), with
 the instance's NVMe ephemeral storage mounted at `/mnt/nvme`.
-For amd64 the `launch` helper is **pinned** to the 20261106
-Amazon Linux 2023 DLAMI (arm64 floats via the SSM `/latest`
-parameter); set `AMI_ID` or `DLAMI_SSM_PARAM` to override the
-pin. The helper defaults to `g6.xlarge`; pick an instance whose
-GPU matches the FFmpeg `-gencode` target (see the build note
-above) or adjust the target accordingly.
+Under the default `AMI_POLICY=baked`, every runtime instance launches
+from whatever `/strimserver/ami/baked/latest` publishes, so a fresh
+bake becomes the runtime AMI without pinning an instance id. Image
+Builder bakes that AMI from the parent fixed by
+`IMAGE_BUILDER_PARENT_IMAGE` = `ami-0eb917ce8b21a5a71` (us-east-2
+AL2023 NVIDIA DLAMI 20261120); the parent pins the bake input, not the
+installed driver. Pick an instance whose GPU matches the FFmpeg
+`-gencode` target (see the build note above) or adjust the target
+accordingly.
 
 Expected target characteristics:
 
@@ -1068,8 +1071,8 @@ set -a
 . deploy/aws/.env
 set +a
 
-# Launch, overriding the instance type. --wait prints the public IP + next steps.
-deploy/aws/launch --type g6.xlarge --wait
+# Launching is now handled by stackctl; see
+# deploy/aws/STACKCTL_MIGRATION.md for the launch procedure.
 ```
 
 `DEPLOYMENT_SRC` in `.env` selects where the box fetches the

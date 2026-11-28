@@ -214,3 +214,14 @@ go_test(
     data = glob(["testdata/**"]),
     embed = [":check_deps_lib"],
 )
+
+# Value oracle for the committed expected-pins fixture. Self-contained file
+# (D-25). external/no-sandbox: it reads the live workspace (not runfiles) via
+# repoRoot("") and must re-execute rather than serve a cached result.
+go_test(
+    name = "expected_pins_values_test",
+    srcs = ["expected_pins_values_test.go"],
+    data = ["testdata/expected-pins.json"],
+    embed = [":check_deps_lib"],
+    tags = ["external", "no-sandbox"],
+)

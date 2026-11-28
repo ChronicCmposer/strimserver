@@ -77,8 +77,8 @@ var pins = []pin{
 		name: "mediamtx-artifacts",
 		file: "MODULE.bazel",
 		needles: []string{
-			"mediamtx_v1.21.3_linux_amd64.tar.gz",
-			"mediamtx_v1.21.3_linux_arm64.tar.gz",
+			"mediamtx_v1.21.4_linux_amd64.tar.gz",
+			"mediamtx_v1.21.4_linux_arm64.tar.gz",
 		},
 	},
 	{
@@ -109,9 +109,9 @@ var pins = []pin{
 		needles: []string{"DEBIAN_SNAPSHOT:-20261104T000000Z}"},
 	},
 	{
-		name:    "aws-launch-ami",
-		file:    "deploy/aws/launch",
-		needles: []string{"ami-0198b63ccfac121e8"},
+		name:    "dlami-parent-image",
+		file:    "deploy/aws/.env.example",
+		needles: []string{"ami-0eb917ce8b21a5a71"},
 	},
 	{
 		// Option B driver floor. lib/nvidia.sh is authored by the driver-core
@@ -186,7 +186,7 @@ var pins = []pin{
 	{
 		name:    "streamdeck-package-manager",
 		file:    "tools/streamdeck-plugin/package.json",
-		needles: []string{`"packageManager": "pnpm@12.18.0"`},
+		needles: []string{`"packageManager": "pnpm@12.23.0"`},
 	},
 	{
 		name:    "go-winio",
@@ -199,9 +199,9 @@ var pins = []pin{
 	// failure identifies both the file and the exact value still missing.
 
 	{
-		name:    "bazelversion-9.3.2",
+		name:    "bazelversion-9.3.3",
 		file:    ".bazelversion",
-		needles: []string{"9.3.2"},
+		needles: []string{"9.3.3"},
 	},
 	{
 		name:    "nvmrc-26.13.1",
@@ -240,9 +240,9 @@ var pins = []pin{
 		needles: []string{"github.com/containerd/containerd/v2 v2.3.6"},
 	},
 	{
-		name:    "controller-gomod-klauspost-compress-v1.20.4",
+		name:    "controller-gomod-klauspost-compress-v1.20.5",
 		file:    "core/controller/go.mod",
-		needles: []string{"github.com/klauspost/compress v1.20.4"},
+		needles: []string{"github.com/klauspost/compress v1.20.5"},
 	},
 	{
 		name:    "controller-gomod-otel-v1.47.0",
