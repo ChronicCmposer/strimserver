@@ -77,8 +77,10 @@ func sortSemverDescending(versions []string) []string {
 }
 
 // tagIsOnMain reports whether the named tag's commit is reachable from the
-// repo's main branch, per the GitHub compare API: status "ahead" means the
-// tag carries commits main does not have, i.e. the tag is NOT on main.
+// repo's main branch. The compare URL is compare/{tag}...main (base=tag,
+// head=main), so "ahead" means main is ahead of the tag, i.e. the tag is an
+// ancestor of main and therefore on it. "behind" is the inverse (the tag has
+// commits main lacks), and "diverged" means they share no linear history.
 func tagIsOnMain(f *common.Fetcher, owner, repo, tag string) bool {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/compare/%s...main", owner, repo, tag)
 	data, err := f.FetchBytes(url)
@@ -93,7 +95,7 @@ func tagIsOnMain(f *common.Fetcher, owner, repo, tag string) bool {
 	if err := json.Unmarshal(data, &compare); err != nil {
 		return false
 	}
-	return compare.Status == "behind" || compare.Status == "identical"
+	return compare.Status == "ahead" || compare.Status == "identical"
 }
 
 // GitOverrideResolve builds the resolver for a bazel-module dependency whose

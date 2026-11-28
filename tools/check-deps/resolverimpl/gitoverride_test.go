@@ -87,18 +87,20 @@ func TestGitOverrideResolveLatestOnMain(t *testing.T) {
 	}
 }
 
-// TestGitOverrideResolveSkipsOffMainTags pins the on-main requirement: the
-// newest tag lives on a release branch (compare status "ahead"), so the
-// resolver walks down to the next tag, which is behind main and reported.
+// TestGitOverrideResolveSkipsOffMainTags pins the on-main requirement under
+// the real compare/{tag}...main semantics: the newest tag lives on a release
+// branch, so GitHub reports main as "behind" that tag (the tag is off-main);
+// the resolver walks down to the next tag, which main is "ahead" of (the tag
+// is an ancestor, hence on main) and reports it.
 func TestGitOverrideResolveSkipsOffMainTags(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/ChronicCmposer/stackctl/tags":
 			w.Write([]byte(`[{"name":"v0.2.0"},{"name":"v0.1.25"}]`))
 		case "/repos/ChronicCmposer/stackctl/compare/v0.2.0...main":
-			w.Write([]byte(`{"status":"ahead"}`))
-		case "/repos/ChronicCmposer/stackctl/compare/v0.1.25...main":
 			w.Write([]byte(`{"status":"behind"}`))
+		case "/repos/ChronicCmposer/stackctl/compare/v0.1.25...main":
+			w.Write([]byte(`{"status":"ahead"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -117,6 +119,41 @@ func TestGitOverrideResolveSkipsOffMainTags(t *testing.T) {
 	}
 	if vi.Version != "0.1.25" {
 		t.Errorf("GitOverrideResolve version = %q, want 0.1.25 (v0.2.0 is off-main)", vi.Version)
+	}
+}
+
+// TestGitOverrideResolveAcceptsAncestorTag is the regression for the inverted
+// compare semantics that made every on-main tag look off-main. It mirrors the
+// live stackctl case: compare/v0.2.0...main returns "ahead" because main is
+// one commit ahead of the tag, and merge_base_commit equals base_commit, so
+// v0.2.0 is unambiguously an ancestor of main and must be reported as latest.
+func TestGitOverrideResolveAcceptsAncestorTag(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/ChronicCmposer/stackctl/tags":
+			w.Write([]byte(`[{"name":"v0.2.0"},{"name":"v0.1.25"}]`))
+		case "/repos/ChronicCmposer/stackctl/compare/v0.2.0...main":
+			w.Write([]byte(`{"status":"ahead","ahead_by":1,"behind_by":0,` +
+				`"base_commit":{"sha":"34badacf99bf69e7fc772126561df5d4003e339f"},` +
+				`"merge_base_commit":{"sha":"34badacf99bf69e7fc772126561df5d4003e339f"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	f := newResolversTestFetcher(ts)
+	vi := GitOverrideResolve(f)(common.Dependency{
+		Category: common.CategoryBazelModule,
+		Name:     "stackctl",
+		Version:  "0.2.0",
+		Source:   "https://github.com/ChronicCmposer/stackctl.git",
+	})
+	if vi.Err != nil {
+		t.Fatalf("GitOverrideResolve: %v", vi.Err)
+	}
+	if vi.Version != "0.2.0" {
+		t.Errorf("GitOverrideResolve version = %q, want 0.2.0 (v0.2.0 is on main)", vi.Version)
 	}
 }
 
